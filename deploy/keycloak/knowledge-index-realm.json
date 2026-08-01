@@ -1,0 +1,424 @@
+{
+  "realm": "knowledge-index",
+  "enabled": true,
+  "displayName": "Knowledge Index",
+  "registrationAllowed": false,
+  "loginWithEmailAllowed": true,
+  "groups": [
+    {
+      "name": "knowledge-index-admins"
+    },
+    {
+      "name": "knowledge-index-users"
+    },
+    {
+      "name": "ma-team"
+    },
+    {
+      "name": "litigation"
+    }
+  ],
+  "users": [
+    {
+      "username": "admin@example.com",
+      "enabled": true,
+      "email": "admin@example.com",
+      "emailVerified": true,
+      "firstName": "Development",
+      "lastName": "Admin",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "lm-dev-only",
+          "temporary": false
+        }
+      ],
+      "groups": [
+        "/knowledge-index-admins"
+      ]
+    },
+    {
+      "username": "ma.associate",
+      "enabled": true,
+      "email": "ma.associate@kanzlei.example",
+      "emailVerified": true,
+      "firstName": "MA",
+      "lastName": "Associate",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "lm-dev-only",
+          "temporary": false
+        }
+      ],
+      "groups": [
+        "/knowledge-index-users",
+        "/ma-team"
+      ]
+    },
+    {
+      "username": "lit.user@example.com",
+      "enabled": true,
+      "email": "lit.user@example.com",
+      "emailVerified": true,
+      "firstName": "Litigation",
+      "lastName": "User",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "lm-dev-only",
+          "temporary": false
+        }
+      ],
+      "groups": [
+        "/knowledge-index-users",
+        "/litigation"
+      ]
+    },
+    {
+      "username": "corp.user@example.com",
+      "enabled": true,
+      "email": "corp.user@example.com",
+      "emailVerified": true,
+      "firstName": "Corporate",
+      "lastName": "User",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "lm-dev-only",
+          "temporary": false
+        }
+      ],
+      "groups": [
+        "/knowledge-index-users",
+        "/ma-team"
+      ]
+    }
+  ],
+  "clients": [
+    {
+      "clientId": "knowledge-index-ui",
+      "name": "Knowledge Index UI",
+      "enabled": true,
+      "publicClient": false,
+      "secret": "lm-dev-only",
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": true,
+      "attributes": {
+        "client.use.lightweight.access.token.enabled": "false"
+      },
+      "redirectUris": [
+        "http://localhost:8090/oauth2/callback",
+        "http://127.0.0.1:8090/oauth2/callback",
+        "https://*/oauth2/callback"
+      ],
+      "webOrigins": [
+        "+"
+      ],
+      "defaultClientScopes": [
+        "basic",
+        "profile",
+        "email",
+        "groups",
+        "knowledge-index-api"
+      ]
+    },
+    {
+      "clientId": "knowledge-index",
+      "name": "Knowledge Index API",
+      "enabled": true,
+      "bearerOnly": true
+    },
+    {
+      "clientId": "knowledge-index-mcp",
+      "name": "Knowledge Index MCP",
+      "description": "Pre-registered client for MCP clients that do not self-register.",
+      "enabled": true,
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": true,
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "post.logout.redirect.uris": "+",
+        "client.use.lightweight.access.token.enabled": "false"
+      },
+      "redirectUris": [
+        "http://localhost:6274/oauth/callback",
+        "http://127.0.0.1:6274/oauth/callback",
+        "http://localhost:33418/callback",
+        "http://127.0.0.1:33418/callback",
+        "https://claude.ai/api/mcp/auth_callback",
+        "https://claude.com/api/mcp/auth_callback"
+      ],
+      "webOrigins": [
+        "+"
+      ],
+      "defaultClientScopes": [
+        "basic",
+        "profile",
+        "email",
+        "groups",
+        "knowledge-index-mcp"
+      ]
+    }
+  ],
+  "clientScopes": [
+    {
+      "name": "basic",
+      "description": "Claims every access token needs. Keycloak 25 moved `sub` out of the token core into this scope; without it the appliance sees a token with no subject and refuses it.",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "false"
+      },
+      "protocolMappers": [
+        {
+          "name": "sub",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-sub-mapper",
+          "consentRequired": false,
+          "config": {
+            "access.token.claim": "true",
+            "introspection.token.claim": "true"
+          }
+        },
+        {
+          "name": "auth_time",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usersessionmodel-note-mapper",
+          "consentRequired": false,
+          "config": {
+            "user.session.note": "AUTH_TIME",
+            "claim.name": "auth_time",
+            "jsonType.label": "long",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "introspection.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "name": "knowledge-index-mcp",
+      "description": "Binds an access token to this appliance's MCP endpoint. Requesting it is what makes the token usable here \u2014 and unusable anywhere else.",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "true",
+        "consent.screen.text": "Search the firm's Knowledge Index as you"
+      },
+      "protocolMappers": [
+        {
+          "name": "mcp-resource-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.custom.audience": "http://localhost:8000/mcp",
+            "id.token.claim": "false",
+            "access.token.claim": "true",
+            "introspection.token.claim": "true",
+            "userinfo.token.claim": "false"
+          }
+        }
+      ]
+    },
+    {
+      "name": "knowledge-index-api",
+      "description": "Audience for the appliance's REST API, which is a different resource from the MCP endpoint and is named separately.",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "false"
+      },
+      "protocolMappers": [
+        {
+          "name": "knowledge-index-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "knowledge-index",
+            "id.token.claim": "false",
+            "access.token.claim": "true",
+            "introspection.token.claim": "true",
+            "userinfo.token.claim": "false"
+          }
+        }
+      ]
+    },
+    {
+      "name": "groups",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true"
+      },
+      "protocolMappers": [
+        {
+          "name": "groups",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-group-membership-mapper",
+          "consentRequired": false,
+          "config": {
+            "full.path": "false",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "claim.name": "groups",
+            "userinfo.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "name": "profile",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true"
+      },
+      "protocolMappers": [
+        {
+          "name": "username",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "consentRequired": false,
+          "config": {
+            "user.attribute": "username",
+            "claim.name": "preferred_username",
+            "jsonType.label": "String",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
+        },
+        {
+          "name": "full name",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-full-name-mapper",
+          "consentRequired": false,
+          "config": {
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "name": "email",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true"
+      },
+      "protocolMappers": [
+        {
+          "name": "email",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "consentRequired": false,
+          "config": {
+            "user.attribute": "email",
+            "claim.name": "email",
+            "jsonType.label": "String",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
+        },
+        {
+          "name": "email verified",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-property-mapper",
+          "consentRequired": false,
+          "config": {
+            "user.attribute": "emailVerified",
+            "claim.name": "email_verified",
+            "jsonType.label": "boolean",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
+        }
+      ]
+    }
+  ],
+  "defaultDefaultClientScopes": [
+    "basic",
+    "profile",
+    "email",
+    "roles",
+    "groups",
+    "web-origins",
+    "acr"
+  ],
+  "defaultOptionalClientScopes": [
+    "knowledge-index-mcp"
+  ],
+  "components": {
+    "org.keycloak.services.clientregistration.policy.ClientRegistrationPolicy": [
+      {
+        "name": "Trusted Hosts",
+        "providerId": "trusted-hosts",
+        "subType": "anonymous",
+        "config": {
+          "host-sending-registration-request-must-match": [
+            "false"
+          ],
+          "client-uris-must-match": [
+            "true"
+          ],
+          "trusted-hosts": [
+            "localhost",
+            "127.0.0.1",
+            "claude.ai",
+            "claude.com",
+            "opencode.ai"
+          ]
+        }
+      },
+      {
+        "name": "Consent Required",
+        "providerId": "consent-required",
+        "subType": "anonymous",
+        "config": {}
+      },
+      {
+        "name": "Full Scope Disabled",
+        "providerId": "scope",
+        "subType": "anonymous",
+        "config": {}
+      },
+      {
+        "name": "Max Clients Limit",
+        "providerId": "max-clients",
+        "subType": "anonymous",
+        "config": {
+          "max-clients": [
+            "200"
+          ]
+        }
+      },
+      {
+        "name": "Allowed Client Scopes",
+        "providerId": "allowed-client-templates",
+        "subType": "anonymous",
+        "config": {
+          "allow-default-scopes": [
+            "true"
+          ]
+        }
+      },
+      {
+        "name": "Allowed Protocol Mapper Types",
+        "providerId": "allowed-protocol-mappers",
+        "subType": "anonymous",
+        "config": {
+          "allowed-protocol-mapper-types": [
+            "oidc-full-name-mapper",
+            "oidc-sha256-pairwise-sub-mapper",
+            "oidc-usermodel-property-mapper",
+            "oidc-usermodel-attribute-mapper",
+            "oidc-address-mapper"
+          ]
+        }
+      }
+    ]
+  }
+}

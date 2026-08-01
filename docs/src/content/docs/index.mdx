@@ -1,0 +1,40 @@
+---
+title: LegalMemory
+description: Open-source, on-prem knowledge index for law firms — a continuously synced shadow index over the document estate, exposed through MCP.
+template: splash
+hero:
+  tagline: An open-source, on-prem knowledge index for law firms. LegalMemory builds a continuously synced shadow index over your document estate — without changing a single source file — and exposes it to AI tools through MCP, with your firm's permissions enforced on every query.
+  actions:
+    - text: Quick start
+      link: /getting-started/quickstart/
+      icon: right-arrow
+    - text: What is LegalMemory?
+      link: /getting-started/introduction/
+      variant: minimal
+---
+
+import { Card, CardGrid } from "@astrojs/starlight/components";
+
+<CardGrid stagger>
+  <Card title="Connect your sources" icon="puzzle">
+    SharePoint, OneDrive, Google Drive, Clio, local folders and more — read-only,
+    with source permissions mirrored into the index. See the
+    [connector guides](/connectors/).
+  </Card>
+  <Card title="Structured, not just embedded" icon="document">
+    An insertion pipeline classifies every document into a matter, links versions
+    and related documents, extracts typed metadata and decision rationale — then
+    indexes it for hybrid retrieval. See the
+    [insertion pipeline](/product/pipeline/).
+  </Card>
+  <Card title="Permissions first" icon="seti:lock">
+    Identity → project grants → mirrored source ACLs → search scope. Deny wins,
+    unknown ACLs fail closed, and every query is filtered before ranking. See
+    [access control](/product/access-control/).
+  </Card>
+  <Card title="Open to your tools" icon="rocket">
+    Identity-bound MCP tools for search, matters, decisions and billing, plus a
+    REST API — every call under the caller's own permissions. See
+    [external access](/product/external-access/).
+  </Card>
+</CardGrid>

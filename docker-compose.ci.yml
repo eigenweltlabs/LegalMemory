@@ -1,0 +1,27 @@
+# CI-only overrides. Two memory settings, nothing else.
+#
+# The round-trip job deliberately runs docker-compose.yml as it ships — the ownership of
+# the snapshot repository, the read-only mounts the app container backs up through and the
+# init container that makes both readable are the things under test, so overriding any of
+# them would test a stack no firm runs.
+#
+# What does have to change is size. docker-compose.yml is sized for a workstation; a
+# GitHub-hosted runner is 4 vCPU and 16 GB, and it has to hold OpenSearch, Docling,
+# LiteLLM, Langfuse, Keycloak, Hatchet, two Postgres servers and the appliance at once.
+# Neither setting below touches anything a backup reads.
+
+services:
+  docling:
+    environment:
+      # Four local workers each hold their own converter. Nothing in this job converts a
+      # document — Docling is up because the app container will not start without it and
+      # because tests/conftest.py's live_stack fixture skips the whole suite when it is
+      # missing — so one worker that answers /health is the entire requirement.
+      DOCLING_SERVE_ENG_LOC_NUM_WORKERS: "1"
+
+  opensearch:
+    environment:
+      # The estate this job indexes is two documents. A 1 GB heap on a runner that is also
+      # running Docling and a JVM-hosted Keycloak buys nothing and risks the OOM killer
+      # taking a container down mid-snapshot, which would read as a backup fault.
+      OPENSEARCH_JAVA_OPTS: -Xms512m -Xmx512m

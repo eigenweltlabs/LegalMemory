@@ -1,0 +1,454 @@
+# OAuth2 settings per connector — data, not code.
+#
+# Endpoints, scopes, PKCE requirements and credential placement per provider. Adding a
+# provider means adding an entry here; no Python changes.
+#
+# Every deployment is bring-your-own-client: the firm registers its own app and
+# supplies client_id/client_secret per connection. No secrets belong in this file.
+#
+# oauth_type:
+#   with_refresh          refresh_token stays valid across refreshes
+#   with_rotating_refresh each refresh returns a NEW refresh_token; losing it is fatal
+#   access_only           no refresh; the connection needs periodic re-authorization
+#
+# `scope` here is the read-only minimum for building a shadow index. Do not widen it:
+# these grants are read against a law firm's entire document estate.
+#
+# `registration` is documentation, never behaviour: the admin UI renders it as the
+# "How to register this app" panel in the connect modal (GET /api/connectors/<name>/fields).
+# It deliberately does NOT repeat the scopes — the panel lists `scope` above, so the
+# instructions cannot drift from what the appliance actually asks the provider for.
+# Every key is optional; a provider that omits one simply renders one step fewer.
+
+# One console, one set of instructions: Microsoft's six connectors are registered
+# identically and only differ in the scopes generated from their own entry.
+registration_guides:
+  entra: &entra_registration
+    console: Microsoft Entra admin center
+    console_url: https://entra.microsoft.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade
+    create: Identity → Applications → App registrations → New registration.
+    app_type: >-
+      Under "Supported account types" choose "Accounts in this organizational directory
+      only (single tenant)". The app is only ever used by this firm, and a multi-tenant
+      registration widens who could consent to it.
+    redirect_field: >-
+      Add it under "Redirect URI" with platform type "Web" (not "Single-page
+      application" — that platform refuses a client secret).
+    scope_label: Delegated Microsoft Graph permissions
+    scope_location: >-
+      API permissions → Add a permission → Microsoft Graph → Delegated permissions.
+      Entra lists them without the https://graph.microsoft.com/ prefix, so search for the
+      part after the last slash; offline_access sits under "OpenId permissions".
+    consent: >-
+      Press "Grant admin consent for <your tenant>" on the API permissions page. This is
+      a separate button and it is the step most registrations miss: until a tenant
+      administrator presses it every permission row reads "Not granted", and sign-in
+      either fails or returns an empty estate.
+    secret: >-
+      Certificates & secrets → Client secrets → New client secret. Copy the **Value**
+      column, not **Secret ID** — they look alike, only Value is the secret, and Value is
+      shown once and masked as soon as you leave the page. The client id is on Overview,
+      as "Application (client) ID".
+    account: >-
+      Sign in with a work or school account. This appliance authorizes against Microsoft's
+      /organizations endpoint, which rejects personal Microsoft accounts (outlook.com,
+      live.com, hotmail.com) with "unauthorized_client".
+    note: >-
+      The connection sees exactly what the account that signs in can see. Sign in as an
+      account with access to the estate you intend to index, not as a personal admin
+      account with none.
+
+  google: &google_registration
+    console: Google Cloud console
+    console_url: https://console.cloud.google.com/apis/credentials
+    create: >-
+      Pick (or create) the project that will own the app, then APIs & Services →
+      Credentials → Create credentials → OAuth client ID → Application type "Web
+      application".
+    app_type: >-
+      On the OAuth consent screen set User type to "Internal", so only accounts in the
+      firm's own Workspace can use it. Internal apps skip Google's verification review,
+      which the Drive and Gmail scopes below would otherwise require.
+    redirect_field: Add it under "Authorized redirect URIs" on the OAuth client.
+    scope_label: OAuth scopes
+    scope_location: >-
+      OAuth consent screen → Data access → Add or remove scopes. Paste each URL below;
+      Google groups them as "sensitive" or "restricted", which is expected for a
+      read-only document connector.
+    consent: >-
+      No separate consent button, but if the Workspace restricts third-party access
+      (Admin console → Security → API controls → App access control), an administrator
+      has to mark this client id "Trusted". Otherwise the sign-in returns access_denied.
+    secret: >-
+      The client secret is shown in the "OAuth client created" dialog and in the client's
+      detail page; the JSON download holds both values. The client id ends in
+      .apps.googleusercontent.com.
+    account: >-
+      Sign in with a Workspace account in the firm's domain. An Internal app rejects
+      personal gmail.com accounts.
+    note: >-
+      The connection sees exactly what the account that signs in can see, including
+      shared drives that account is a member of.
+
+providers:
+  # ---------------------------------------------------------------- Microsoft 365
+  # /organizations, not /common: /common also accepts personal Microsoft accounts,
+  # and a single-tenant app registration is rejected there with
+  # "unauthorized_client: not enabled for consumers". No firm indexes its matter
+  # estate from a consumer account, so the work/school endpoint is the right default.
+  # A firm that pins one tenant replaces `organizations` with its tenant id.
+  sharepoint_online:
+    oauth_type: with_rotating_refresh
+    authorize_url: https://login.microsoftonline.com/organizations/oauth2/v2.0/authorize
+    token_url: https://login.microsoftonline.com/organizations/oauth2/v2.0/token
+    # Group.Read.All + GroupMember.Read.All + Directory.Read.All are what make ethical
+    # walls work: without them Entra group memberships cannot be expanded and every
+    # group-shared document stays invisible under fail-closed permissions.
+    scope: >-
+      offline_access
+      https://graph.microsoft.com/User.Read.All
+      https://graph.microsoft.com/Group.Read.All
+      https://graph.microsoft.com/GroupMember.Read.All
+      https://graph.microsoft.com/Directory.Read.All
+      https://graph.microsoft.com/Sites.Read.All
+      https://graph.microsoft.com/Files.Read.All
+    additional_authorize_params:
+      response_mode: query
+    registration: *entra_registration
+
+  onedrive:
+    oauth_type: with_refresh
+    authorize_url: https://login.microsoftonline.com/organizations/oauth2/v2.0/authorize
+    token_url: https://login.microsoftonline.com/organizations/oauth2/v2.0/token
+    # Files.Read.All covers the drive; Group.Read.All lets the permission mirror
+    # resolve group grants returned by /permissions; User.Read.All resolves the
+    # id-only identity sets Graph returns for app-created shares, which would
+    # otherwise mirror as user:id:<guid> and match no caller.
+    scope: >-
+      offline_access
+      https://graph.microsoft.com/User.Read
+      https://graph.microsoft.com/User.Read.All
+      https://graph.microsoft.com/Files.Read.All
+      https://graph.microsoft.com/Group.Read.All
+    additional_authorize_params:
+      response_mode: query
+    # Repeated on the token request so a refresh re-mints the full consented set:
+    # without it Microsoft scopes refreshed tokens to what the original sign-in
+    # asked for, and a connection authorized before a scope was added could never
+    # gain it short of a manual re-authorization.
+    additional_token_params:
+      scope: >-
+        offline_access
+        https://graph.microsoft.com/User.Read
+        https://graph.microsoft.com/User.Read.All
+        https://graph.microsoft.com/Files.Read.All
+        https://graph.microsoft.com/Group.Read.All
+    registration: *entra_registration
+
+  clio:
+    oauth_type: with_refresh
+    # EU instance: Clio runs isolated regions (US app.clio.com, EU eu.app.clio.com,
+    # CA, AU) and tokens are region-bound. This provider entry serves the EU region;
+    # other regions need their own entry when a deployment asks for one.
+    authorize_url: https://eu.app.clio.com/oauth/authorize
+    token_url: https://eu.app.clio.com/oauth/token
+    # Clio has no scope parameter: what the token may read is fixed by the checkboxes
+    # on the developer-portal application itself.
+    scope: ""
+    registration:
+      console: Clio developer portal
+      console_url: https://developers.clio.com
+      create: Developer Apps → New App.
+      app_type: >-
+        Sign up for the trial in the SAME region this appliance will read from —
+        Clio tokens are region-bound and an app registered against the US instance
+        cannot authorize an EU firm.
+      redirect_field: >-
+        Enter it as the app's Redirect URI exactly. Clio rejects "localhost";
+        use the 127.0.0.1 form of this appliance's callback.
+      scope_label: Application permissions (checkboxes, not OAuth scopes)
+      scope_location: >-
+        On the app itself, tick Read for Documents, Matters, Users, Custom fields,
+        Contacts and General — and nothing else. No Write permission is ever needed:
+        this appliance mirrors; it must not be able to change who sees a document.
+      secret: >-
+        The app page shows the Client ID ("App key") and Client Secret ("App secret")
+        after saving.
+      account: >-
+        Authorize with a dedicated standard user whose matter visibility is exactly
+        what the firm wants searchable. Restricted matters that user cannot open are
+        never fetched at all.
+    additional_authorize_params: {}
+
+  teams:
+    oauth_type: with_rotating_refresh
+    authorize_url: https://login.microsoftonline.com/organizations/oauth2/v2.0/authorize
+    token_url: https://login.microsoftonline.com/organizations/oauth2/v2.0/token
+    scope: >-
+      offline_access
+      https://graph.microsoft.com/User.Read
+      https://graph.microsoft.com/Team.ReadBasic.All
+      https://graph.microsoft.com/Channel.ReadBasic.All
+      https://graph.microsoft.com/ChannelMessage.Read.All
+      https://graph.microsoft.com/ChannelMember.Read.All
+      https://graph.microsoft.com/Chat.Read
+      https://graph.microsoft.com/ChatMessage.Read
+      https://graph.microsoft.com/TeamMember.Read.All
+    additional_authorize_params:
+      response_mode: query
+    registration: *entra_registration
+
+  outlook_mail:
+    oauth_type: with_rotating_refresh
+    authorize_url: https://login.microsoftonline.com/organizations/oauth2/v2.0/authorize
+    token_url: https://login.microsoftonline.com/organizations/oauth2/v2.0/token
+    scope: >-
+      offline_access
+      https://graph.microsoft.com/User.Read
+      https://graph.microsoft.com/MailboxFolder.Read
+      https://graph.microsoft.com/Mail.Read
+    additional_authorize_params:
+      response_mode: query
+    registration: *entra_registration
+
+  outlook_calendar:
+    oauth_type: with_rotating_refresh
+    authorize_url: https://login.microsoftonline.com/organizations/oauth2/v2.0/authorize
+    token_url: https://login.microsoftonline.com/organizations/oauth2/v2.0/token
+    scope: >-
+      offline_access
+      https://graph.microsoft.com/User.Read
+      https://graph.microsoft.com/Calendars.Read
+      https://graph.microsoft.com/Calendars.Read.Shared
+    additional_authorize_params:
+      response_mode: query
+    registration: *entra_registration
+
+  onenote:
+    oauth_type: with_rotating_refresh
+    authorize_url: https://login.microsoftonline.com/organizations/oauth2/v2.0/authorize
+    token_url: https://login.microsoftonline.com/organizations/oauth2/v2.0/token
+    scope: >-
+      offline_access
+      https://graph.microsoft.com/User.Read
+      https://graph.microsoft.com/Notes.Read
+    additional_authorize_params:
+      response_mode: query
+    registration: *entra_registration
+
+  # ---------------------------------------------------------------- Google Workspace
+  # Google only issues a refresh token when access_type=offline AND the user is shown
+  # the consent screen, hence prompt=consent on every authorize.
+  google_drive:
+    oauth_type: with_refresh
+    authorize_url: https://accounts.google.com/o/oauth2/auth
+    token_url: https://oauth2.googleapis.com/token
+    scope: >-
+      https://www.googleapis.com/auth/drive.readonly
+      https://www.googleapis.com/auth/drive.metadata.readonly
+      https://www.googleapis.com/auth/admin.directory.group.readonly
+      https://www.googleapis.com/auth/admin.directory.group.member.readonly
+    additional_authorize_params:
+      access_type: offline
+      prompt: consent
+    registration:
+      <<: *google_registration
+      apis: >-
+        APIs & Services → Library → enable the "Google Drive API", "Admin SDK API",
+        "Google Workspace Events API", and "Cloud Pub/Sub API". The last two are
+        optional until live change delivery is configured; scheduled Drive Changes
+        sync remains available without them. In the Google Admin console, assign the
+        account that will authorize this connection the least-privilege "Groups → Read
+        API" admin privilege. Also give that account read access to the shared drives or
+        folders this appliance should index; it does not gain Drive content access
+        merely by being a directory reader.
+
+  gmail:
+    oauth_type: with_refresh
+    authorize_url: https://accounts.google.com/o/oauth2/auth
+    token_url: https://oauth2.googleapis.com/token
+    scope: https://www.googleapis.com/auth/gmail.readonly
+    additional_authorize_params:
+      access_type: offline
+      prompt: consent
+    registration:
+      <<: *google_registration
+      apis: APIs & Services → Library → enable the "Gmail API".
+
+  google_docs:
+    oauth_type: with_refresh
+    authorize_url: https://accounts.google.com/o/oauth2/auth
+    token_url: https://oauth2.googleapis.com/token
+    scope: >-
+      https://www.googleapis.com/auth/documents.readonly
+      https://www.googleapis.com/auth/drive.readonly
+    additional_authorize_params:
+      access_type: offline
+      prompt: consent
+    registration:
+      <<: *google_registration
+      apis: APIs & Services → Library → enable both the "Google Docs API" and the "Google Drive API".
+
+  # ---------------------------------------------------------------- Other file stores
+  dropbox:
+    oauth_type: with_refresh
+    authorize_url: https://www.dropbox.com/oauth2/authorize
+    token_url: https://api.dropbox.com/oauth2/token
+    # Dropbox returns a refresh token only with token_access_type=offline.
+    additional_authorize_params:
+      token_access_type: offline
+    registration:
+      console: Dropbox App Console
+      console_url: https://www.dropbox.com/developers/apps
+      create: >-
+        Create app → "Scoped access" → access type "Full Dropbox" (an App-folder app can
+        only ever see one directory it created for itself).
+      app_type: >-
+        Create it from the account that owns the estate. On a Dropbox Business team, a
+        team admin has to approve the app before it can be installed.
+      redirect_field: Settings → OAuth 2 → Redirect URIs → Add.
+      scope_label: App permissions
+      scope_location: >-
+        This appliance sends no scope parameter to Dropbox: the token receives whatever
+        the app's own Permissions tab declares. Tick files.metadata.read,
+        files.content.read and sharing.read there — read-only, nothing that writes — and
+        press Submit at the bottom, which is a separate step from ticking the boxes.
+      secret: >-
+        Settings → App key and App secret ("Show"). The App key is the client id and the
+        App secret is the client secret.
+      account: Sign in as the account whose Dropbox should be indexed.
+      note: >-
+        Permissions ticked after a token was issued do not apply to that token. Change
+        the Permissions tab first, then authorize here.
+
+  box:
+    oauth_type: with_refresh
+    authorize_url: https://account.box.com/api/oauth2/authorize
+    token_url: https://api.box.com/oauth2/token
+    scope: root_readonly
+    registration:
+      console: Box Developer Console
+      console_url: https://app.box.com/developers/console
+      create: >-
+        Create Platform App → Custom App → authentication method "User Authentication
+        (OAuth 2.0)". Server Authentication apps use a different flow and cannot be used
+        here.
+      app_type: >-
+        Configuration → Application Scopes: tick "Read all files and folders stored in
+        Box" and leave every write scope off.
+      redirect_field: Configuration → OAuth 2.0 Redirect URIs.
+      scope_label: OAuth scope requested at sign-in
+      scope_location: >-
+        Requested automatically in the authorization URL; nothing to type. It narrows the
+        token to reading, and cannot exceed the Application Scopes ticked above.
+      consent: >-
+        An enterprise admin must authorize the app in Admin Console → Apps → Custom Apps
+        Manager using its client id. Until then Box rejects the sign-in even though the
+        credentials are correct.
+      secret: >-
+        Configuration → OAuth 2.0 Credentials → Client ID and Client Secret ("Fetch
+        Client Secret" reveals it).
+      account: Sign in as the account whose files and folders should be indexed.
+
+  notion:
+    # Notion internal integrations issue non-expiring tokens and no refresh token.
+    oauth_type: access_only
+    authorize_url: https://api.notion.com/v1/oauth/authorize
+    token_url: https://api.notion.com/v1/oauth/token
+    client_credential_location: header
+    additional_authorize_params:
+      owner: user
+    registration:
+      console: Notion integrations
+      console_url: https://www.notion.so/my-integrations
+      create: >-
+        New integration, owned by the firm's workspace. Notion only issues OAuth client
+        credentials to a *public* integration, so open Distribution and switch it to
+        public — that is what adds the OAuth Domain & URIs fields and the client
+        id/secret.
+      app_type: >-
+        Capabilities: "Read content" only. Leave update, insert and comment capabilities
+        off; this appliance never writes to a source.
+      redirect_field: Distribution → OAuth Domain & URIs → Redirect URIs.
+      scope_label: Access
+      scope_location: >-
+        Notion has no scope parameter. Access is decided page by page: during the
+        sign-in Notion asks which pages to share with the integration, and anything not
+        selected there stays invisible to it. Select the top-level pages you want
+        indexed — sub-pages follow.
+      secret: Secrets tab → OAuth client id and OAuth client secret.
+      account: >-
+        Sign in as a workspace member who can see the pages you intend to index; the
+        selection screen only lists pages that member can share.
+
+  confluence:
+    oauth_type: with_rotating_refresh
+    authorize_url: https://auth.atlassian.com/authorize
+    token_url: https://auth.atlassian.com/oauth/token
+    scope: >-
+      offline_access
+      read:content:confluence
+      read:page:confluence
+      read:space:confluence
+      read:user:confluence
+      read:comment:confluence
+      read:attachment:confluence
+      read:configuration:confluence
+    additional_authorize_params:
+      audience: api.atlassian.com
+      prompt: consent
+      response_mode: query
+    registration:
+      console: Atlassian developer console
+      console_url: https://developer.atlassian.com/console/myapps/
+      create: Create → "OAuth 2.0 integration", named for this appliance.
+      redirect_field: Authorization → OAuth 2.0 (3LO) → Configure → Callback URL.
+      scope_label: Confluence API scopes
+      scope_location: >-
+        Permissions → Confluence API → Add, then Configure → Granular scopes, and add
+        each scope below. offline_access is not listed there: it is requested in the
+        authorization URL and is what returns a refresh token.
+      consent: >-
+        The site admin approves the app the first time someone signs in. If the site
+        restricts which apps users may approve, the request is queued for an admin
+        instead of completing.
+      secret: Settings → Authentication details → Client ID and Secret.
+      account: >-
+        Sign in as a Confluence user who can read the spaces you intend to index. The
+        connection mirrors that user's access and cannot exceed it.
+
+  # ---------------------------------------------------------------- Slack
+  # Bot scopes for crawling: this connector indexes messages rather than proxying
+  # live queries, so it needs history reads rather than `search:read`.
+  slack:
+    oauth_type: access_only
+    authorize_url: https://slack.com/oauth/v2/authorize
+    token_url: https://slack.com/api/oauth.v2.access
+    scope: >-
+      channels:history
+      channels:read
+      groups:history
+      groups:read
+      users:read
+      users:read.email
+    registration:
+      console: Slack API apps
+      console_url: https://api.slack.com/apps
+      create: Create New App → "From scratch", then pick the firm's workspace.
+      redirect_field: OAuth & Permissions → Redirect URLs → Add New Redirect URL, then Save URLs.
+      scope_label: Bot token scopes
+      scope_location: >-
+        OAuth & Permissions → Scopes → **Bot Token Scopes**. Adding them under User Token
+        Scopes instead is the usual mistake: this connector indexes with a bot token.
+      consent: >-
+        "Install to Workspace" on the Basic Information page. A workspace owner approves
+        it; where installation is restricted the request goes to an admin and nothing
+        works until they act on it.
+      secret: >-
+        Basic Information → App Credentials → Client ID and Client Secret ("Show").
+        The Signing Secret and the Verification Token are different values and are not
+        used here.
+      account: Sign in as a member of the workspace whose channels should be indexed.
+      note: >-
+        A bot token reads history only in channels the bot has joined. Invite it with
+        /invite @<app name> in every public or private channel that should be indexed.

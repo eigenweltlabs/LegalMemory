@@ -1,0 +1,76 @@
+# Model gateway configuration. The config file is authoritative (no models stored
+# in the DB); the DB is used for spend/usage accounting only. Keys come from the
+# environment — never from this file.
+model_list:
+  # No model name appears in this file, and none appears in the appliance's code. There is
+  # an LLM and there is an embedding model; which ones a deployment runs is a property of
+  # that deployment, so the name everything refers to them by, the provider route they
+  # resolve to, the key and the contracted rates all come from the environment. Changing
+  # model is changing .env, not editing a file that ships with the product.
+  #
+  - model_name: os.environ/KI_LLM_MODEL
+    litellm_params:
+      model: os.environ/KI_LLM_UPSTREAM
+      api_key: os.environ/KI_LLM_API_KEY
+      # Unset for OpenAI, which routes on the model prefix alone. LiteLLM resolves an
+      # absent os.environ/ reference to None, which is what a default endpoint needs.
+      api_base: os.environ/KI_LLM_API_BASE
+      # Per-token USD for the contracted rate. LiteLLM prices a call from its own cost map
+      # and has no entry for a self-hosted or newly-released model, which would report real
+      # tokens at zero cost — free work in the cost centre. Stated so it is never guessed.
+      input_cost_per_token: os.environ/KI_LLM_INPUT_COST_PER_TOKEN
+      output_cost_per_token: os.environ/KI_LLM_OUTPUT_COST_PER_TOKEN
+  - model_name: os.environ/KI_EMBEDDING_MODEL
+    litellm_params:
+      model: os.environ/KI_EMBEDDING_UPSTREAM
+      api_key: os.environ/KI_EMBEDDING_API_KEY
+      input_cost_per_token: os.environ/KI_EMBEDDING_INPUT_COST_PER_TOKEN
+      output_cost_per_token: 0.0
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+  database_url: os.environ/DATABASE_URL
+  # Models an administrator adds from the console live in the gateway's own database
+  # beside the ones declared above. False disables the admin model API outright, which is
+  # the whole of the "add a model" feature — and it would disagree with STORE_MODEL_IN_DB
+  # in docker-compose.yml, which is already "True".
+  store_model_in_db: true
+  # Full message tracing: store every request's prompts AND the response in the
+  # spend log, so each agentic walk is fully reconstructable (gateway UI ->
+  # Logs, or SQL on LiteLLM_SpendLogs). On-prem note: this persists document
+  # text in the gateway database.
+  store_prompts_in_spend_logs: true
+
+router_settings:
+  # the pipeline owns retries (per-stage backoff + quarantine); the gateway's
+  # default of 3 silent retries would multiply attempts without our accounting
+  num_retries: 0
+
+litellm_settings:
+  # Qwen's reasoning responses for large documents can exceed four minutes.
+  # The pipeline still bounds retries and stage attempts.
+  request_timeout: 600
+  json_logs: true
+  # GPT-5 models reject legacy sampling parameters such as temperature=0.
+  # Keep the appliance's model calls portable and let LiteLLM remove only
+  # parameters unsupported by the concrete model behind an alias.
+  drop_params: true
+
+# Named provider credentials. A model added at runtime references one of these by name
+# instead of carrying a key: `os.environ/` is resolved only for entries in this file, so a
+# model stored in the database would otherwise need the literal secret. This is what keeps
+# provider keys inside the gateway container — the app backend and the browser only ever
+# pass a credential name, and the console's add-a-model form offers this list.
+credential_list:
+  - credential_name: openai
+    credential_values:
+      api_key: os.environ/OPENAI_API_KEY
+    credential_info:
+      description: OpenAI platform
+  - credential_name: scaleway
+    credential_values:
+      api_key: os.environ/SCW_SECRET_KEY
+      # Project-scoped endpoint, e.g. https://api.scaleway.ai/<project-id>/v1.
+      api_base: os.environ/SCW_API_BASE
+    credential_info:
+      description: Scaleway Generative APIs (EU-hosted)

@@ -1,0 +1,12 @@
+.git
+.venv
+ui/node_modules
+.ki
+.pytest_cache
+.ruff_cache
+external
+tests
+testdata/generated
+__pycache__
+*.pyc
+.DS_Store

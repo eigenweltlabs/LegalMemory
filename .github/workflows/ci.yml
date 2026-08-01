@@ -1,0 +1,265 @@
+name: CI
+
+# Every push and every pull request. Nothing here reads a repository secret, so the whole
+# workflow — including the backup round-trip — runs on a fork's pull request exactly as it
+# runs on a branch. That is deliberate: the round-trip needs no model provider, only
+# databases and a search index, and a job that silently degrades on forks would be a job
+# whose result nobody can trust.
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+# A superseded push has nothing to say. Cancel it rather than queue behind it.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # tests/conftest.py hard-codes localhost:5439, user ki, password ki-dev-only and the
+  # database ki_test. KI_TEST_DATABASE is deliberately NOT set: tests/test_backup.py
+  # asserts the restored database is named ki_test, so overriding it fails that test.
+  PYTHON_VERSION: "3.13"
+
+jobs:
+  # ------------------------------------------------------------------------------ lint
+  lint:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      # Pinned rather than taken from pyproject's `ruff>=0.4`. An unpinned linter turns
+      # unrelated pull requests red the day it ships a new rule, and a red build nobody
+      # caused is a red build everybody learns to ignore. Raise this deliberately.
+      - run: pip install ruff==0.16.1
+      # Whole repository, no per-path carve-outs. See .github/workflows/README.md for the
+      # findings that exist on main today — they are real and they have to be fixed, not
+      # excluded, or this job means nothing.
+      - run: ruff check --output-format=github .
+
+  # -------------------------------------------------------------------------- fast tests
+  unit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    services:
+      # The same image the appliance runs. pgvector matters: tests/conftest.py issues
+      # CREATE EXTENSION vector when it builds the test database, and stock postgres:16
+      # fails there with an error that reads like a permissions problem.
+      postgres:
+        image: pgvector/pgvector:0.8.1-pg16
+        env:
+          POSTGRES_USER: ki
+          POSTGRES_PASSWORD: ki-dev-only
+          POSTGRES_DB: ki
+        ports:
+          - 5439:5432
+        options: >-
+          --health-cmd "pg_isready -U ki -d ki"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+    env:
+      # Two tests encrypt a credential for real and fail outright without a key — the
+      # connector layer refuses to fall back to plaintext, which is the correct behaviour
+      # and means CI has to supply one. Decodes to 32 bytes of obvious rubbish.
+      KI_CONNECTOR_CREDENTIAL_KEY: Y2ktZHVtbXkta2V5LW5vdC1hLXJlYWwtc2VjcmV0LS0=
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      # pg_dump 17 and restic. The backup suite shells out to both.
+      - run: scripts/ci-postgres-client.sh
+      - run: pip install -e ".[dev]"
+      # pyproject's addopts already excludes the integration marker, so this is the fast
+      # suite by construction. -ra rather than -rs: a bare -rs *replaces* pytest's default
+      # report characters, so the short summary lists skips and drops the FAILED lines —
+      # a red job that does not say which test went red. -ra keeps both.
+      - run: pytest -q -ra
+      # The restic round-trip, deselected from the run above because restic's own key
+      # derivation dominates it (~0.75s per invocation, and these drive it end to end).
+      # Deselected locally, never unexercised: this step is why that trade is safe.
+      - run: pytest -q -ra -m slow
+
+  # --------------------------------------------------------------------------- UI bundle
+  ui:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      # Node 24 because the Dockerfile's UI stage is node:24-alpine. The bundle committed
+      # under src/knowledge_index/web/static is what the image ships, so CI has to build
+      # it the way the image does or the comparison below is meaningless.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - run: npm ci
+        working-directory: ui
+      # vite.config.js sends the output straight into src/knowledge_index/web/static with
+      # emptyOutDir, so this overwrites the committed bundle in place.
+      - run: npm run build
+        working-directory: ui
+      - name: Committed bundle must match the one this source builds
+        # A stale bundle has shipped here more than once: the UI source changes, the built
+        # assets are not rebuilt or not committed, and the appliance serves last week's
+        # interface with this week's API. git reports both halves of that — a changed file
+        # and a newly hashed one that is untracked — so both are checked.
+        run: |
+          if [ -n "$(git status --porcelain -- src/knowledge_index/web/static)" ]; then
+            echo "::error::The committed UI bundle is stale. Run 'cd ui && npm ci && npm run build' and commit src/knowledge_index/web/static."
+            git status --porcelain -- src/knowledge_index/web/static
+            git --no-pager diff --stat -- src/knowledge_index/web/static
+            exit 1
+          fi
+          echo "committed bundle is identical to a fresh build"
+
+  # --------------------------------------------------------------- backup round-trip
+  #
+  # The one job that exercises the appliance's stores as stores rather than as fixtures.
+  # tests/test_backup_roundtrip.py runs the product's own perform_backup *inside the app
+  # container*, over docker exec, then reads the result back here — so this job has to
+  # build the appliance image and stand up nine of the eleven compose services. It is slow
+  # and it is the only place several of these can fail. See scripts/ci-stack.sh for why
+  # each service is there.
+  #
+  # COVERED, and none of it can fail in the fast suite, whose fixture switches the gateway
+  # databases, the orchestrator database and the search index off and mounts neither
+  # container-owned volume:
+  #   * postgres/litellm and postgres/langfuse — the derived URLs dumped for real against
+  #     a live server, and asserted to contain table data rather than to merely exist.
+  #   * postgres/hatchet — a Postgres 17 server, dumped by the pg_dump 17 this job installs.
+  #   * opensearch/snapshot — a real snapshot into the repository volume OpenSearch shares
+  #     with the appliance, written as uid 1000 and read back as the appliance's user.
+  #   * volumes/hatchet-config and volumes/keycloak — genuinely generated by Hatchet and
+  #     Keycloak, captured through the read-only mounts, compared byte for byte.
+  #
+  # NOT COVERED, stated plainly so nobody reads a green tick as more than it is:
+  #   * applying either container-owned volume. Replacing them means stopping Keycloak and
+  #     Hatchet — the ones this suite is talking to — so the test asserts the restore plan
+  #     names a stop, and the replacement itself is covered against a stub agent in
+  #     tests/test_backup.py. The real thing is scripts/restore-backup.sh, by hand.
+  #   * restoring the search index. apply_search_index empties the repository and restores
+  #     over the live cluster.
+  #   * anything that calls a model. LiteLLM boots on dummy provider keys and would fail
+  #     any real completion. No job makes one.
+  #
+  # No repository secret is read, so this runs on a fork's pull request exactly as it runs
+  # on a branch.
+  backup-roundtrip:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      # First, before anything installs into the runner. The images this stack pulls come
+      # to roughly 15 GB, of which Docling alone is 8.6, against about 21 GB free on a
+      # hosted runner — without this the job dies part-way through a pull with a no-space
+      # error that looks nothing like a backup problem. Deliberately not touching
+      # /opt/hostedtoolcache: setup-python below reads and writes it, and reclaiming it
+      # here would delete the interpreter the next step is about to be given.
+      - name: Reclaim runner disk
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost /usr/share/swift
+          df -h /
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      # pg_dump 17 to reach Hatchet's Postgres 17, and pg_restore because the round-trip
+      # lists and restores the staged archives here on the runner.
+      - run: scripts/ci-postgres-client.sh
+      - run: pip install -e ".[dev]"
+
+      # docker-compose.yml aborts on twelve `${VAR:?}` variables before it starts anything.
+      # None of them needs to be real for a backup; all of them need to exist.
+      - run: scripts/ci-env.sh .env.ci
+
+      - name: Build and start the appliance and its stores
+        run: scripts/ci-stack.sh up
+
+      # The test finds the stack by compose project label, and ci-stack.sh runs it under
+      # its own project name so it can never delete a developer's volumes.
+      - name: Point pytest at them
+        run: scripts/ci-stack.sh env >> "$GITHUB_ENV"
+
+      # A command-line -m overrides pyproject's `addopts = -m 'not integration'`.
+      #
+      # Run as root, which is not laziness about permissions — it is the only way this job
+      # can read the backup it just made. The appliance writes every component at the
+      # destination through tempfile.mkstemp, which creates 0600 whatever the umask, as the
+      # unprivileged user the image runs (uid 100). On Linux a bind mount carries that
+      # ownership through untouched, so the runner — uid 1001 — cannot open a single one of
+      # them: stage_backup raises PermissionError, all eleven tests error before asserting
+      # anything, and the fixture's `rmtree(..., ignore_errors=True)` teardown fails just as
+      # silently and leaves an encrypted copy of the estate, and of the deployment's
+      # secrets, in the workspace. Measured on a volume with real Linux ownership: uid 1001
+      # gets "Permission denied" on both the read and the removal.
+      #
+      # It does not happen on a developer's Mac, because Docker Desktop reports every
+      # bind-mounted file as owned by the host user whatever the container wrote it as —
+      # which is exactly why the suite passes there and would have failed here on the first
+      # run. The alternative, running the app container as the runner's uid, was rejected:
+      # docker-compose.yml hands Hatchet's config to uid 100 specifically, and a stack whose
+      # appliance runs as somebody else is not the stack a firm deploys.
+      #
+      # Nothing under test is weakened by it: stage_backup opens with an explicit 0600, so
+      # the assertion that a staged component is unreadable by others still means what it
+      # says. `-E env PATH=...` because the interpreter and pytest come from setup-python's
+      # tool cache, which sudo's secure_path drops.
+      - name: Backup round-trip
+        run: |
+          sudo -E env "PATH=$PATH" \
+            pytest -m integration tests/test_backup_roundtrip.py -q -ra \
+              --junitxml="${{ runner.temp }}/roundtrip.xml"
+
+      - name: The round-trip must have actually run
+        # The failure mode this whole workflow is aimed at is a green result that covered
+        # nothing, and this test is built to skip rather than fail when its stack is not
+        # there: its `appliance` fixture skips when docker is absent, when any of six
+        # compose services is not running in this project, when /backups is not a directory
+        # it can write, or when OpenSearch does not answer. Every one of those leaves pytest
+        # exiting 0 over an estate nothing checked — exactly as bad as a backup reporting
+        # success with six of ten components. Measured: with five of the six services up,
+        # `pytest -m integration tests/test_backup_roundtrip.py` reports 11 skipped and
+        # exits 0. So: nothing may skip, and something must have run.
+        run: |
+          python - "${{ runner.temp }}/roundtrip.xml" <<'PY'
+          import sys, xml.etree.ElementTree as ET
+
+          root = ET.parse(sys.argv[1]).getroot()
+          suites = root.findall("testsuite") or [root]
+          ran = sum(int(s.get("tests", 0)) for s in suites)
+          skipped = sum(int(s.get("skipped", 0)) for s in suites)
+          if ran == 0:
+              sys.exit("::error::No round-trip test ran. tests/test_backup_roundtrip.py "
+                       "collected nothing under -m integration.")
+          if skipped:
+              sys.exit(f"::error::{skipped} of {ran} round-trip tests skipped. A skipped "
+                       "backup test proves nothing about the backup; start the service it "
+                       "wanted or drop the fixture that wants it.")
+          print(f"{ran} round-trip tests ran, none skipped")
+          PY
+
+      - name: Stack logs
+        if: failure()
+        run: scripts/ci-stack.sh logs
+
+      - name: Tear down
+        if: always()
+        run: scripts/ci-stack.sh down

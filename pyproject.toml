@@ -1,0 +1,87 @@
+[project]
+name = "knowledge-index"
+version = "0.1.0"
+description = "On-prem shadow index for law firm knowledge: sync, insertion pipeline, MCP retrieval"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = [
+    "fastapi>=0.115",
+    # 3.x, not 2.x: the server imports fastmcp.dependencies.CurrentHeaders, which does
+    # not exist before 3.0, so a resolver honouring an older floor installs a version
+    # that cannot import. The floor is also the version a vulnerability scanner reads,
+    # and the 2.x range carries advisories fixed in 3.2.
+    "fastmcp>=3.4.5,<4",
+    # Imported directly (mcp.types, mcp.shared.auth), so it is declared directly rather
+    # than relied on as fastmcp's transitive dependency. Capped below 2.0 because the
+    # 2.0 constructors rename mimeType -> mime_type.
+    "mcp>=1.29.0,<2",
+    "hatchet-sdk==1.35.0",
+    "httpx>=0.27",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.2",
+    "PyJWT[crypto]>=2.9",
+    # FastAPI form/upload parsing — imported by FastAPI, not by this package directly.
+    "python-multipart>=0.0.20",
+    "python-docx>=1.1",
+    "sqlalchemy>=2.0",
+    "pg8000>=1.31",
+    "pgvector>=0.3",
+    "uvicorn>=0.30",
+    "watchfiles>=0.24",
+    "alembic>=1.13",
+    # connector layer: retry/backoff, credential encryption, OAuth provider registry
+    "tenacity>=8.2",
+    "cryptography>=42",
+    "PyYAML>=6.0",
+    # Outbound-only provider event transports for on-prem deployments.
+    "google-cloud-pubsub>=2.27",
+    "azure-eventhub>=5.15",
+    "azure-identity>=1.19",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.4"]
+# Only for backing up to an S3-compatible endpoint (MinIO, Wasabi, AWS). Kept optional
+# so an air-gapped install that backs up to a mounted share never has to ship an AWS SDK
+# or explain why one is in its image; the destination driver imports it lazily and says
+# so if it is missing.
+s3 = ["boto3>=1.34"]
+
+[project.scripts]
+ki = "knowledge_index.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/knowledge_index"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Integration tests call real models, so a throttled gateway makes them hang rather than
+# fail — observed at 34 minutes on 4 seconds of CPU inside a 429 retry loop. Excluding
+# them by default means a bare `pytest` is always fast and always terminates; ask for them
+# explicitly with `-m integration` (a command-line -m overrides this one).
+#
+# `slow` is deselected for the same reason and a different cause: those tests spend their
+# time inside restic's deliberate per-invocation key derivation, not inside this codebase.
+# Five of them cost 169s of a 202s file. CI runs them in a dedicated step, so nothing goes
+# unexercised; locally, ask for them with `-m slow`.
+addopts = "-m 'not integration and not slow'"
+markers = [
+    "integration: exercises the live docker stack (LiteLLM, Docling, OpenSearch) with real models",
+    "slow: drives a third-party binary whose own cost dominates the test (restic); run with -m slow",
+]
+
+[tool.ruff]
+line-length = 100
+src = ["src"]
+
+[tool.ruff.lint]
+# Pin the rule set instead of inheriting whatever the installed ruff defaults to. Ruff
+# 0.16 widened its defaults from 59 rules to 413, which turns a clean tree into ~1900
+# findings without a line of code changing — so a contributor who installs `.[dev]`
+# today would see a linter that disagrees with CI. E4/E7/E9/F is the pre-0.16 default
+# set. Adopting the wider set is real work and belongs in its own change.
+select = ["E4", "E7", "E9", "F"]

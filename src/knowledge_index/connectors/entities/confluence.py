@@ -1,0 +1,512 @@
+"""Confluence entity schemas.
+
+Based on the Confluence Cloud REST API reference (read-only scope), we define
+entity schemas for the major Confluence objects relevant to our application:
+ - Space
+ - Page
+ - Blog Post
+ - Comment
+ - Database
+ - Folder
+ - Label
+ - Task
+ - Whiteboard
+ - Custom Content
+
+Objects that reference a hierarchical relationship (e.g., pages with ancestors,
+whiteboards with ancestors) will represent that hierarchy through a list of
+breadcrumbs (see Breadcrumb in connector.platform.entities._base) rather than nested objects.
+
+Reference:
+    https://developer.atlassian.com/cloud/confluence/rest/v2/intro/
+    https://developer.atlassian.com/cloud/confluence/rest/v2/api-group-ancestors/
+"""
+
+from __future__ import annotations
+
+import re
+from typing import Any, Dict, List, Optional
+
+from pydantic import computed_field
+
+from knowledge_index.connectors.entities._field import IndexField
+from knowledge_index.connectors.entities._base import BaseEntity, Breadcrumb, FileEntity
+
+
+def _strip_html(html: str) -> str:
+    """Remove HTML tags, returning plain text."""
+    return re.sub(r"<[^>]+>", "", html)
+
+
+class ConfluenceSpaceEntity(BaseEntity):
+    """Schema for a Confluence Space.
+
+    Reference:
+        https://developer.atlassian.com/cloud/confluence/rest/v2/api-group-spaces/
+    """
+
+    # Base fields are inherited and set during entity creation:
+    # - entity_id (the space ID)
+    # - breadcrumbs (empty - spaces are top-level)
+    # - name (from space name)
+    # - created_at (from createdAt timestamp)
+    # - updated_at (from updatedAt timestamp)
+
+    # API fields
+    space_id: str = IndexField(
+        ..., description="Unique identifier for the space.", embeddable=False, is_entity_id=True
+    )
+    space_name: str = IndexField(
+        ..., description="Display name of the space.", embeddable=True, is_name=True
+    )
+    space_key: str = IndexField(..., description="Unique key for the space.", embeddable=True)
+    space_type: Optional[str] = IndexField(
+        None, description="Type of space (e.g. 'global').", embeddable=False
+    )
+    description: Optional[str] = IndexField(
+        None, description="Description of the space.", embeddable=True
+    )
+    status: Optional[str] = IndexField(
+        None, description="Status of the space if applicable.", embeddable=False
+    )
+    homepage_id: Optional[str] = IndexField(
+        None, description="ID of the homepage for this space.", embeddable=False
+    )
+    site_url: Optional[str] = IndexField(
+        None, description="Base Confluence site URL.", embeddable=False, unhashable=True
+    )
+
+    @classmethod
+    def from_api(
+        cls,
+        data: Dict[str, Any],
+        *,
+        site_url: str = "",
+    ) -> ConfluenceSpaceEntity:
+        """Build from a Confluence API space JSON object."""
+        return cls(
+            entity_id=data["id"],
+            breadcrumbs=[],
+            name=data.get("name"),
+            created_at=data.get("createdAt"),
+            updated_at=data.get("updatedAt"),
+            space_id=data["id"],
+            space_name=data["name"],
+            space_key=data["key"],
+            space_type=data.get("type"),
+            description=data.get("description"),
+            status=data.get("status"),
+            homepage_id=data.get("homepageId"),
+            site_url=site_url,
+        )
+
+    @computed_field(return_type=str)
+    def web_url(self) -> str:
+        """Construct clickable web URL for this space."""
+        if self.site_url:
+            return f"{self.site_url}/wiki/spaces/{self.space_key}"
+        return f"https://your-domain.atlassian.net/wiki/spaces/{self.space_key}"
+
+
+class ConfluencePageEntity(FileEntity):
+    """Schema for a Confluence Page.
+
+    Pages are treated as FileEntity with HTML body saved to local file.
+    Content is not stored in entity fields, only in the downloaded file.
+
+    Reference:
+        https://developer.atlassian.com/cloud/confluence/rest/v2/api-group-pages/
+    """
+
+    # Base fields are inherited from BaseEntity:
+    # - entity_id (the page ID)
+    # - breadcrumbs (space breadcrumb)
+    # - name (from title with .html extension)
+    # - created_at (from createdAt timestamp)
+    # - updated_at (from updatedAt timestamp)
+
+    # File fields are inherited from FileEntity:
+    # - url (download URL for the page)
+    # - size (0 - content in local file)
+    # - file_type (set to "html")
+    # - mime_type (set to "text/html")
+    # - local_path (set after saving HTML content)
+
+    # API fields (Confluence-specific)
+    content_id: str = IndexField(
+        ..., description="Actual Confluence page ID.", embeddable=False, is_entity_id=True
+    )
+    title: str = IndexField(..., description="Title of the page.", embeddable=True, is_name=True)
+    space_id: Optional[str] = IndexField(
+        None, description="ID of the space this page belongs to.", embeddable=False
+    )
+    space_key: Optional[str] = IndexField(
+        None, description="Key of the space this page belongs to.", embeddable=False
+    )
+    body: Optional[str] = IndexField(
+        None, description="HTML body or excerpt of the page.", embeddable=True
+    )
+    version: Optional[int] = IndexField(
+        None, description="Page version number.", embeddable=False
+    )
+    status: Optional[str] = IndexField(
+        None, description="Status of the page (e.g., 'current').", embeddable=False
+    )
+    site_url: Optional[str] = IndexField(
+        None, description="Base Confluence site URL.", embeddable=False, unhashable=True
+    )
+
+    @classmethod
+    def from_api(
+        cls,
+        data: Dict[str, Any],
+        *,
+        breadcrumbs: List[Breadcrumb],
+        space_key: str,
+        site_url: str = "",
+        base_url: str = "",
+    ) -> ConfluencePageEntity:
+        """Build from a Confluence API page-detail JSON object (with body-format=storage)."""
+        body_content = data.get("body", {}).get("storage", {}).get("value", "")
+        page_title = data.get("title", "Untitled Page")
+        page_id = data["id"]
+
+        return cls(
+            entity_id=page_id,
+            breadcrumbs=breadcrumbs,
+            name=page_title,
+            created_at=data.get("createdAt"),
+            updated_at=data.get("updatedAt"),
+            url=f"{base_url}/wiki/api/v2/pages/{page_id}" if base_url else "",
+            size=0,
+            file_type="html",
+            mime_type="text/html",
+            local_path=None,
+            content_id=page_id,
+            title=data.get("title", "Untitled"),
+            space_id=data.get("space", {}).get("id"),
+            space_key=space_key,
+            body=body_content,
+            version=data.get("version", {}).get("number"),
+            status=data.get("status"),
+            site_url=site_url,
+        )
+
+    @computed_field(return_type=str)
+    def web_url(self) -> str:
+        """Construct clickable web URL for this page."""
+        if self.site_url and self.space_key:
+            return f"{self.site_url}/wiki/spaces/{self.space_key}/pages/{self.content_id}"
+        return f"https://your-domain.atlassian.net/wiki/spaces/SPACE/pages/{self.content_id}"
+
+
+class ConfluenceBlogPostEntity(BaseEntity):
+    """Schema for a Confluence Blog Post.
+
+    Reference:
+        https://developer.atlassian.com/cloud/confluence/rest/v2/api-group-blog-posts/
+    """
+
+    # Base fields are inherited and set during entity creation:
+    # - entity_id (the blog post ID)
+    # - breadcrumbs (space breadcrumb)
+    # - name (from blog post title)
+    # - created_at (from createdAt timestamp)
+    # - updated_at (from updatedAt timestamp)
+
+    # API fields
+    content_id: str = IndexField(
+        ..., description="Actual Confluence blog post ID.", embeddable=False, is_entity_id=True
+    )
+    title: str = IndexField(
+        ..., description="Title of the blog post.", embeddable=True, is_name=True
+    )
+    space_id: Optional[str] = IndexField(
+        None, description="ID of the space this blog post is in.", embeddable=False
+    )
+    space_key: Optional[str] = IndexField(
+        None, description="Key of the space this blog post is in.", embeddable=False
+    )
+    body: Optional[str] = IndexField(
+        None, description="HTML body of the blog post.", embeddable=True
+    )
+    version: Optional[int] = IndexField(
+        None, description="Blog post version number.", embeddable=False
+    )
+    status: Optional[str] = IndexField(
+        None, description="Status of the blog post (e.g., 'current').", embeddable=False
+    )
+    site_url: Optional[str] = IndexField(
+        None, description="Base Confluence site URL.", embeddable=False, unhashable=True
+    )
+
+    @classmethod
+    def from_api(
+        cls,
+        data: Dict[str, Any],
+        *,
+        breadcrumbs: List[Breadcrumb],
+        space_key: Optional[str] = None,
+        site_url: Optional[str] = None,
+    ) -> ConfluenceBlogPostEntity:
+        """Build from a Confluence API blog-post JSON object."""
+        return cls(
+            entity_id=data["id"],
+            breadcrumbs=breadcrumbs,
+            name=data.get("title", "Untitled Blog Post"),
+            created_at=data.get("createdAt"),
+            updated_at=data.get("updatedAt"),
+            content_id=data["id"],
+            title=data.get("title"),
+            space_id=data.get("spaceId"),
+            space_key=space_key,
+            body=data.get("body", {}).get("storage", {}).get("value"),
+            version=data.get("version", {}).get("number"),
+            status=data.get("status"),
+            site_url=site_url,
+        )
+
+    @computed_field(return_type=str)
+    def web_url(self) -> str:
+        """Construct clickable web URL for this blog post."""
+        if self.site_url and self.space_key:
+            return f"{self.site_url}/wiki/spaces/{self.space_key}/blog/{self.content_id}"
+        return f"https://your-domain.atlassian.net/wiki/spaces/SPACE/blog/{self.content_id}"
+
+
+class ConfluenceCommentEntity(BaseEntity):
+    """Schema for a Confluence Comment.
+
+    Reference:
+        https://developer.atlassian.com/cloud/confluence/rest/v2/api-group-comments/
+    """
+
+    # Base fields are inherited and set during entity creation:
+    # - entity_id (the comment ID)
+    # - breadcrumbs (space and page/blog breadcrumbs)
+    # - name (from text preview)
+    # - created_at (from createdAt timestamp)
+    # - updated_at (from updatedAt timestamp)
+
+    # API fields
+    comment_id: str = IndexField(
+        ..., description="Unique identifier for the comment.", embeddable=False, is_entity_id=True
+    )
+    parent_content_id: Optional[str] = IndexField(
+        None, description="ID of the content this comment is attached to.", embeddable=False
+    )
+    parent_space_key: Optional[str] = IndexField(
+        None, description="Key of the space the parent content belongs to.", embeddable=False
+    )
+    text: str = IndexField(
+        ..., description="Text/HTML body of the comment.", embeddable=True, is_name=True
+    )
+    created_by: Optional[Dict[str, Any]] = IndexField(
+        None, description="Information about the user who created the comment.", embeddable=True
+    )
+    status: Optional[str] = IndexField(
+        None, description="Status of the comment (e.g., 'current').", embeddable=False
+    )
+    site_url: Optional[str] = IndexField(
+        None, description="Base Confluence site URL.", embeddable=False, unhashable=True
+    )
+
+    @classmethod
+    def from_api(
+        cls,
+        data: Dict[str, Any],
+        *,
+        breadcrumbs: List[Breadcrumb],
+        parent_space_key: Optional[str] = None,
+        site_url: Optional[str] = None,
+    ) -> ConfluenceCommentEntity:
+        """Build from a Confluence API inline-comment JSON object."""
+        comment_text = data.get("body", {}).get("storage", {}).get("value", "")
+        text_preview = _strip_html(comment_text)[:50]
+        name = text_preview + "..." if len(text_preview) == 50 else text_preview
+        if not name:
+            name = f"Comment {data['id']}"
+
+        return cls(
+            entity_id=data["id"],
+            breadcrumbs=breadcrumbs,
+            name=name,
+            created_at=data.get("createdAt"),
+            updated_at=data.get("updatedAt"),
+            comment_id=data["id"],
+            parent_content_id=data.get("container", {}).get("id"),
+            parent_space_key=parent_space_key,
+            text=comment_text,
+            created_by=data.get("createdBy"),
+            status=data.get("status"),
+            site_url=site_url,
+        )
+
+    @computed_field(return_type=str)
+    def web_url(self) -> str:
+        """Construct clickable web URL for the parent page (comments don't have direct URLs)."""
+        if self.site_url and self.parent_space_key and self.parent_content_id:
+            return (
+                f"{self.site_url}/wiki/spaces/{self.parent_space_key}"
+                f"/pages/{self.parent_content_id}#comment-{self.comment_id}"
+            )
+        return f"https://your-domain.atlassian.net/wiki/spaces/SPACE/pages/PAGE#comment-{self.comment_id}"
+
+
+class ConfluenceDatabaseEntity(BaseEntity):
+    """Schema for a Confluence Database object.
+
+    Note: The "database" content type in Confluence Cloud.
+    """
+
+    # Base fields are inherited and set during entity creation:
+    # - entity_id (the database content ID)
+    # - breadcrumbs (space breadcrumb)
+    # - name (from database title)
+    # - created_at (from createdAt timestamp)
+    # - updated_at (from updatedAt timestamp)
+
+    # API fields
+    content_id: str = IndexField(
+        ..., description="Actual Confluence database ID.", embeddable=False, is_entity_id=True
+    )
+    title: str = IndexField(
+        ..., description="Title or name of the database.", embeddable=True, is_name=True
+    )
+    space_key: Optional[str] = IndexField(
+        None, description="Space key for the database item.", embeddable=True
+    )
+    description: Optional[str] = IndexField(
+        None, description="Description or extra info about the DB.", embeddable=True
+    )
+    status: Optional[str] = IndexField(
+        None, description="Status of the database content item.", embeddable=False
+    )
+
+    @classmethod
+    def from_api(
+        cls,
+        data: Dict[str, Any],
+        *,
+        breadcrumbs: List[Breadcrumb],
+        space_key: str,
+    ) -> ConfluenceDatabaseEntity:
+        """Build from a Confluence API database JSON object."""
+        return cls(
+            entity_id=data["id"],
+            breadcrumbs=breadcrumbs,
+            name=data.get("title", "Untitled Database"),
+            created_at=data.get("createdAt"),
+            updated_at=data.get("updatedAt"),
+            content_id=data["id"],
+            title=data.get("title"),
+            space_key=space_key,
+            description=data.get("description"),
+            status=data.get("status"),
+        )
+
+
+class ConfluenceFolderEntity(BaseEntity):
+    """Schema for a Confluence Folder object.
+
+    Note: The "folder" content type in Confluence Cloud.
+    """
+
+    # Base fields are inherited and set during entity creation:
+    # - entity_id (the folder content ID)
+    # - breadcrumbs (space breadcrumb)
+    # - name (from folder title)
+    # - created_at (from createdAt timestamp)
+    # - updated_at (from updatedAt timestamp)
+
+    # API fields
+    content_id: str = IndexField(
+        ..., description="Actual Confluence folder ID.", embeddable=False, is_entity_id=True
+    )
+    title: str = IndexField(
+        ..., description="Name of the folder.", embeddable=True, is_name=True
+    )
+    space_key: Optional[str] = IndexField(
+        None, description="Key of the space this folder is in.", embeddable=True
+    )
+    status: Optional[str] = IndexField(
+        None, description="Status of the folder (e.g., 'current').", embeddable=False
+    )
+
+    @classmethod
+    def from_api(
+        cls,
+        data: Dict[str, Any],
+        *,
+        breadcrumbs: List[Breadcrumb],
+        space_key: str,
+    ) -> ConfluenceFolderEntity:
+        """Build from a Confluence API folder JSON object."""
+        return cls(
+            entity_id=data["id"],
+            breadcrumbs=breadcrumbs,
+            name=data.get("title", "Untitled Folder"),
+            created_at=data.get("createdAt"),
+            updated_at=data.get("updatedAt"),
+            content_id=data["id"],
+            title=data.get("title"),
+            space_key=space_key,
+            status=data.get("status"),
+        )
+
+
+class ConfluenceLabelEntity(BaseEntity):
+    """Schema for a Confluence Label object.
+
+    Reference:
+        https://developer.atlassian.com/cloud/confluence/rest/v2/api-group-labels/
+    """
+
+    # Base fields are inherited and set during entity creation:
+    # - entity_id (the label ID)
+    # - breadcrumbs (empty - labels are top-level)
+    # - name (from label name)
+    # - created_at (None - labels don't have creation timestamp)
+    # - updated_at (None - labels don't have update timestamp)
+
+    # API fields
+    label_id: str = IndexField(
+        ..., description="Unique identifier for the label.", embeddable=False, is_entity_id=True
+    )
+    label_name: str = IndexField(
+        ..., description="Display name of the label.", embeddable=True, is_name=True
+    )
+    label_type: Optional[str] = IndexField(
+        None, description="Type of the label (e.g., 'global').", embeddable=False
+    )
+    owner_id: Optional[str] = IndexField(
+        None, description="ID of the user or content that owns label.", embeddable=False
+    )
+    site_url: Optional[str] = IndexField(
+        None, description="Base Confluence site URL.", embeddable=False, unhashable=True
+    )
+
+    @classmethod
+    def from_api(
+        cls,
+        data: Dict[str, Any],
+    ) -> ConfluenceLabelEntity:
+        """Build from a Confluence API label JSON object."""
+        return cls(
+            entity_id=data["id"],
+            breadcrumbs=[],
+            name=data.get("name"),
+            created_at=None,
+            updated_at=None,
+            label_id=data["id"],
+            label_name=data["name"],
+            label_type=data.get("type"),
+            owner_id=data.get("ownerId"),
+        )
+
+    @computed_field(return_type=str)
+    def web_url(self) -> str:
+        """Construct clickable web URL for searching this label."""
+        if self.site_url:
+            return f"{self.site_url}/wiki/label/{self.label_name}"
+        return f"https://your-domain.atlassian.net/wiki/label/{self.label_name}"

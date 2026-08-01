@@ -1,0 +1,9 @@
+Third-party notices for knowledge_index.benchmark.agent_harness
+===============================================================
+
+The agent loop, model-adapter interface, tool executor, sandbox and skill
+manuals in this package are derived from the harvey-labs project
+(https://github.com/harveyai/harvey-labs), which is MIT licensed. Individual
+files carry a "Vendored from harveyai/harvey-labs" header where they were
+adapted. The MIT licence and copyright of the upstream project apply to those
+portions; the pinned upstream revision is recorded in external/README.md.

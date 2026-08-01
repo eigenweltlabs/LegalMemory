@@ -1,0 +1,2 @@
+# Bundled dependencies embed multiline shader strings whose spaces are runtime content.
+src/knowledge_index/web/static/*.js whitespace=-trailing-space

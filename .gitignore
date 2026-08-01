@@ -1,0 +1,49 @@
+# cloned third-party repos for study — never committed; retain the pin manifest
+external/*/
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# node
+node_modules/
+frontend/node_modules/
+frontend/*.tsbuildinfo
+ui/dist/
+
+# runtime data
+data/
+.ki/
+# Root-anchored: this is the appliance's runtime data directory. Unanchored it would
+# also match src/knowledge_index/connectors/runtime/, which is source.
+/runtime/
+output/
+.playwright-cli/
+*.db
+*.sqlite*
+.env
+.env.*
+# The template is the one env file that must be committed: docker-compose.yml requires
+# eleven variables outright, so a fresh clone cannot start the stack without it.
+!.env.example
+
+# generated test corpora (regenerate with scripts, keep only small seeds)
+testdata/generated/
+testdata/harvey/
+testdata/harvey-smoke/
+retrieval-report.json
+
+# os
+.DS_Store
+.gstack/
+
+# Local-only self-signed TLS for the dev Keycloak (regenerate with scripts/…; never ship)
+deploy/keycloak/tls/

@@ -1,0 +1,520 @@
+name: knowledge-index
+
+x-ki-env: &ki-env
+  KI_DATABASE_URL: postgresql+pg8000://ki:${KI_POSTGRES_PASSWORD:-ki-dev-only}@postgres:5432/ki
+  KI_ARTIFACT_DIR: /data/artifacts
+  KI_CONFIG_PATH: /data/config.json
+  KI_SECURITY__AUTH_MODE: ${KI_AUTH_MODE:-trusted_header}
+  # The issuer is the string that must appear in a token's `iss`, and a token is minted
+  # for whoever asked — an MCP client on a lawyer's laptop reaches Keycloak on the host
+  # port, so the public name is the one that ends up in the token. Signing keys still
+  # come off the compose network, hence the separate JWKS URL.
+  KI_SECURITY__OIDC_ISSUER: ${KI_OIDC_PUBLIC_ISSUER:-http://localhost:8083/realms/knowledge-index}
+  KI_SECURITY__OIDC_JWKS_URL: ${KI_OIDC_INTERNAL_ISSUER:-http://keycloak:8080/realms/knowledge-index}/protocol/openid-connect/certs
+  KI_SECURITY__OIDC_AUDIENCE: ${KI_OIDC_AUDIENCE:-knowledge-index}
+  # Off unless a developer asks for it: with it on, anything that reaches port 8000
+  # names itself in `x-ki-principals` and becomes any lawyer in the firm.
+  KI_SECURITY__MCP_ALLOW_TRUSTED_HEADER: ${KI_MCP_DEV_TRUSTED_HEADER:-false}
+  KI_SECURITY__TRUSTED_HEADER_SECRET: ${KI_PROXY_HEADER_SECRET:-}
+  KI_CONNECTORS__PUBLIC_BASE_URL: ${KI_PUBLIC_BASE_URL:-http://localhost:8000}
+  # Knowledge Index configures the realm on the administrator's behalf, so nobody has
+  # to open Keycloak's own console. Same credentials the realm was bootstrapped with;
+  # they stay in the app process and never reach a browser.
+  KI_IDENTITY__PUBLIC_BASE_URL: ${KI_KEYCLOAK_PUBLIC_URL:-http://localhost:8083}
+  KI_KEYCLOAK_ADMIN_USERNAME: ${KEYCLOAK_ADMIN:-admin@example.com}
+  KI_KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-lm-dev-only}
+  KI_CONNECTOR_CREDENTIAL_KEY: ${KI_CONNECTOR_CREDENTIAL_KEY:?set a base64 32-byte key; connector credentials are never stored unencrypted}
+  KI_COMPONENTS__LITELLM_URL: http://litellm:4000
+  KI_COMPONENTS__DOCLING_URL: http://docling:5001
+  KI_COMPONENTS__OPENSEARCH_URL: http://opensearch:9200
+  KI_COMPONENTS__ORCHESTRATOR_PROVIDER: ${KI_ORCHESTRATOR_PROVIDER:-hatchet}
+  KI_COMPONENTS__ORCHESTRATOR_API_URL: ${KI_ORCHESTRATOR_API_URL:-http://hatchet:8888}
+  KI_COMPONENTS__ORCHESTRATOR_UI_URL: ${KI_ORCHESTRATOR_UI_URL:-http://localhost:8888}
+  KI_COMPONENTS__TRACES_API_URL: ${KI_TRACES_API_URL:-http://langfuse:3000}
+  KI_COMPONENTS__TRACES_URL: ${KI_LANGFUSE_PUBLIC_URL:-http://localhost:3001}
+  # Where the hosted product documentation lives. Empty hides the in-app links.
+  KI_COMPONENTS__DOCS_URL: ${KI_DOCS_URL:-}
+  LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-sk-lm-dev-only}
+  HATCHET_CLIENT_TOKEN: ${HATCHET_CLIENT_TOKEN:-}
+  HATCHET_CLIENT_HOST_PORT: hatchet:7077
+  HATCHET_CLIENT_SERVER_URL: http://hatchet:8888
+  HATCHET_CLIENT_TLS_STRATEGY: none
+  KI_HATCHET_DOCUMENT_CONCURRENCY: ${KI_HATCHET_DOCUMENT_CONCURRENCY:-16}
+  KI_RELATE_MODEL_CONCURRENCY: ${KI_RELATE_MODEL_CONCURRENCY:-16}
+  # ---------------------------------------------------------------------- backup
+  # Where each store is reached from inside the app and worker containers. This is
+  # deployment layout rather than policy, so it lives here and not in config.json —
+  # the compose file already knows where it mounted things, and an administrator
+  # should not have to keep a second copy of that knowledge correct in the admin UI.
+  # What is captured, where it is written and when is set under Backup in the admin UI.
+  # The models the slots under Models default to, by the name the gateway serves them
+  # under. The same two variables the gateway reads, so the appliance and its gateway
+  # cannot disagree about what a model is called.
+  KI_LLM_MODEL: ${KI_LLM_MODEL:?set KI_LLM_MODEL in .env}
+  KI_EMBEDDING_MODEL: ${KI_EMBEDDING_MODEL:?set KI_EMBEDDING_MODEL in .env}
+  KI_BACKUP_STAGING_DIR: /data/backup-staging
+  # Where a restore stages and verifies a backup before applying any of it.
+  KI_RESTORE_STAGE_DIR: /data/restore
+  # Where the appliance reaches the helper that replaces container-owned volumes.
+  KI_RESTORE_AGENT_URL: http://restore-agent:8100
+  KI_RESTORE_AGENT_SECRET: ${KI_RESTORE_AGENT_SECRET:?set KI_RESTORE_AGENT_SECRET in .env}
+  # Hatchet's database is a different server from the appliance's own, so unlike the
+  # LiteLLM and Langfuse databases it cannot be derived from KI_DATABASE_URL.
+  KI_BACKUP_HATCHET_DATABASE_URL: postgresql://hatchet:${HATCHET_POSTGRES_PASSWORD:-hatchet-dev-only}@hatchet-postgres:5432/hatchet
+  # Two views of one volume: the path OpenSearch has as path.repo inside its own
+  # container (the only path it will accept for a repository) and the path the same
+  # volume is mounted at here, where the finished snapshot is read from.
+  KI_BACKUP_OPENSEARCH_REPO_CONTAINER_PATH: /mnt/snapshots
+  KI_BACKUP_OPENSEARCH_REPO_PATH: /backup-sources/opensearch-snapshots
+  # Volumes with no protocol of their own, mounted read-only from their owning
+  # containers so a backup never has to stop the stack to read them.
+  KI_BACKUP_KEYCLOAK_PATH: /backup-sources/keycloak
+  KI_BACKUP_HATCHET_CONFIG_PATH: /backup-sources/hatchet-config
+  # The backup key and any object-storage credentials are not here. They are set under
+  # Backup in the admin UI (or with `ki backup-key`) and held in the database, encrypted
+  # under KI_CONNECTOR_CREDENTIAL_KEY like every other secret this appliance keeps — so
+  # that configuring backups does not mean editing this file and restarting.
+
+# Shared, read-only volume set for the app / worker / watcher. Kept in one anchor so
+# the three containers always see the same paths.
+x-ki-volumes: &ki-volumes
+  - ki_appdata:/data
+  - ./testdata:/testdata:ro
+  # Read-only view of the host filesystem so the local-folder connector can index
+  # any absolute path selected in the admin UI. The path is identical inside and
+  # outside the container, and :ro enforces the read-only shadow-index guarantee.
+  # Override KI_LOCAL_MOUNT in .env to scope this to a narrower directory.
+  - ${KI_LOCAL_MOUNT:-/Users}:${KI_LOCAL_MOUNT:-/Users}:ro
+  # Where full backups are written. A directory on the host by default so a backup
+  # survives `docker compose down -v`; point KI_BACKUP_MOUNT at the firm's NAS or SMB
+  # share to get the copy that is on other hardware. A backup written into a volume of
+  # the same stack it protects is not a backup.
+  - ${KI_BACKUP_MOUNT:-./runtime/backups}:/backups
+  # Read-only views of the stores that have no protocol of their own, so the backup
+  # can read them while their containers keep running. :ro is what makes mounting
+  # another container's state here safe — nothing in this stack can write through them.
+  - keycloak_data:/backup-sources/keycloak:ro
+  - hatchet_config:/backup-sources/hatchet-config:ro
+  # Not read-only: a finished snapshot is deleted from the repository after it has been
+  # archived, so each backup carries a self-contained copy instead of the repository
+  # growing by a full index every night.
+  - ki_opensearch_snapshots:/backup-sources/opensearch-snapshots
+
+services:
+  # Both stores that have no protocol of their own are owned by another container's user,
+  # and the backup runs as an unprivileged user in the app image. Without this, OpenSearch
+  # cannot create a snapshot in the shared repository (it runs as 1000, the volume is
+  # root-owned) and the backup cannot read Hatchet's 0600 config — both of which show up
+  # only as skipped components in a backup that otherwise reports success.
+  backup-permissions:
+    image: alpine:3
+    command:
+      - sh
+      - -c
+      - |
+        # OpenSearch writes snapshots here and the appliance reads them back and deletes
+        # them, as two different users in two different containers. 1777 is the same
+        # arrangement /tmp uses: both may write, neither may remove the other's files.
+        chown 1000:1000 /snapshots && chmod 1777 /snapshots
+        # Hatchet's config is 0600 root-owned and holds its signing keys. Hatchet runs as
+        # root and can read it whoever owns it, so handing ownership to the appliance's
+        # user lets the backup read it without widening the mode.
+        chown -R 100:101 /hatchet-config
+    volumes:
+      - ki_opensearch_snapshots:/snapshots
+      - hatchet_config:/hatchet-config
+    restart: "no"
+
+  # Replaces the two volumes a running stack cannot replace: Keycloak's data (its embedded
+  # database, open and memory-mapped while it runs) and Hatchet's generated config. It holds
+  # the Docker socket so that nothing else does — the container that parses documents and
+  # serves the admin UI must not be able to reach it. It accepts one operation, over the
+  # compose network, with a shared secret, for a fixed list of two volumes.
+  restore-agent:
+    build: .
+    command: ["ki", "restore-agent", "--port", "8100"]
+    environment:
+      KI_RESTORE_AGENT_SECRET: ${KI_RESTORE_AGENT_SECRET:?set KI_RESTORE_AGENT_SECRET in .env}
+      KI_RESTORE_STAGE_DIR: /data/restore
+    volumes:
+      # Read-only: the agent needs to stop and start containers, not to be handed the
+      # ability to rewrite the daemon's own state.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ki_appdata:/data
+      - keycloak_data:/restore-target/keycloak
+      - hatchet_config:/restore-target/hatchet-config
+    restart: unless-stopped
+
+  app:
+    build: .
+    environment:
+      <<: *ki-env
+      # Optional outbound-only provider events. The app alone creates subscriptions and
+      # consumes brokers, so these credentials are deliberately absent from the worker
+      # and watcher. Unset means the normal policy interval remains fully functional.
+      KI_CONNECTOR_EVENTS: ${KI_CONNECTOR_EVENTS:-1}
+      KI_CONNECTORS__EVENTS__GOOGLE_DRIVE__TOPIC: ${KI_GOOGLE_EVENTS_TOPIC:-}
+      KI_CONNECTORS__EVENTS__GOOGLE_DRIVE__PULL_SUBSCRIPTION: ${KI_GOOGLE_EVENTS_PULL_SUBSCRIPTION:-}
+      KI_CONNECTORS__EVENTS__GOOGLE_DRIVE__SERVICE_ACCOUNT_FILE: ${KI_GOOGLE_EVENTS_SERVICE_ACCOUNT_FILE:-}
+      KI_GOOGLE_EVENTS_SERVICE_ACCOUNT_JSON: ${KI_GOOGLE_EVENTS_SERVICE_ACCOUNT_JSON:-}
+      KI_CONNECTORS__EVENTS__MICROSOFT_GRAPH__NOTIFICATION_URL: ${KI_MICROSOFT_EVENTS_NOTIFICATION_URL:-}
+      KI_CONNECTORS__EVENTS__MICROSOFT_GRAPH__FULLY_QUALIFIED_NAMESPACE: ${KI_MICROSOFT_EVENTS_NAMESPACE:-}
+      KI_CONNECTORS__EVENTS__MICROSOFT_GRAPH__EVENT_HUB_NAME: ${KI_MICROSOFT_EVENTS_EVENT_HUB:-}
+      KI_CONNECTORS__EVENTS__MICROSOFT_GRAPH__CONSUMER_GROUP: ${KI_MICROSOFT_EVENTS_CONSUMER_GROUP:-$$Default}
+      KI_CONNECTORS__EVENTS__MICROSOFT_GRAPH__TENANT_ID: ${KI_MICROSOFT_EVENTS_TENANT_ID:-}
+      KI_CONNECTORS__EVENTS__MICROSOFT_GRAPH__CLIENT_ID: ${KI_MICROSOFT_EVENTS_CLIENT_ID:-}
+      KI_MICROSOFT_EVENTS_CLIENT_SECRET: ${KI_MICROSOFT_EVENTS_CLIENT_SECRET:-}
+    ports:
+      - "127.0.0.1:${KI_APP_PORT:-8000}:8000"
+    # Keep broker credentials out of the worker and watcher: only the app manages
+    # provider subscriptions and consumes their delivery transports.
+    volumes:
+      - ki_appdata:/data
+      - ./testdata:/testdata:ro
+      - ${KI_LOCAL_MOUNT:-/Users}:${KI_LOCAL_MOUNT:-/Users}:ro
+      - ${KI_BACKUP_MOUNT:-./runtime/backups}:/backups
+      - keycloak_data:/backup-sources/keycloak:ro
+      - hatchet_config:/backup-sources/hatchet-config:ro
+      - ki_opensearch_snapshots:/backup-sources/opensearch-snapshots
+      - ${KI_CONNECTOR_EVENTS_SECRET_DIR:-./runtime/secrets}:/run/connector-events:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      backup-permissions:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      opensearch:
+        condition: service_healthy
+      litellm:
+        condition: service_started
+      docling:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+    restart: unless-stopped
+
+  worker:
+    build: .
+    command: ["ki", "hatchet-worker", "--slots", "${KI_HATCHET_WORKER_SLOTS:-16}"]
+    environment:
+      <<: *ki-env
+      # A model-backed stage keeps one transaction open while awaiting its API
+      # response. Size the worker pool above its task slots so progress updates and
+      # retries do not starve behind the long-lived stage sessions.
+      KI_DATABASE_POOL_SIZE: ${KI_WORKER_DATABASE_POOL_SIZE:-40}
+      KI_DATABASE_MAX_OVERFLOW: ${KI_WORKER_DATABASE_MAX_OVERFLOW:-16}
+      KI_DATABASE_POOL_TIMEOUT_SECONDS: ${KI_WORKER_DATABASE_POOL_TIMEOUT_SECONDS:-60}
+    volumes: *ki-volumes
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      opensearch:
+        condition: service_healthy
+      hatchet:
+        condition: service_started
+      litellm:
+        condition: service_started
+      docling:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Continuous monitoring for local/mounted folder connectors: watches the roots for
+  # filesystem events (debounced), rescans on change, and runs a periodic safety-net
+  # full sync to reconcile events the OS coalesced or dropped. Triggers the insertion
+  # pipeline whenever a sync produced changes.
+  watcher:
+    build: .
+    command: ["ki", "watch"]
+    environment:
+      <<: *ki-env
+    volumes: *ki-volumes
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      hatchet:
+        condition: service_started
+    restart: unless-stopped
+
+  postgres:
+    image: pgvector/pgvector:0.8.1-pg16
+    environment:
+      POSTGRES_USER: ki
+      POSTGRES_PASSWORD: ${KI_POSTGRES_PASSWORD:-ki-dev-only}
+      POSTGRES_DB: ki
+    ports:
+      - "127.0.0.1:${KI_POSTGRES_PORT:-5439}:5432"
+    volumes:
+      - ki_pgdata:/var/lib/postgresql/data
+      - ./deploy/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ki -d ki"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  opensearch:
+    image: opensearchproject/opensearch:3.6.0
+    environment:
+      discovery.type: single-node
+      DISABLE_INSTALL_DEMO_CONFIG: "true"
+      DISABLE_SECURITY_PLUGIN: "true"
+      OPENSEARCH_JAVA_OPTS: -Xms1g -Xmx1g
+      # The only directory OpenSearch will accept as a snapshot repository location.
+      # Snapshots are the sole supported way to get a consistent copy of a live cluster:
+      # Lucene segments are written and merged continuously, so a tar of a running node's
+      # data directory is a copy of a moving target.
+      path.repo: /mnt/snapshots
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    volumes:
+      - ki_opensearch:/usr/share/opensearch/data
+      - ki_opensearch_snapshots:/mnt/snapshots
+    ports:
+      - "127.0.0.1:${OPENSEARCH_PORT:-9200}:9200"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:9200/_cluster/health >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+
+  litellm:
+    image: ghcr.io/berriai/litellm:v1.85.1
+    command: ["--config", "/app/config.yaml", "--port", "4000"]
+    environment:
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-sk-lm-dev-only}
+      LITELLM_SALT_KEY: ${LITELLM_SALT_KEY:-change-me-too}
+      # Models added from the admin UI live in the gateway's own Postgres database
+      # next to the config-file models. The env flag has to agree with
+      # general_settings.store_model_in_db or the admin model API stays disabled.
+      STORE_MODEL_IN_DB: "True"
+      UI_USERNAME: ${DEV_ADMIN_EMAIL:-admin@example.com}
+      UI_PASSWORD: ${DEV_ADMIN_PASSWORD:-lm-dev-only}
+      DATABASE_URL: postgresql://ki:${KI_POSTGRES_PASSWORD:-ki-dev-only}@postgres:5432/litellm
+      # Trace sink. The keys are the ones Langfuse seeds itself with on first boot,
+      # so the gateway can trace from the first call without a manual key exchange.
+      LANGFUSE_PUBLIC_KEY: ${KI_LANGFUSE_PUBLIC_KEY:-pk-lf-knowledge-index}
+      LANGFUSE_SECRET_KEY: ${KI_LANGFUSE_SECRET_KEY:-sk-lf-knowledge-index}
+      LANGFUSE_HOST: http://langfuse:3000
+      # Interpolated from KI_-prefixed names on purpose. Compose gives a shell variable
+      # precedence over .env, so a stale OPENAI_API_KEY exported in someone's profile
+      # silently shadows the file and the gateway starts with the wrong key — which
+      # presents as an unexplained 429 from the provider, not as a config error.
+      # Nothing exports these names, so .env stays authoritative. The container still
+      # receives the plain names, which is what deploy/litellm/config.yaml reads.
+      OPENAI_API_KEY: ${KI_OPENAI_API_KEY:?set KI_OPENAI_API_KEY in .env (not OPENAI_API_KEY — a shell export would shadow it)}
+      SCW_SECRET_KEY: ${KI_SCW_SECRET_KEY:?set KI_SCW_SECRET_KEY in .env (not SCW_SECRET_KEY — a shell export would shadow it)}
+      # May be empty when the scaleway credential is unused; the project-scoped endpoint.
+      SCW_API_BASE: ${KI_SCW_API_BASE-}
+      # Which two models this deployment serves. deploy/litellm/config.yaml names none of
+      # them; it reads these, so changing model is changing .env rather than editing a
+      # file that ships with the product. Required rather than defaulted: a gateway that
+      # guessed a model would bill for the wrong one and report it as the right one.
+      KI_LLM_MODEL: ${KI_LLM_MODEL:?set KI_LLM_MODEL in .env}
+      KI_LLM_UPSTREAM: ${KI_LLM_UPSTREAM:?set KI_LLM_UPSTREAM in .env}
+      # May be empty: a provider that routes on the model prefix needs no base URL.
+      KI_LLM_API_BASE: ${KI_LLM_API_BASE-}
+      # Which key each model authenticates with, so swapping provider is a .env change.
+      KI_LLM_API_KEY: ${KI_LLM_API_KEY:-${KI_OPENAI_API_KEY}}
+      KI_EMBEDDING_API_KEY: ${KI_EMBEDDING_API_KEY:-${KI_OPENAI_API_KEY}}
+      KI_LLM_INPUT_COST_PER_TOKEN: ${KI_LLM_INPUT_COST_PER_TOKEN:?set it in .env}
+      KI_LLM_OUTPUT_COST_PER_TOKEN: ${KI_LLM_OUTPUT_COST_PER_TOKEN:?set it in .env}
+      KI_EMBEDDING_MODEL: ${KI_EMBEDDING_MODEL:?set KI_EMBEDDING_MODEL in .env}
+      KI_EMBEDDING_UPSTREAM: ${KI_EMBEDDING_UPSTREAM:?set KI_EMBEDDING_UPSTREAM in .env}
+      KI_EMBEDDING_INPUT_COST_PER_TOKEN: ${KI_EMBEDDING_INPUT_COST_PER_TOKEN:?set it in .env}
+    volumes:
+      - ./deploy/litellm/config.yaml:/app/config.yaml:ro
+    ports:
+      - "127.0.0.1:${LITELLM_PORT:-4000}:4000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Trace store for every model call. LiteLLM ships traces here through its native
+  # Langfuse callback, so a firm can answer "what exactly did the model see and return
+  # for this document" — which for a legal appliance is an audit question, not a
+  # debugging nicety. v2 deliberately: it needs only Postgres, where v3 additionally
+  # requires ClickHouse, Redis and S3 for an on-prem install of this size.
+  langfuse:
+    image: langfuse/langfuse:2
+    environment:
+      DATABASE_URL: postgresql://ki:${KI_POSTGRES_PASSWORD:-ki-dev-only}@postgres:5432/langfuse
+      NEXTAUTH_URL: ${KI_LANGFUSE_PUBLIC_URL:-http://localhost:3001}
+      NEXTAUTH_SECRET: ${KI_LANGFUSE_NEXTAUTH_SECRET:-langfuse-dev-only-secret}
+      SALT: ${KI_LANGFUSE_SALT:-langfuse-dev-only-salt}
+      ENCRYPTION_KEY: ${KI_LANGFUSE_ENCRYPTION_KEY:-0000000000000000000000000000000000000000000000000000000000000000}
+      TELEMETRY_ENABLED: "false"
+      LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES: "false"
+      # Seeded on first boot so the gateway's keys exist before it starts, rather than
+      # an operator having to click through a UI to mint them.
+      LANGFUSE_INIT_ORG_ID: legalmemory
+      LANGFUSE_INIT_ORG_NAME: LegalMemory
+      LANGFUSE_INIT_PROJECT_ID: knowledge-index
+      LANGFUSE_INIT_PROJECT_NAME: Knowledge Index
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: ${KI_LANGFUSE_PUBLIC_KEY:-pk-lf-knowledge-index}
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: ${KI_LANGFUSE_SECRET_KEY:-sk-lf-knowledge-index}
+      LANGFUSE_INIT_USER_EMAIL: ${DEV_ADMIN_EMAIL:-admin@example.com}
+      LANGFUSE_INIT_USER_NAME: Admin
+      LANGFUSE_INIT_USER_PASSWORD: ${DEV_ADMIN_PASSWORD:-lm-dev-only}
+    ports:
+      - "127.0.0.1:${KI_LANGFUSE_PORT:-3001}:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  docling:
+    image: quay.io/docling-project/docling-serve:v1.18.0
+    environment:
+      DOCLING_SERVE_ENABLE_UI: "true"
+      # sync convert gives up server-side after MAX_SYNC_WAIT while the task keeps
+      # running — must exceed the client timeout or retries duplicate conversions
+      DOCLING_SERVE_MAX_SYNC_WAIT: "330"
+      DOCLING_SERVE_ENG_LOC_NUM_WORKERS: "4"
+    ports:
+      - "127.0.0.1:${DOCLING_PORT:-5001}:5001"
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:5001/health')\""]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  hatchet-postgres:
+    image: postgres:17.5-alpine
+    environment:
+      POSTGRES_USER: hatchet
+      POSTGRES_PASSWORD: ${HATCHET_POSTGRES_PASSWORD:-hatchet-dev-only}
+      POSTGRES_DB: hatchet
+    command: ["postgres", "-c", "max_connections=200"]
+    volumes:
+      - hatchet_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hatchet -d hatchet"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  hatchet:
+    image: ghcr.io/hatchet-dev/hatchet/hatchet-lite:v0.87.1
+    environment:
+      ADMIN_EMAIL: ${DEV_ADMIN_EMAIL:-admin@example.com}
+      ADMIN_PASSWORD: ${HATCHET_ADMIN_PASSWORD:-Legalmemory1-dev}
+      DATABASE_URL: postgresql://hatchet:${HATCHET_POSTGRES_PASSWORD:-hatchet-dev-only}@hatchet-postgres:5432/hatchet?sslmode=disable
+      SERVER_AUTH_COOKIE_DOMAIN: ${HATCHET_COOKIE_DOMAIN:-localhost}
+      SERVER_AUTH_COOKIE_INSECURE: ${HATCHET_COOKIE_INSECURE:-t}
+      SERVER_GRPC_BIND_ADDRESS: 0.0.0.0
+      SERVER_GRPC_INSECURE: "t"
+      SERVER_GRPC_BROADCAST_ADDRESS: hatchet:7077
+      SERVER_GRPC_PORT: "7077"
+      SERVER_URL: ${HATCHET_PUBLIC_URL:-http://localhost:8888}
+      SERVER_AUTH_SET_EMAIL_VERIFIED: "t"
+      SERVER_DEFAULT_ENGINE_VERSION: V1
+      SERVER_INTERNAL_CLIENT_INTERNAL_GRPC_BROADCAST_ADDRESS: hatchet:7077
+      SERVER_OBSERVABILITY_ENABLED: "true"
+    ports:
+      - "${HATCHET_UI_PORT:-8888}:8888"
+      - "${HATCHET_GRPC_PORT:-7077}:7077"
+    volumes:
+      - hatchet_config:/config
+    depends_on:
+      hatchet-postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  keycloak:
+    # Built, not pulled: the HTTP header limit is a Quarkus build-time property and the
+    # stock 8KB default fails on a developer's shared localhost cookie jar with HTTP 431.
+    build: ./deploy/keycloak
+    command: ["start-dev", "--import-realm"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN:-admin@example.com}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-lm-dev-only}
+      KC_HEALTH_ENABLED: "true"
+      # One canonical public URL. Without it Keycloak builds every URL from the host the
+      # request happened to arrive on, so a browser gets localhost:8443 while a probe on
+      # the compose network gets keycloak:8080 — and the broker callback it hands Google
+      # differs by caller, which Google rejects. Also makes `iss` stable.
+      KC_HOSTNAME: ${KI_KEYCLOAK_PUBLIC_URL:-https://localhost:8443}
+      KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "true"
+      # NOTE on HTTP 431 from Keycloak: every app a developer runs on localhost shares one
+      # cookie jar, so requests arrive carrying everyone else's cookies and exceed the 8KB
+      # header limit. That limit is a Quarkus BUILD-time property — setting it at runtime
+      # (KC_*, QUARKUS_*, JAVA_OPTS_APPEND) is silently ignored, so raising it needs a
+      # custom image. Clear cookies for localhost instead. A firm on a real hostname
+      # never hits it.
+      KC_HTTPS_CERTIFICATE_FILE: /opt/keycloak/conf/tls/keycloak.crt
+      KC_HTTPS_CERTIFICATE_KEY_FILE: /opt/keycloak/conf/tls/keycloak.key
+    volumes:
+      - ./deploy/keycloak/knowledge-index-realm.json:/opt/keycloak/data/import/knowledge-index-realm.json:ro
+      # Self-signed, generated by scripts/gen-keycloak-tls.sh and gitignored. Present only
+      # so a browser-facing OAuth redirect can be https, which Google requires.
+      - ./deploy/keycloak/tls:/opt/keycloak/conf/tls:ro
+      - keycloak_data:/opt/keycloak/data
+    ports:
+      - "${KEYCLOAK_PORT:-8083}:8080"
+      # Google (and Okta) refuse a plain-http redirect URI for a Web client — its
+      # localhost exception covers Desktop clients only, so brokering to Google needs
+      # TLS even locally. start-dev serves 8443 with a self-signed certificate, which a
+      # browser will warn about once and a firm replaces with a real one in production.
+      - "${KEYCLOAK_HTTPS_PORT:-8443}:8443"
+    restart: unless-stopped
+
+  oauth2-proxy:
+    image: quay.io/oauth2-proxy/oauth2-proxy:v7.15.2
+    command:
+      - --provider=oidc
+      # Discovery is skipped so the browser-facing login URL can differ from the
+      # container-internal endpoints: the browser must reach Keycloak on the host
+      # port, while token redemption and JWKS stay on the compose network.
+      - --oidc-issuer-url=${KI_OIDC_INTERNAL_ISSUER:-http://keycloak:8080/realms/knowledge-index}
+      - --skip-oidc-discovery=true
+      - --login-url=${KI_OIDC_PUBLIC_ISSUER:-http://localhost:8083/realms/knowledge-index}/protocol/openid-connect/auth
+      - --redeem-url=${KI_OIDC_INTERNAL_ISSUER:-http://keycloak:8080/realms/knowledge-index}/protocol/openid-connect/token
+      - --oidc-jwks-url=${KI_OIDC_INTERNAL_ISSUER:-http://keycloak:8080/realms/knowledge-index}/protocol/openid-connect/certs
+      - --insecure-oidc-skip-issuer-verification=true
+      - --client-id=${KI_OIDC_CLIENT_ID:-knowledge-index-ui}
+      - --client-secret=${KI_OIDC_CLIENT_SECRET:-lm-dev-only}
+      - --cookie-secret=${KI_OAUTH_COOKIE_SECRET:-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=}
+      - --cookie-secure=${KI_OAUTH_COOKIE_SECURE:-false}
+      - --email-domain=*
+      - --upstream=http://app:8000
+      - --http-address=0.0.0.0:4180
+      - --pass-authorization-header=true
+      - --set-xauthrequest=true
+      - --pass-user-headers=true
+      # Connector ACLs use email addresses; do not forward Keycloak's opaque subject as
+      # the primary username when the verified email claim is available.
+      - --prefer-email-to-user=true
+      - --skip-provider-button=true
+    ports:
+      - "${KI_PUBLIC_PORT:-8090}:4180"
+    depends_on:
+      - app
+      - keycloak
+    restart: unless-stopped
+
+volumes:
+  ki_pgdata:
+  ki_appdata:
+  ki_opensearch:
+  # Scratch space OpenSearch writes snapshots into and the backup reads them out of.
+  # Transient by design: a snapshot is deleted once it has been archived, so this stays
+  # roughly the size of one index rather than growing with every backup.
+  ki_opensearch_snapshots:
+  hatchet_pgdata:
+  hatchet_config:
+  keycloak_data:
