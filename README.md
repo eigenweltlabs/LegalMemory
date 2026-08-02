@@ -196,6 +196,12 @@ BenGER for German regression sets.
 See [CONTRIBUTING.md](CONTRIBUTING.md). Security reports: see
 [SECURITY.md](SECURITY.md).
 
-Licensed under [MIT](LICENSE). Upstream components we studied but do not ship
-remain separate works under the licences and pinned revisions recorded in
-`external/README.md`.
+Licensed under the [GNU Affero General Public License v3.0](LICENSE). Private
+and internal use are unrestricted; the copyleft obligations attach when you
+distribute a copy or offer a modified version to users over a network. Code in
+this repository derived from MIT-licensed projects keeps its own notices — see
+[NOTICE](NOTICE). Upstream components we studied but do not ship remain separate
+works under the licences and pinned revisions recorded in `external/README.md`.
+
+A commercial licence is available for organisations that cannot take on the
+AGPL's terms. Contact Eigenwelt Labs.

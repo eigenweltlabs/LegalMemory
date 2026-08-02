@@ -69,3 +69,25 @@ renders. Every catalog entry needs a replay fixture
 - New behaviour needs a test that fails without the change.
 - CI must be green — it runs without repository secrets, so forks get
   identical results.
+
+## Licensing your contribution
+
+LegalMemory is released under the [GNU Affero General Public License v3.0](LICENSE),
+and Eigenwelt Labs additionally offers it under a commercial licence to
+organisations that cannot take on the AGPL's terms.
+
+Both halves of that have to hold at once, which is why we ask for a Contributor
+Licence Agreement before merging your first pull request. By signing it you keep
+the copyright in your work and grant Eigenwelt Labs a licence to distribute it
+under the AGPL **and** under commercial terms. Without that grant a single
+contribution would make the commercial licence unofferable for the whole file it
+touches — not because the contribution is unwelcome, but because nobody would
+hold the rights needed to offer it.
+
+Open a pull request as normal; we will point you at the agreement before the
+first merge. Contributions of code you did not write yourself must name their
+origin and licence in the pull request, and we cannot accept code under a
+copyleft licence (GPL, AGPL, SSPL or similar) into this repository, because
+including it would end the dual-licence arrangement. Permissively licensed code
+(MIT, BSD, Apache-2.0) is fine when its notices travel with it — see
+[NOTICE](NOTICE) for how the existing cases are recorded.

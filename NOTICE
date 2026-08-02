@@ -1,0 +1,36 @@
+LegalMemory
+Copyright (c) 2026 Eigenwelt Labs
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU Affero General Public License, version 3, as published by
+the Free Software Foundation. See LICENSE for the full text.
+
+Third-party code that ships inside this repository
+--------------------------------------------------
+
+Parts of this repository are derived from MIT-licensed projects and remain
+copyright their respective authors. The MIT licence permits their inclusion
+here, and requires their notices to travel with the code, so each is recorded
+next to the code it covers:
+
+    src/knowledge_index/connectors/NOTICE
+        Thirteen source connectors, their entity schemas, and the shared
+        connector framework, derived from Airweave
+        (https://github.com/airweave-ai/airweave). Copyright (c) 2025 Airweave.
+
+    src/knowledge_index/benchmark/agent_harness/NOTICE
+        The agent loop, model-adapter interface, tool executor, sandbox and
+        skill manuals, derived from harvey-labs
+        (https://github.com/harveyai/harvey-labs).
+
+Those portions stay available under the MIT licence on their own terms; the
+AGPL applies to this work as a whole. Neither project is affiliated with, or
+endorses, LegalMemory.
+
+Components this appliance runs alongside — PostgreSQL, OpenSearch, Docling
+Serve, LiteLLM, Hatchet, Keycloak, oauth2-proxy and Langfuse — are separate
+programs under their own licences and are not distributed by this repository.
+They are listed, with licences, in README.md.
+
+Upstream projects studied but not shipped are recorded with their licences and
+pinned revisions in external/README.md.

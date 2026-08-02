@@ -3,7 +3,7 @@ name = "knowledge-index"
 version = "0.1.0"
 description = "On-prem shadow index for law firm knowledge: sync, insertion pipeline, MCP retrieval"
 requires-python = ">=3.11"
-license = { text = "MIT" }
+license = { text = "AGPL-3.0-only" }
 dependencies = [
     "fastapi>=0.115",
     # 3.x, not 2.x: the server imports fastmcp.dependencies.CurrentHeaders, which does
