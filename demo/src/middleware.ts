@@ -71,7 +71,7 @@ export default authEnabled
   ? clerkMiddleware(async (auth, request) => {
       trace(request);
       if (selfAuthenticating(request.nextUrl.pathname)) return;
-      const { userId, redirectToSignIn } = await auth();
+      const { userId } = await auth();
       if (userId) return;
 
       // A person gets a door; a script gets nothing. `auth.protect()` answers
@@ -80,7 +80,19 @@ export default authEnabled
       if (request.nextUrl.pathname.startsWith("/api/")) {
         return new NextResponse(null, { status: 404 });
       }
-      return redirectToSignIn();
+
+      // Our own page, named explicitly rather than via `redirectToSignIn()`.
+      // That helper resolves the destination from Clerk's own configuration,
+      // which on a production instance is the hosted portal on
+      // `accounts.<domain>` — a different origin, where none of this
+      // application's branding applies. The `signInUrl` prop on ClerkProvider
+      // does not change it: that is read in the browser, and this runs before
+      // any of it is sent.
+      const signIn = request.nextUrl.clone();
+      signIn.pathname = "/sign-in";
+      signIn.search = "";
+      signIn.searchParams.set("redirect_url", request.url);
+      return NextResponse.redirect(signIn);
     })
   : (request: NextRequest) => {
       trace(request);
