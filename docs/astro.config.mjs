@@ -6,8 +6,18 @@ import starlight from "@astrojs/starlight";
 // UI can link here.
 const site = process.env.DOCS_SITE_URL || "https://docs.legalmemory.example";
 
+// Sub-path deployments serve the docs under a prefix rather than a subdomain —
+// legalmemory.eigenweltlabs.com/docs sits beside the demo on one origin and one
+// certificate. Astro has to bake the prefix into every generated link, so it is
+// a build-time input; unset, the site builds for a domain root as before.
+const base = process.env.DOCS_BASE_PATH || undefined;
+
 export default defineConfig({
   site,
+  base,
+  // With a base path, `/docs/page` and `/docs/page/` must both resolve; the
+  // default would emit only one and 404 the other behind a proxy.
+  trailingSlash: "ignore",
   integrations: [
     starlight({
       title: "LegalMemory",

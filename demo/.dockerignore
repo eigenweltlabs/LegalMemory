@@ -1,0 +1,12 @@
+# The build installs from the lockfile and compiles from source. Everything
+# here is either rebuilt inside the image or must never reach it.
+node_modules
+.next
+.git
+.env
+.env.local
+.env*.local
+npm-debug.log*
+README.md
+Dockerfile
+.dockerignore

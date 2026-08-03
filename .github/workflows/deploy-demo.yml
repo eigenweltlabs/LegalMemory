@@ -1,0 +1,205 @@
+# Deploy the hosted demo to legalmemory.eigenweltlabs.com.
+#
+# Images are built here and pushed to Artifact Registry; the server pulls them
+# and restarts. Building on the server would mean a compile on the same box that
+# is answering requests, and a failed build there is a broken deployment rather
+# than a red workflow.
+#
+# Authentication is Workload Identity Federation — no service-account key in a
+# repository secret. The deploy itself runs over IAP, so the VM needs no public
+# SSH port.
+#
+# Manual by default. This is a demo holding a real index behind a real domain;
+# every push to main redeploying it is how a demo becomes unavailable during the
+# meeting it was built for.
+name: Deploy demo
+
+on:
+  workflow_dispatch:
+    inputs:
+      migrate:
+        description: "Run database migrations after deploy"
+        type: boolean
+        default: true
+
+concurrency:
+  # Never two deploys at once: they would fight over the same compose project.
+  group: deploy-demo
+  cancel-in-progress: false
+
+env:
+  GCP_PROJECT: ${{ vars.GCP_PROJECT }}
+  GCP_REGION: ${{ vars.GCP_REGION }}
+  GCE_INSTANCE: ${{ vars.GCE_INSTANCE }}
+  GCE_ZONE: ${{ vars.GCE_ZONE }}
+  REGISTRY: ${{ vars.GCP_REGION }}-docker.pkg.dev/${{ vars.GCP_PROJECT }}/legalmemory
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_DEPLOY_SA }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Authorise Docker against Artifact Registry
+        run: gcloud auth configure-docker "${GCP_REGION}-docker.pkg.dev" --quiet
+
+      - uses: docker/setup-buildx-action@v3
+
+      # The appliance. Same Dockerfile the laptop stack builds.
+      - name: Build and push appliance
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ env.REGISTRY }}/app:${{ github.sha }},${{ env.REGISTRY }}/app:latest
+          cache-from: type=gha,scope=app
+          cache-to: type=gha,mode=max,scope=app
+
+      - name: Build and push demo
+        uses: docker/build-push-action@v6
+        with:
+          context: ./demo
+          push: true
+          tags: ${{ env.REGISTRY }}/demo:${{ github.sha }},${{ env.REGISTRY }}/demo:latest
+          cache-from: type=gha,scope=demo
+          cache-to: type=gha,mode=max,scope=demo
+
+      # The docs are static. Built here so a broken docs build fails the
+      # workflow rather than the deployment, and shipped as a tarball because
+      # the edge serves files, not a container.
+      - name: Build docs
+        run: |
+          cd docs
+          npm ci --no-audit --no-fund
+          DOCS_BASE_PATH=/docs DOCS_SITE_URL="https://${{ vars.DEMO_DOMAIN }}" npm run build
+          tar czf ../docs-dist.tgz -C dist .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: docs-dist
+          path: docs-dist.tgz
+          retention-days: 5
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: docs-dist
+
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_DEPLOY_SA }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      # The compose files and the docs bundle are the only things copied; the
+      # server never holds a checkout and never builds.
+      - name: Copy compose files and docs to the instance
+        run: |
+          tar czf bundle.tgz \
+            docker-compose.demo.yml docker-compose.deploy.yml \
+            deploy/Caddyfile deploy/postgres deploy/litellm
+          gcloud compute scp bundle.tgz docs-dist.tgz \
+            "${GCE_INSTANCE}:~/" --zone "${GCE_ZONE}" --tunnel-through-iap --quiet
+
+      # Secrets live in Secret Manager and are written to .env.demo on the
+      # instance at deploy time. They never enter a workflow log or a layer.
+      # The instance has no gcloud — it reads Secret Manager over REST with a
+      # token from the metadata server, which is what its service account is
+      # for. The secret never passes through the runner or a workflow log.
+      - name: Render environment from Secret Manager
+        run: |
+          gcloud compute ssh "${GCE_INSTANCE}" --zone "${GCE_ZONE}" --tunnel-through-iap --quiet --command '
+            set -euo pipefail
+            TOKEN=$(curl -sf -H "Metadata-Flavor: Google" \
+              "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token" \
+              | sed -E "s/.*\"access_token\":\"([^\"]+)\".*/\\1/")
+            curl -sf -H "Authorization: Bearer $TOKEN" \
+              "https://secretmanager.googleapis.com/v1/projects/'"${GCP_PROJECT}"'/secrets/legalmemory-demo-env/versions/latest:access" \
+              | sed -E "s/.*\"data\":\"([^\"]+)\".*/\\1/" | base64 -d > ~/.env.demo.new
+            test -s ~/.env.demo.new
+            chmod 600 ~/.env.demo.new && mv ~/.env.demo.new ~/.env.demo
+          '
+
+      - name: Deploy
+        run: |
+          gcloud compute ssh "${GCE_INSTANCE}" --zone "${GCE_ZONE}" --tunnel-through-iap --quiet --command "
+            set -euo pipefail
+            mkdir -p ~/legalmemory && tar xzf ~/bundle.tgz -C ~/legalmemory
+            cd ~/legalmemory
+            # The local-folder connector's read-only bind. Nothing indexes from
+            # it here, but Compose creates a root-owned directory if it is
+            # missing and that is a surprise waiting for the next person.
+            mkdir -p testdata
+
+            TOKEN=\$(curl -sf -H 'Metadata-Flavor: Google' \
+              'http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token' \
+              | sed -E 's/.*\"access_token\":\"([^\"]+)\".*/\\1/')
+            echo \"\$TOKEN\" | docker login -u oauth2accesstoken --password-stdin 'https://${GCP_REGION}-docker.pkg.dev'
+
+            # The revision being deployed, written where a later `docker compose
+            # ps` on the box can still see it.
+            grep -v '^APP_IMAGE=\|^DEMO_IMAGE=' ~/.env.demo > ~/.env.run
+            echo 'APP_IMAGE=${REGISTRY}/app:${{ github.sha }}'   >> ~/.env.run
+            echo 'DEMO_IMAGE=${REGISTRY}/demo:${{ github.sha }}' >> ~/.env.run
+            chmod 600 ~/.env.run
+
+            COMPOSE='docker compose -f docker-compose.demo.yml -f docker-compose.deploy.yml --env-file ~/.env.run'
+            \$COMPOSE pull --quiet app demo
+            \$COMPOSE up -d --no-build postgres opensearch litellm
+            \$COMPOSE up -d --no-build app demo
+
+            # The docs are files on a volume, not a service: unpack into the
+            # volume Caddy already mounts, then reload rather than restart so
+            # no in-flight request is dropped.
+            docker run --rm -v legalmemory-demo_docs_dist:/srv/docs -v ~/docs-dist.tgz:/in.tgz:ro \
+              alpine:3 sh -c 'rm -rf /srv/docs/* && tar xzf /in.tgz -C /srv/docs'
+            \$COMPOSE up -d --no-build caddy
+            docker exec \$(docker ps -qf name=caddy) caddy reload --config /etc/caddy/Caddyfile || true
+          "
+
+      - name: Apply migrations
+        if: inputs.migrate
+        run: |
+          gcloud compute ssh "${GCE_INSTANCE}" --zone "${GCE_ZONE}" --tunnel-through-iap --quiet --command '
+            set -euo pipefail
+            cd ~/legalmemory
+            docker compose -f docker-compose.demo.yml -f docker-compose.deploy.yml \
+              --env-file ~/.env.run exec -T app alembic upgrade head
+          '
+
+      # A deploy that reports success without checking is a deploy that reports
+      # success while the site is down.
+      - name: Verify
+        run: |
+          set -euo pipefail
+          DOMAIN="${{ vars.DEMO_DOMAIN }}"
+          for i in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' "https://${DOMAIN}/" || echo 000)
+            [ "$code" = "200" ] || [ "$code" = "307" ] && break
+            sleep 10
+          done
+          echo "root:  $(curl -s -o /dev/null -w '%{http_code}' https://${DOMAIN}/)"
+          echo "docs:  $(curl -s -o /dev/null -w '%{http_code}' https://${DOMAIN}/docs/)"
+          echo "mcp:   $(curl -s -o /dev/null -w '%{http_code}' -X POST https://${DOMAIN}/mcp/ \
+                          -H 'Content-Type: application/json' \
+                          -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}')"
+          curl -sf "https://${DOMAIN}/docs/" > /dev/null

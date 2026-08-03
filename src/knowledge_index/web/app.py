@@ -96,6 +96,7 @@ from knowledge_index.taxonomies import (
     PipelineStage,
     ProcessingStatus,
 )
+from knowledge_index.web.tree import DEFAULT_FILE_PAGE, DocumentTreeService
 
 
 class SyncRequest(BaseModel):
@@ -1298,6 +1299,58 @@ def create_app(
             _refresh_document_chunk_acl(session, document_id)
             session.commit()
             return _grant_payload(row)
+
+    # ------------------------------------------------------------------- tree
+    # A folder view of the estate, for clients that browse rather than search.
+    # Separate from /api/documents on purpose: the ledger is a list of what is
+    # indexed and is read whole, while these are read one expanded folder at a
+    # time and must stay cheap at fifty thousand documents. See web/tree.py.
+
+    @app.get("/api/tree/roots")
+    def tree_roots(request: Request) -> dict:
+        identity = resolve_identity(request)
+        with session_factory() as session:
+            service = DocumentTreeService(session, set(identity.principals))
+            return {"roots": service.roots()}
+
+    @app.get("/api/tree/children")
+    def tree_children(
+        request: Request,
+        source_id: str,
+        path: str | None = None,
+        offset: int = 0,
+        limit: int = DEFAULT_FILE_PAGE,
+    ) -> dict:
+        identity = resolve_identity(request)
+        with session_factory() as session:
+            service = DocumentTreeService(session, set(identity.principals))
+            return service.children(
+                source_id=source_id, path=path, offset=offset, limit=limit
+            ).as_dict()
+
+    @app.get("/api/tree/locate")
+    def tree_locate(request: Request, document_id: str) -> dict:
+        """Resolve a document id to the node that represents it.
+
+        The one call that makes a citation clickable: a model answers with a
+        document id, and the tree needs the source, the folders to open and the
+        page the file is on before it can reveal anything.
+        """
+
+        identity = resolve_identity(request)
+        with session_factory() as session:
+            service = DocumentTreeService(session, set(identity.principals))
+            located = service.locate(document_id)
+            if located is None:
+                raise HTTPException(status_code=404, detail="document not found")
+            return located
+
+    @app.get("/api/tree/search")
+    def tree_search(request: Request, query: str, limit: int = 50) -> dict:
+        identity = resolve_identity(request)
+        with session_factory() as session:
+            service = DocumentTreeService(session, set(identity.principals))
+            return {"files": service.search(query, limit=limit)}
 
     @app.get("/api/graph")
     def graph(

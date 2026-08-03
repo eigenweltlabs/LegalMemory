@@ -1,0 +1,67 @@
+# Model gateway configuration for the demo stack.
+#
+# The same shape as deploy/litellm/config.yaml — no model name appears in this
+# file, only the environment variables a deployment sets — with one addition:
+# the model the demo's chat runs on, which is deliberately separate from the
+# model the insertion pipeline runs on.
+#
+# They are separate because they are different jobs. The pipeline classifies and
+# extracts against a firm's ontology and is worth a large model; the demo's chat
+# reads search results and writes three paragraphs, and wants to be fast in front
+# of an audience. Pointing both at one model means choosing which of the two to
+# make worse.
+model_list:
+  # The appliance's own model: classification, extraction, relations.
+  - model_name: os.environ/KI_LLM_MODEL
+    litellm_params:
+      model: os.environ/KI_LLM_UPSTREAM
+      api_key: os.environ/KI_LLM_API_KEY
+      api_base: os.environ/KI_LLM_API_BASE
+      input_cost_per_token: os.environ/KI_LLM_INPUT_COST_PER_TOKEN
+      output_cost_per_token: os.environ/KI_LLM_OUTPUT_COST_PER_TOKEN
+
+  # Embeddings for the dense retrieval leg.
+  - model_name: os.environ/KI_EMBEDDING_MODEL
+    litellm_params:
+      model: os.environ/KI_EMBEDDING_UPSTREAM
+      api_key: os.environ/KI_EMBEDDING_API_KEY
+      input_cost_per_token: os.environ/KI_EMBEDDING_INPUT_COST_PER_TOKEN
+      output_cost_per_token: 0.0
+
+  # The demo's chat model. `DEMO_MODEL` in the demo container must name this
+  # same string — it is what the demo asks the gateway for.
+  - model_name: os.environ/KI_DEMO_MODEL
+    litellm_params:
+      model: os.environ/KI_DEMO_UPSTREAM
+      api_key: os.environ/KI_DEMO_API_KEY
+      api_base: os.environ/KI_DEMO_API_BASE
+      input_cost_per_token: os.environ/KI_DEMO_INPUT_COST_PER_TOKEN
+      output_cost_per_token: os.environ/KI_DEMO_OUTPUT_COST_PER_TOKEN
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+  database_url: os.environ/DATABASE_URL
+  store_model_in_db: true
+  # Every call the demo makes is logged to the gateway's spend table, prompts and
+  # responses included. Without this the demo is a black box: you can see that a
+  # question was asked and not what the model was given to answer it with, which
+  # is the first thing anyone asks after a surprising answer.
+  #
+  # It means document text lands in the gateway database. That is a deliberate
+  # trade for a demo stack and would be a decision to revisit for a firm, which
+  # is why it is set here and not in deploy/litellm/config.yaml.
+  store_prompts_in_spend_logs: true
+
+router_settings:
+  # The pipeline owns its retries, with per-stage backoff and quarantine. The
+  # gateway's default of three silent retries would multiply attempts without
+  # any of that accounting.
+  num_retries: 0
+
+litellm_settings:
+  request_timeout: 600
+  json_logs: true
+  # Providers disagree about which sampling parameters they accept; dropping the
+  # unsupported ones keeps the appliance's calls portable across the models a
+  # demo might be pointed at.
+  drop_params: true

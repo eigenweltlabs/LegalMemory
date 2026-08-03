@@ -32,9 +32,11 @@ output/
 *.sqlite*
 .env
 .env.*
-# The template is the one env file that must be committed: docker-compose.yml requires
-# eleven variables outright, so a fresh clone cannot start the stack without it.
+# The templates are the env files that must be committed: docker-compose.yml requires
+# eleven variables outright, so a fresh clone cannot start the stack without it, and
+# the demo stack has its own required set.
 !.env.example
+!.env.demo.example
 
 # generated test corpora (regenerate with scripts, keep only small seeds)
 testdata/generated/

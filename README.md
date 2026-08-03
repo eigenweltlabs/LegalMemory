@@ -13,6 +13,11 @@ anonymized decision rationale from correspondence and redlines. Retrieval runs
 inside a permission-compiled candidate set — identity → project grants →
 mirrored source ACLs → search scope, deny wins, unknown fails closed.
 
+**Try it:** [legalmemory.eigenweltlabs.com/demo](https://legalmemory.eigenweltlabs.com/demo)
+— a document browser and a chat over a live index. Ask a question, and the
+document the answer came from opens beside it. The same application is in
+[`demo/`](demo/) and runs against your own index with five containers.
+
 **Documentation:** the `docs/` folder is a [Starlight](https://starlight.astro.build/)
 site — run `npm install && npm run dev` inside `docs/`, or read the pages
 directly under `docs/src/content/docs/`. Deployments set `KI_DOCS_URL` so the

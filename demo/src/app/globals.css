@@ -1,0 +1,264 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+@import "tw-shimmer";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-geist-mono);
+  --font-heading: var(--font-sans);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  /* Pinned, not derived. Every panel on the product page is `.lm-panel`, and
+     `.lm-panel` is 16px; a scale that computed 16.8 from the base radius would
+     be a different corner on every card sitting next to a screenshot of it. */
+  --radius-xl: 16px;
+  --radius-2xl: calc(var(--radius) * 1.8);
+  --radius-3xl: calc(var(--radius) * 2.2);
+  --radius-4xl: calc(var(--radius) * 2.6);
+  @keyframes collapsible-down {
+  from {
+    height: 0;
+    }
+  to {
+    height: var(--radix-collapsible-content-height, var(--collapsible-panel-height, auto));
+    }
+  }
+  @keyframes collapsible-up {
+  from {
+    height: var(--radix-collapsible-content-height, var(--collapsible-panel-height, auto));
+    }
+  to {
+    height: 0;
+    }
+  }
+}
+
+/* =============================================================================
+   LegalMemory, as an application surface.
+
+   The palette is the one from the product page in eigenwelt-website
+   (app/legalmemory.css): paper-white editorial surfaces from the site's "Deep
+   Current" system, with the product's black and its orange. On the marketing
+   page that identity is spent in two places only — the hero and the benchmark
+   band — and the site's own quiet grammar carries everything in between.
+
+   The same discipline holds here. Black owns the chrome, orange marks exactly
+   one thing at a time (the selected document, a citation, a live count), and
+   every other surface is paper and hairlines. An application that shouted the
+   brand at every row would be unreadable after ten minutes, which is longer
+   than any marketing page has to survive and shorter than a working day.
+   ============================================================================= */
+
+:root {
+  /* Geist and Geist Mono, the same two faces the site self-hosts, wired to the
+     variables `@theme inline` above reads. */
+  --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  /* ---- Brand, verbatim from app/legalmemory.css ---- */
+  --lm-black: #000000;
+  --lm-ink: #fff7f0;
+  --lm-orange: #e95700;
+  --lm-orange-hi: #ff7a2f;
+
+  /* ---- Site system, verbatim from app/globals.css ---- */
+  --lm-paper: #fefefe;
+  --lm-paper-2: #f3f5f8;
+  --lm-ink-900: #0e0a07;
+  --lm-line: rgba(14, 10, 7, 0.07);
+  --lm-line-2: rgba(14, 10, 7, 0.05);
+  --lm-muted: rgba(14, 10, 7, 0.45);
+  --lm-muted-2: rgba(14, 10, 7, 0.55);
+  --lm-muted-3: rgba(14, 10, 7, 0.35);
+  --lm-fg2: rgba(14, 10, 7, 0.78);
+  --lm-live: #4ba884;
+
+  --lm-ease-soft: cubic-bezier(0.22, 0.61, 0.36, 1);
+  --lm-dur-fast: 160ms;
+  --lm-dur-base: 320ms;
+
+  /* ---- shadcn tokens, resolved onto the above ---- */
+  --background: var(--lm-paper);
+  --foreground: var(--lm-ink-900);
+  --card: var(--lm-paper);
+  --card-foreground: var(--lm-ink-900);
+  --popover: var(--lm-paper);
+  --popover-foreground: var(--lm-ink-900);
+  /* Primary is the product orange rather than the site blue: this is the
+     appliance's own surface, and the one route where orange replaces blue. */
+  --primary: var(--lm-orange);
+  --primary-foreground: #ffffff;
+  --secondary: var(--lm-paper-2);
+  --secondary-foreground: var(--lm-ink-900);
+  --muted: var(--lm-paper-2);
+  --muted-foreground: var(--lm-muted-2);
+  --accent: rgba(233, 87, 0, 0.07);
+  --accent-foreground: var(--lm-ink-900);
+  --destructive: #b3261e;
+  --border: var(--lm-line);
+  --input: var(--lm-line);
+  --ring: rgba(233, 87, 0, 0.42);
+  --chart-1: var(--lm-orange);
+  --chart-2: var(--lm-muted-2);
+  --chart-3: var(--lm-muted);
+  --chart-4: var(--lm-muted-3);
+  --chart-5: var(--lm-line);
+  --radius: 0.75rem;
+  --sidebar: var(--lm-paper);
+  --sidebar-foreground: var(--lm-ink-900);
+  --sidebar-primary: var(--lm-orange);
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: rgba(233, 87, 0, 0.07);
+  --sidebar-accent-foreground: var(--lm-ink-900);
+  --sidebar-border: var(--lm-line);
+  --sidebar-ring: rgba(233, 87, 0, 0.42);
+}
+
+.dark {
+  --background: oklch(0.145 0 0);
+  --foreground: oklch(0.985 0 0);
+  --card: oklch(0.205 0 0);
+  --card-foreground: oklch(0.985 0 0);
+  --popover: oklch(0.205 0 0);
+  --popover-foreground: oklch(0.985 0 0);
+  --primary: oklch(0.922 0 0);
+  --primary-foreground: oklch(0.205 0 0);
+  --secondary: oklch(0.269 0 0);
+  --secondary-foreground: oklch(0.985 0 0);
+  --muted: oklch(0.269 0 0);
+  --muted-foreground: oklch(0.708 0 0);
+  --accent: oklch(0.269 0 0);
+  --accent-foreground: oklch(0.985 0 0);
+  --destructive: oklch(0.704 0.191 22.216);
+  --border: oklch(1 0 0 / 10%);
+  --input: oklch(1 0 0 / 15%);
+  --ring: oklch(0.556 0 0);
+  --chart-1: oklch(0.87 0 0);
+  --chart-2: oklch(0.556 0 0);
+  --chart-3: oklch(0.439 0 0);
+  --chart-4: oklch(0.371 0 0);
+  --chart-5: oklch(0.269 0 0);
+  --sidebar: oklch(0.205 0 0);
+  --sidebar-foreground: oklch(0.985 0 0);
+  --sidebar-primary: oklch(0.488 0.243 264.376);
+  --sidebar-primary-foreground: oklch(0.985 0 0);
+  --sidebar-accent: oklch(0.269 0 0);
+  --sidebar-accent-foreground: oklch(0.985 0 0);
+  --sidebar-border: oklch(1 0 0 / 10%);
+  --sidebar-ring: oklch(0.556 0 0);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+    /* The app fills the viewport and scrolls inside its panels. A page-level
+       scrollbar here would move the whole three-column layout. */
+    overflow: hidden;
+  }
+  html {
+    @apply font-sans;
+    /* The site sets headings this tight; at application sizes it is what keeps
+       Geist from reading like a default UI font. */
+    letter-spacing: -0.011em;
+  }
+  h1,
+  h2,
+  h3 {
+    letter-spacing: -0.035em;
+  }
+}
+
+/* The mono micro-label the site uses for every piece of data and every eyebrow:
+   Geist Mono, ten-and-a-half pixels, wide tracking, upper case, muted. It is the
+   single most recognisable thing in the design system and it does most of the
+   work of making an application look like it belongs to this product. */
+/* `.lm-acl-head span` from app/legalmemory.css, to the value: Geist Mono at ten
+   pixels, 0.11em, upper case, --muted-3. */
+@utility lm-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+  color: var(--lm-muted-3);
+}
+
+/* `.lm-acl-row code`: the same face at 11.5px with normal tracking, for values
+   rather than labels — ids, paths, counts. */
+@utility lm-mono {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  letter-spacing: normal;
+}
+
+/* Geist's semibold on this design system is 560, not 500 or 600. It is what
+   `.lm-panel-list b`, `.lm-bar-meta b` and `.lm-acl-row .is-yes` all use, and
+   at 13-15px the difference from 500 is visible. */
+@utility font-emphasis {
+  font-weight: 560;
+}
+
+/* Panel scrollbars: present, but not a second visual element in every column. */
+@utility lm-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(14, 10, 7, 0.18) transparent;
+
+  &::-webkit-scrollbar {
+    width: 9px;
+    height: 9px;
+  }
+  &::-webkit-scrollbar-thumb {
+    background: rgba(14, 10, 7, 0.16);
+    border-radius: 999px;
+    border: 2px solid transparent;
+    background-clip: content-box;
+  }
+  &::-webkit-scrollbar-thumb:hover {
+    background: rgba(14, 10, 7, 0.28);
+    background-clip: content-box;
+  }
+  &::-webkit-scrollbar-track {
+    background: transparent;
+  }
+}
+
+@custom-variant data-open (&:where([data-state="open"], [data-open]:not([data-open="false"])));
+
+@custom-variant data-closed (&:where([data-state="closed"], [data-closed]:not([data-closed="false"])));

@@ -1,0 +1,63 @@
+# The public edge for legalmemory.eigenweltlabs.com.
+#
+# One origin, one certificate, two things behind it: the demo application at the
+# root and the documentation under /docs. They share a host deliberately — the
+# demo's navbar links to the docs, an MCP client's OAuth discovery is rooted at
+# this origin, and a second subdomain would mean a second certificate and a
+# second DNS record for content that is part of the same product.
+#
+# Caddy obtains and renews the certificate itself over ACME; nothing here holds
+# a key. DEMO_DOMAIN and ACME_EMAIL come from the environment so the same file
+# serves a staging host without editing.
+
+{
+	email {$ACME_EMAIL}
+	# Behind Google's load balancer or a Cloudflare proxy the client address
+	# arrives in a header; without this every log line and every rate limit
+	# sees the proxy instead. Harmless when there is no proxy in front.
+	servers {
+		trusted_proxies static private_ranges
+	}
+}
+
+{$DEMO_DOMAIN} {
+	encode zstd gzip
+
+	# ---------------------------------------------------------------- docs
+	# `handle_path` strips the prefix before hitting the filesystem, which is
+	# what Astro's `base: "/docs"` build expects: it emits files at the root of
+	# dist and links to them under /docs.
+	handle_path /docs/* {
+		root * /srv/docs
+		try_files {path} {path}/ {path}.html /404.html
+		file_server
+		header Cache-Control "public, max-age=300"
+		header /_astro/* Cache-Control "public, max-age=31536000, immutable"
+	}
+
+	# /docs with no trailing slash would otherwise miss the matcher above.
+	redir /docs /docs/ permanent
+
+	# ---------------------------------------------------------------- demo
+	handle {
+		reverse_proxy demo:3000 {
+			# The demo derives the OAuth discovery URLs from these; without
+			# them it advertises its own container address and every MCP
+			# client's discovery dead-ends on a host that does not exist.
+			header_up X-Forwarded-Host {host}
+			header_up X-Forwarded-Proto {scheme}
+			# Model answers stream for a minute or more. The default would cut
+			# a long answer off mid-sentence.
+			flush_interval -1
+			transport http {
+				response_header_timeout 5m
+				read_timeout 10m
+			}
+		}
+	}
+
+	log {
+		output stdout
+		format console
+	}
+}

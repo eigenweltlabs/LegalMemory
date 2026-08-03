@@ -1,0 +1,228 @@
+# The demo stack: the smallest set of containers that can answer a question
+# about a firm's documents and show you the file it answered from.
+#
+#   cp .env.demo.example .env.demo
+#   docker compose -f docker-compose.demo.yml --env-file .env.demo up -d --build
+#   open http://localhost:3200
+#
+# Five services run by default. Each one is here because removing it removes a
+# capability the demo is about:
+#
+#   postgres    the index itself — documents, versions, matters, permissions
+#   opensearch  retrieval. Every ranking leg is an OpenSearch query, so search
+#               is not degraded without it, it is absent
+#   litellm     the model gateway. One place holds provider keys, and both the
+#               appliance and the demo spend through it
+#   app         the appliance: HTTP API, MCP endpoint, permission compiler
+#   demo        this application
+#
+# What is deliberately absent, and what you lose:
+#
+#   worker + hatchet + hatchet-postgres   Durable orchestration of the insertion
+#     pipeline. The demo sets KI_COMPONENTS__ORCHESTRATOR_PROVIDER=local, so the
+#     app runs the pipeline in its own process instead. Fine for a demo corpus;
+#     not what a firm's estate should be indexed with, because a stage that
+#     fails has no retry ledger behind it.
+#   keycloak + oauth2-proxy   Real sign-in. The demo authenticates with a
+#     trusted header (see KI_MCP_DEV_TRUSTED_HEADER below), which is a
+#     development affordance and not a security boundary.
+#   langfuse   Model-call tracing.
+#   restore-agent + backup-permissions   Backup and restore.
+#   watcher    Continuous filesystem watching for local-folder connectors.
+#
+#   docling    Document conversion — required to *index* anything. It is in the
+#     `ingest` profile rather than absent, because a demo pointed at an existing
+#     index never needs it and it is the largest image in the stack:
+#
+#       docker compose -f docker-compose.demo.yml --profile ingest up -d
+#
+# Ports are bound to 127.0.0.1. Nothing here should be reachable from the
+# network — see the trusted-header note below for why that matters.
+
+name: legalmemory-demo
+
+x-appliance-env: &appliance-env
+  KI_DATABASE_URL: postgresql+pg8000://ki:${KI_POSTGRES_PASSWORD:-ki-dev-only}@postgres:5432/ki
+  KI_ARTIFACT_DIR: /data/artifacts
+  KI_CONFIG_PATH: /data/config.json
+  KI_COMPONENTS__LITELLM_URL: http://litellm:4000
+  KI_COMPONENTS__DOCLING_URL: http://docling:5001
+  KI_COMPONENTS__OPENSEARCH_URL: http://opensearch:9200
+  # In-process rather than Hatchet: this is what removes three containers. The
+  # app runs pipeline stages itself, which is supported and is the reason the
+  # setting exists.
+  KI_COMPONENTS__ORCHESTRATOR_PROVIDER: local
+  KI_SECURITY__AUTH_MODE: trusted_header
+  # The demo names its own identity in a header. That is a development mode:
+  # anything that can reach port 8000 can call itself any lawyer in the firm,
+  # which is exactly the property the permission compiler exists to prevent.
+  # It is acceptable here only because the port is bound to localhost and the
+  # data is a demo corpus. A real deployment puts OIDC in front instead.
+  KI_SECURITY__MCP_ALLOW_TRUSTED_HEADER: "true"
+  KI_CONNECTORS__PUBLIC_BASE_URL: http://localhost:${KI_APP_PORT:-8200}
+  KI_CONNECTOR_CREDENTIAL_KEY: ${KI_CONNECTOR_CREDENTIAL_KEY:?generate one — python -c "import base64,os;print(base64.urlsafe_b64encode(os.urandom(32)).decode())"}
+  LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-sk-lm-demo-only}
+  KI_LLM_MODEL: ${KI_LLM_MODEL:?set KI_LLM_MODEL in .env.demo}
+  KI_EMBEDDING_MODEL: ${KI_EMBEDDING_MODEL:?set KI_EMBEDDING_MODEL in .env.demo}
+
+services:
+  postgres:
+    image: pgvector/pgvector:0.8.1-pg16
+    environment:
+      POSTGRES_USER: ki
+      POSTGRES_PASSWORD: ${KI_POSTGRES_PASSWORD:-ki-dev-only}
+      POSTGRES_DB: ki
+    volumes:
+      - demo_pgdata:/var/lib/postgresql/data
+      # Creates the gateway's own database beside the appliance's, so LiteLLM
+      # needs no second Postgres of its own.
+      - ./deploy/postgres/init:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "127.0.0.1:${KI_POSTGRES_PORT:-5440}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ki -d ki"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  opensearch:
+    image: opensearchproject/opensearch:3.6.0
+    environment:
+      discovery.type: single-node
+      DISABLE_INSTALL_DEMO_CONFIG: "true"
+      DISABLE_SECURITY_PLUGIN: "true"
+      # Half the production heap. A demo corpus is thousands of chunks, not
+      # millions, and this is the difference between the stack fitting on a
+      # laptop beside everything else a laptop is running during a demo.
+      OPENSEARCH_JAVA_OPTS: -Xms512m -Xmx512m
+    ulimits:
+      memlock: { soft: -1, hard: -1 }
+    volumes:
+      - demo_opensearch:/usr/share/opensearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:9200/_cluster/health >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+
+  litellm:
+    image: ghcr.io/berriai/litellm:v1.85.1
+    command: ["--config", "/app/config.yaml", "--port", "4000"]
+    environment:
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-sk-lm-demo-only}
+      LITELLM_SALT_KEY: ${LITELLM_SALT_KEY:-demo-salt-change-me}
+      DATABASE_URL: postgresql://ki:${KI_POSTGRES_PASSWORD:-ki-dev-only}@postgres:5432/litellm
+      # The gateway's own console, at http://localhost:${LITELLM_PORT:-4200}/ui —
+      # every call the demo made, with its prompt, its response, its latency and
+      # its cost. This is the "so I have logs too" of the demo stack.
+      UI_USERNAME: ${LITELLM_UI_USERNAME:-admin}
+      UI_PASSWORD: ${LITELLM_UI_PASSWORD:-lm-demo-only}
+      STORE_MODEL_IN_DB: "True"
+      # The appliance's model and its embeddings.
+      KI_LLM_MODEL: ${KI_LLM_MODEL:?set KI_LLM_MODEL in .env.demo}
+      KI_LLM_UPSTREAM: ${KI_LLM_UPSTREAM:?set KI_LLM_UPSTREAM in .env.demo}
+      KI_LLM_API_BASE: ${KI_LLM_API_BASE-}
+      KI_LLM_API_KEY: ${KI_LLM_API_KEY:?set KI_LLM_API_KEY in .env.demo}
+      KI_LLM_INPUT_COST_PER_TOKEN: ${KI_LLM_INPUT_COST_PER_TOKEN:-0}
+      KI_LLM_OUTPUT_COST_PER_TOKEN: ${KI_LLM_OUTPUT_COST_PER_TOKEN:-0}
+      KI_EMBEDDING_MODEL: ${KI_EMBEDDING_MODEL:?set KI_EMBEDDING_MODEL in .env.demo}
+      KI_EMBEDDING_UPSTREAM: ${KI_EMBEDDING_UPSTREAM:?set KI_EMBEDDING_UPSTREAM in .env.demo}
+      KI_EMBEDDING_API_KEY: ${KI_EMBEDDING_API_KEY:?set KI_EMBEDDING_API_KEY in .env.demo}
+      KI_EMBEDDING_INPUT_COST_PER_TOKEN: ${KI_EMBEDDING_INPUT_COST_PER_TOKEN:-0}
+      # The demo chat's model. Defaults to the appliance's own so the stack
+      # starts with one model configured; set these to run the chat on
+      # something small and fast (gemini-flash, for instance) instead.
+      KI_DEMO_MODEL: ${KI_DEMO_MODEL:-${KI_LLM_MODEL}}
+      KI_DEMO_UPSTREAM: ${KI_DEMO_UPSTREAM:-${KI_LLM_UPSTREAM}}
+      KI_DEMO_API_BASE: ${KI_DEMO_API_BASE-}
+      KI_DEMO_API_KEY: ${KI_DEMO_API_KEY:-${KI_LLM_API_KEY}}
+      KI_DEMO_INPUT_COST_PER_TOKEN: ${KI_DEMO_INPUT_COST_PER_TOKEN:-0}
+      KI_DEMO_OUTPUT_COST_PER_TOKEN: ${KI_DEMO_OUTPUT_COST_PER_TOKEN:-0}
+    volumes:
+      - ./deploy/litellm/demo-config.yaml:/app/config.yaml:ro
+    ports:
+      - "127.0.0.1:${LITELLM_PORT:-4200}:4000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment: *appliance-env
+    volumes:
+      - demo_appdata:/data
+      - ./testdata:/testdata:ro
+      # Read-only view of the host so the local-folder connector can index a
+      # directory you point it at. Narrow KI_LOCAL_MOUNT to scope it.
+      - ${KI_LOCAL_MOUNT:-./testdata}:${KI_LOCAL_MOUNT:-/host-documents}:ro
+    ports:
+      - "127.0.0.1:${KI_APP_PORT:-8200}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      opensearch:
+        condition: service_healthy
+      litellm:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
+      interval: 10s
+      timeout: 3s
+      retries: 18
+    restart: unless-stopped
+
+  demo:
+    build:
+      context: ./demo
+      dockerfile: Dockerfile
+    environment:
+      LEGALMEMORY_API_URL: http://app:8000
+      # Who the demo is signed in as. Change this and the tree, the answers and
+      # the previews all change with it — which is the demonstration.
+      LEGALMEMORY_PRINCIPALS: ${DEMO_PRINCIPALS:-role:admin}
+      DEMO_MODEL: ${KI_DEMO_MODEL:-${KI_LLM_MODEL}}
+      # Through the gateway, always — that is what puts every demo call in the
+      # same spend log as the appliance's own, with its prompt and its response.
+      DEMO_MODEL_BASE_URL: http://litellm:4000/v1
+      DEMO_MODEL_API_KEY: ${LITELLM_MASTER_KEY:-sk-lm-demo-only}
+      # Optional login. Both or neither; absent leaves the demo open.
+      NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: ${NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY-}
+      CLERK_SECRET_KEY: ${CLERK_SECRET_KEY-}
+      DEMO_OAUTH_CLIENT_ID: ${DEMO_OAUTH_CLIENT_ID-}
+      # The public URL clients reach, for OAuth discovery behind a proxy.
+      DEMO_PUBLIC_URL: ${DEMO_PUBLIC_URL-}
+    ports:
+      - "127.0.0.1:${DEMO_PORT:-3200}:3000"
+    depends_on:
+      app:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Conversion. Only needed to index documents; a demo pointed at an index that
+  # already has them never starts it.
+  docling:
+    profiles: ["ingest"]
+    image: quay.io/docling-project/docling-serve:v1.18.0
+    environment:
+      DOCLING_SERVE_ENABLE_UI: "false"
+      # Must exceed the client timeout: sync convert gives up server-side after
+      # this while the task keeps running, and a retry then duplicates the
+      # conversion instead of picking up the one already in flight.
+      DOCLING_SERVE_MAX_SYNC_WAIT: "330"
+      DOCLING_SERVE_ENG_LOC_NUM_WORKERS: "4"
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:5001/health')\""]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+volumes:
+  demo_pgdata:
+  demo_appdata:
+  demo_opensearch:

@@ -1,0 +1,108 @@
+# Production overlay for the hosted demo at legalmemory.eigenweltlabs.com.
+#
+#   docker compose -f docker-compose.demo.yml -f docker-compose.deploy.yml \
+#     --env-file .env.demo up -d
+#
+# An overlay, not a second stack: every service and its wiring is defined once
+# in docker-compose.demo.yml, and this file changes only what differs when the
+# thing is on the internet holding a real index rather than on a laptop holding
+# a sample. Two full copies would drift, and the copy that drifts is always the
+# one nobody ran today.
+#
+# What it changes:
+#   * an edge (Caddy) terminating TLS, serving /docs, proxying the demo
+#   * Postgres tuned for ~50,000 documents (see deploy/postgres/tuning.conf)
+#   * OpenSearch given a real heap
+#   * only the edge binds a public port
+#
+# On ports: every service in the base file already binds to 127.0.0.1, so on a
+# public host none of them face the network — they stay reachable over an SSH
+# tunnel, which is what you want when debugging a running deployment. Compose's
+# `!reset` would drop them entirely but needs Compose 2.24; on older versions the
+# tag is silently ignored, which is worse than not writing it.
+#
+# Sizing, measured from a 13,544-document index rather than guessed:
+#   database ~34 GB · OpenSearch ~18 GB · artifacts ~2.5 GB
+#   → a 32 GB host with 200 GB of SSD, comfortably.
+
+services:
+  # --------------------------------------------------------------------- edge
+  caddy:
+    image: caddy:2.10-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DEMO_DOMAIN: ${DEMO_DOMAIN:?set DEMO_DOMAIN, e.g. legalmemory.eigenweltlabs.com}
+      ACME_EMAIL: ${ACME_EMAIL:?set ACME_EMAIL for certificate notices}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - docs_dist:/srv/docs:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      demo:
+        condition: service_healthy
+
+  # ---------------------------------------------------------------- database
+  postgres:
+    # The tuning file is mounted rather than baked so a change is a restart
+    # rather than a rebuild, and so the numbers stay reviewable in the repo.
+    command:
+      - postgres
+      - -c
+      - config_file=/etc/postgresql/postgresql.conf
+      - -c
+      - include=/etc/postgresql/tuning.conf
+    volumes:
+      - demo_pgdata:/var/lib/postgresql/data
+      - ./deploy/postgres/init:/docker-entrypoint-initdb.d:ro
+      - ./deploy/postgres/tuning.conf:/etc/postgresql/tuning.conf:ro
+    shm_size: 1gb
+
+  # ------------------------------------------------------------------ search
+  opensearch:
+    environment:
+      discovery.type: single-node
+      DISABLE_INSTALL_DEMO_CONFIG: "true"
+      DISABLE_SECURITY_PLUGIN: "true"
+      # ~2.7 M chunks at 1536 dimensions. The laptop's 512 MB is a laptop
+      # number; below about 4 GB the k-NN graph does not stay resident and
+      # every query pays for it.
+      OPENSEARCH_JAVA_OPTS: -Xms4g -Xmx4g
+    ulimits:
+      memlock: { soft: -1, hard: -1 }
+      nofile: { soft: 65536, hard: 65536 }
+
+  # --------------------------------------------------------------- appliance
+  #
+  # Pinned to a pushed digest-bearing tag rather than built here. The base file
+  # names no image for `app` and `demo`, so Compose would derive one from the
+  # directory name and, with --no-build, look for something that was never
+  # built. Naming the registry ref makes the deployed revision explicit and
+  # makes a rollback a different value of one variable.
+  app:
+    image: ${APP_IMAGE:?set APP_IMAGE to the pushed appliance tag}
+    environment:
+      KI_CONNECTORS__PUBLIC_BASE_URL: https://${DEMO_DOMAIN}
+
+  # --------------------------------------------------------------------- demo
+  demo:
+    image: ${DEMO_IMAGE:?set DEMO_IMAGE to the pushed demo tag}
+    environment:
+      LEGALMEMORY_API_URL: http://app:8000
+      LEGALMEMORY_PRINCIPALS: ${DEMO_PRINCIPALS:-role:admin}
+      DEMO_MODEL: ${KI_DEMO_MODEL:-${KI_LLM_MODEL}}
+      DEMO_MODEL_BASE_URL: http://litellm:4000/v1
+      DEMO_MODEL_API_KEY: ${LITELLM_MASTER_KEY:-sk-lm-demo-only}
+      NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: ${NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY-}
+      CLERK_SECRET_KEY: ${CLERK_SECRET_KEY-}
+      # Behind the edge the demo cannot see its own public name, and OAuth
+      # discovery has to publish one that clients can actually reach.
+      DEMO_PUBLIC_URL: https://${DEMO_DOMAIN}
+
+volumes:
+  docs_dist:
+  caddy_data:
+  caddy_config:
