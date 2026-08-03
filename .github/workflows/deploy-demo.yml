@@ -125,16 +125,20 @@ jobs:
       # The instance has no gcloud — it reads Secret Manager over REST with a
       # token from the metadata server, which is what its service account is
       # for. The secret never passes through the runner or a workflow log.
+      #
+      # Parsed with python3 rather than sed: the payload is base64 inside JSON,
+      # and a regex that extracts it is one unexpected field away from feeding
+      # `base64 -d` something that is not base64.
       - name: Render environment from Secret Manager
         run: |
           gcloud compute ssh "${GCE_INSTANCE}" --zone "${GCE_ZONE}" --tunnel-through-iap --quiet --command '
             set -euo pipefail
             TOKEN=$(curl -sf -H "Metadata-Flavor: Google" \
               "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token" \
-              | sed -E "s/.*\"access_token\":\"([^\"]+)\".*/\\1/")
+              | python3 -c "import json,sys;print(json.load(sys.stdin)[\"access_token\"])")
             curl -sf -H "Authorization: Bearer $TOKEN" \
               "https://secretmanager.googleapis.com/v1/projects/'"${GCP_PROJECT}"'/secrets/legalmemory-demo-env/versions/latest:access" \
-              | sed -E "s/.*\"data\":\"([^\"]+)\".*/\\1/" | base64 -d > ~/.env.demo.new
+              | python3 -c "import base64,json,sys;sys.stdout.buffer.write(base64.b64decode(json.load(sys.stdin)[\"payload\"][\"data\"]))" > ~/.env.demo.new
             test -s ~/.env.demo.new
             chmod 600 ~/.env.demo.new && mv ~/.env.demo.new ~/.env.demo
           '
@@ -152,7 +156,7 @@ jobs:
 
             TOKEN=\$(curl -sf -H 'Metadata-Flavor: Google' \
               'http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token' \
-              | sed -E 's/.*\"access_token\":\"([^\"]+)\".*/\\1/')
+              | python3 -c 'import json,sys;print(json.load(sys.stdin)[\"access_token\"])')
             echo \"\$TOKEN\" | docker login -u oauth2accesstoken --password-stdin 'https://${GCP_REGION}-docker.pkg.dev'
 
             # The revision being deployed, written where a later `docker compose
