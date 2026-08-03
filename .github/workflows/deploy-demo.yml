@@ -147,7 +147,13 @@ jobs:
         run: |
           gcloud compute ssh "${GCE_INSTANCE}" --zone "${GCE_ZONE}" --tunnel-through-iap --quiet --command "
             set -euo pipefail
-            mkdir -p ~/legalmemory && tar xzf ~/bundle.tgz -C ~/legalmemory
+            # --overwrite and a chown afterwards: anything extracted here by
+            # hand, as root, would otherwise be un-writable by the deploy user
+            # and tar exits non-zero on the first 'File exists'. Extraction has
+            # to be idempotent no matter who last touched the directory.
+            mkdir -p ~/legalmemory
+            sudo tar xzf ~/bundle.tgz -C ~/legalmemory --overwrite --no-same-owner
+            sudo chown -R \$(id -u):\$(id -g) ~/legalmemory
             cd ~/legalmemory
             # The local-folder connector's read-only bind. Nothing indexes from
             # it here, but Compose creates a root-owned directory if it is
