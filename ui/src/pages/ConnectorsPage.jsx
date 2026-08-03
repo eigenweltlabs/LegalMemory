@@ -166,6 +166,8 @@ export default function ConnectorsPage({ identity, navigate, focus, connected, o
         </div>
       </div>
 
+      <SpendWarning admin={admin} />
+
       {connected && <div className="form-note connect-note"><span><Check size={13} /> <strong>{byKind[connected]?.name || connected.replaceAll("_", " ")}</strong> authorized. {freshlyConnected.length ? "Choose the folders it should sync." : "It stays empty until a sync runs."}</span><span className="connect-note-actions">{admin && freshlyConnected.map((source) => <button className="text-button" key={source.id} onClick={() => setScopeFor(source.id)}><FolderTree size={13} /> {freshlyConnected.length > 1 ? `Choose folders — ${source.display_name}` : "Choose folders"}</button>)}<button className="icon-mini" title="Dismiss" onClick={() => onClearConnected?.()}><X size={13} /></button></span></div>}
 
       {actionError && <div className="form-error">{actionError}</div>}
@@ -355,6 +357,48 @@ function syncedNote(journey) {
   if (journey.id === "index_unknown") return "indexing incomplete estate-wide";
   if (journey.id === "partial") return `${journey.indexed.toLocaleString()} indexed`;
   return `${(journey.indexed ?? 0).toLocaleString()} indexed`;
+}
+
+/**
+ * What a connection costs, said before one is made.
+ *
+ * Every indexed document is read by a model several times over — classified,
+ * related to its versions, mined for metadata and decisions — so pointing this
+ * page at a SharePoint site is not "adding a folder", it is authorising a spend
+ * proportional to how much is behind it. A site nobody has pruned since 2014 can
+ * be six figures of documents, and the first signal that this was expensive
+ * should not be the invoice.
+ *
+ * Shown once and then dismissed for good: this is a warning for the person
+ * setting the appliance up, and repeating it daily is how it stops being read.
+ * Scoping folders — the control immediately below — is the actual remedy, so the
+ * warning points at it rather than only alarming.
+ */
+function SpendWarning({ admin }) {
+  const [dismissed, setDismissed] = useState(() => {
+    try { return localStorage.getItem("lm.spend-warning.dismissed") === "1"; } catch { return false; }
+  });
+  if (!admin || dismissed) return null;
+  const dismiss = () => {
+    try { localStorage.setItem("lm.spend-warning.dismissed", "1"); } catch { /* private mode */ }
+    setDismissed(true);
+  };
+  return (
+    <div className="notice-banner spend-warning">
+      <AlertTriangle size={15} />
+      <div>
+        <strong>Connecting a large source can spend a lot on models, quickly.</strong>
+        <span>
+          Every document is read by a model more than once — classified, related to its
+          other versions, mined for metadata and decisions. A SharePoint site or shared
+          drive can hold hundreds of thousands of files, and the whole of it is indexed
+          unless you narrow it. Choose folders when you connect a source, watch the first
+          sync on <b>Costs</b>, and widen the scope once you know the per-document price.
+        </span>
+      </div>
+      <button className="icon-mini" title="Dismiss" onClick={dismiss}><X size={13} /></button>
+    </div>
+  );
 }
 
 function JourneyCard({ source, entry, journey, admin, busyFor, onAct, onOpen }) {

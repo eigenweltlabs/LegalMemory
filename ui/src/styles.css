@@ -1009,3 +1009,19 @@ i.b-quarantined, .b-quarantined i { background: var(--red); }
 .clause-row:last-child { border-bottom: 0; }
 .clause-row summary { cursor: pointer; font-size: 10px; }
 .clause-row p { margin: 7px 0 0; color: var(--muted); font-size: 9px; line-height: 1.55; }
+
+/* The spend warning reuses the amber notice, plus a dismiss control pushed to the
+   far edge so the prose keeps its measure rather than wrapping around a button. */
+.notice-banner.spend-warning { align-items: flex-start; }
+.notice-banner.spend-warning > div { flex: 1; min-width: 0; }
+.notice-banner.spend-warning .icon-mini { flex: none; opacity: 1; margin-left: 8px; }
+.notice-banner.spend-warning b { color: #6b4d14; font-weight: 700; }
+
+/* Where the models on this page could run instead. Blue rather than amber: this is
+   an offer, and dressing it as a warning would spend the alarm colour on marketing. */
+.inference-offer { display: flex; align-items: center; justify-content: space-between; gap: 20px; flex-wrap: wrap; margin-bottom: 18px; border-color: #bdc8ef; background: linear-gradient(180deg, #f7f9ff, var(--surface)); padding: 16px 18px; }
+.inference-offer .eyebrow { margin-bottom: 5px; }
+.inference-offer-body { flex: 1; min-width: 260px; }
+.inference-offer-body p { color: var(--muted); font-size: 10px; line-height: 1.6; margin: 0; max-width: 72ch; }
+.inference-offer-body strong { color: var(--ink); font-weight: 700; }
+.inference-offer-actions { display: flex; align-items: center; gap: 8px; flex: none; }

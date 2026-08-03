@@ -69,6 +69,18 @@ services:
       # number; below about 4 GB the k-NN graph does not stay resident and
       # every query pays for it.
       OPENSEARCH_JAVA_OPTS: -Xms4g -Xmx4g
+      # Where snapshot repositories may live. Loading a corpus means restoring a
+      # snapshot taken on another cluster, and OpenSearch refuses to register a
+      # filesystem repository outside this list — a setting that cannot be
+      # changed at runtime, so leaving it out means a restart in the middle of
+      # the one operation that needed it.
+      path.repo: /snapshots
+    volumes:
+      # Compose replaces the whole list rather than merging it, so the base
+      # file's data volume has to be repeated here by its own name. Getting this
+      # wrong points the cluster at an empty volume and looks like data loss.
+      - demo_opensearch:/usr/share/opensearch/data
+      - opensearch_snapshots:/snapshots
     ulimits:
       memlock: { soft: -1, hard: -1 }
       nofile: { soft: 65536, hard: 65536 }
@@ -104,3 +116,4 @@ volumes:
   docs_dist:
   caddy_data:
   caddy_config:
+  opensearch_snapshots:

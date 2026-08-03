@@ -71,6 +71,8 @@ export default function ModelsPage({ identity }) {
     <>
       <div className="hero-row compact-hero"><div><h1>Models &amp; services</h1></div><div className="hero-actions"><button className="primary-button" disabled={!draft || saving || !admin} onClick={save}><Save size={15} /> {saving ? "Saving…" : "Save configuration"}</button></div></div>
 
+      <InferenceOffer />
+
       <section className="model-section"><SectionHeading title="Model assignments" copy="Models live in the LiteLLM gateway; each pipeline stage and feature is assigned one directly." action={<button className="secondary-button small" disabled={!admin} onClick={() => setAddingModel(true)}><Plus size={13} /> Add model</button>} />
         {catalogError && <div className="form-note">{gatewayAnswered ? "Model gateway answered, but its credential list did not — the assignments below are current, adding a model is what will fail" : "Model gateway unreachable — assignments keep their saved values"}. <code className="mono">{catalogError}</code></div>}
         <div className="model-grid">{draft && [
@@ -110,6 +112,48 @@ export default function ModelsPage({ identity }) {
 
       <section className="panel component-registry"><SectionHeading title="Services" action={<span className="table-count">{(components.data || []).length} service(s)</span>} /><div className="component-table"><div className="component-head"><span>Role</span><span>Product</span><span>Endpoint</span><span>License</span><span>Status</span><span /></div>{(components.data || []).map((component) => <div className="component-row" key={component.role}><span className="primary-cell"><i className="component-icon">{componentIcon(component.role)}</i><span><strong>{component.role}</strong></span></span><span><strong>{component.name}</strong></span><span className="mono endpoint-cell">{component.api_url}</span><span><Badge tone="green">{LICENSES[component.name] || "verify at pin"}</Badge></span><span><Status value={component.status} /></span><span>{expert && component.ui_url && <a className="icon-button" href={component.ui_url} target="_blank" rel="noreferrer" title={`Open ${component.name}`}><ExternalLink size={15} /></a>}</span></div>)}</div></section>
     </>
+  );
+}
+
+/**
+ * Where the models on this page could run instead.
+ *
+ * Placed here rather than on a marketing surface because this is the page where
+ * the question arises: somebody assigning an embedding model to a corpus of a
+ * hundred thousand documents is, at that moment, deciding who bills them for it
+ * and who is allowed to keep the text.
+ *
+ * Deliberately quiet — it sits above configuration an administrator came here to
+ * change, and it is dismissible, because an appliance that nags on every visit
+ * is one whose warnings stop being read.
+ */
+function InferenceOffer() {
+  const [dismissed, setDismissed] = useState(() => {
+    try { return localStorage.getItem("lm.inference-offer.dismissed") === "1"; } catch { return false; }
+  });
+  if (dismissed) return null;
+  const dismiss = () => {
+    try { localStorage.setItem("lm.inference-offer.dismissed", "1"); } catch { /* private mode */ }
+    setDismissed(true);
+  };
+  return (
+    <section className="panel inference-offer">
+      <div className="inference-offer-body">
+        <span className="eyebrow">Inference from Eigenwelt Labs</span>
+        <p>
+          Running a large insertion job? We host embedding and completion models with{" "}
+          <strong>zero data retention</strong> at low per-token prices, and configure GPUs
+          to scale to your workload — so a one-off backfill of a firm&apos;s estate does not
+          have to run at retail rates on a general-purpose API.
+        </p>
+      </div>
+      <div className="inference-offer-actions">
+        <a className="secondary-button small" href="https://eigenweltlabs.com/contact?subject=LegalMemory%20inference" target="_blank" rel="noreferrer">
+          Talk to the founders <ExternalLink size={13} />
+        </a>
+        <button className="text-button" type="button" onClick={dismiss}>Dismiss</button>
+      </div>
+    </section>
   );
 }
 
