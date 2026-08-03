@@ -6,6 +6,7 @@ import { AlertCircle, Download, FileQuestion, Loader2, X } from "lucide-react";
 import type { TreeFile } from "@/lib/appliance";
 import { cn } from "@/lib/utils";
 import { EmlPreview } from "./eml-preview";
+import { PptxPreview } from "./pptx-preview";
 import { fileKind, FileGlyph } from "./file-glyph";
 
 /**
@@ -28,6 +29,7 @@ type Mode =
   | "html"
   | "text"
   | "eml"
+  | "pptx"
   | "converted"
   | "unsupported";
 
@@ -42,6 +44,10 @@ function previewMode(file: TreeFile): Mode {
       return extension === "docx" ? "docx" : "converted";
     case "excel":
       return "sheet";
+    case "slides":
+      // Only OOXML is a zip of readable parts; legacy binary .ppt is not, and
+      // keeps the appliance's converted text.
+      return extension === "pptx" ? "pptx" : "converted";
     case "image":
       return "image";
     case "text":
@@ -146,6 +152,8 @@ function PreviewBody({ file }: { file: TreeFile }) {
       return <TextPreview src={src} />;
     case "eml":
       return <EmlPreview src={src} />;
+    case "pptx":
+      return <PptxPreview src={src} name={file.name} />;
     case "converted":
       return <ConvertedText file={file} />;
     default:
