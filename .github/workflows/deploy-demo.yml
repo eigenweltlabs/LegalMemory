@@ -159,8 +159,10 @@ jobs:
               | python3 -c 'import json,sys;print(json.load(sys.stdin)[\"access_token\"])')
             echo \"\$TOKEN\" | docker login -u oauth2accesstoken --password-stdin 'https://${GCP_REGION}-docker.pkg.dev'
 
-            # The revision being deployed, written where a later `docker compose
-            # ps` on the box can still see it.
+            # The revision being deployed, written where a later compose
+            # invocation on the box can still see it. No backticks anywhere in
+            # this block: it is a double-quoted string, so they would be command
+            # substitution evaluated on the runner, comment or not.
             grep -v '^APP_IMAGE=\|^DEMO_IMAGE=' ~/.env.demo > ~/.env.run
             echo 'APP_IMAGE=${REGISTRY}/app:${{ github.sha }}'   >> ~/.env.run
             echo 'DEMO_IMAGE=${REGISTRY}/demo:${{ github.sha }}' >> ~/.env.run
