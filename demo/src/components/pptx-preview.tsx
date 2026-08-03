@@ -17,8 +17,32 @@ import { useEffect, useRef, useState } from "react";
  * which is a large dependency to hand to somebody who only opened a Word file.
  */
 
-/** A .pptx is 16:9 in every deck this century; 4:3 exists and is rare. */
-const ASPECT = 9 / 16;
+/** EMU — English Metric Units, PowerPoint's internal unit. 914400 to the inch. */
+const DEFAULT_ASPECT = 3 / 4;
+
+/**
+ * The deck's own slide dimensions, from `ppt/presentation.xml`.
+ *
+ * Guessing this is not safe. A widescreen deck is 13.33in x 7.5in and a classic
+ * one is 10in x 7.5in — the same height, a different width — so assuming 16:9
+ * gives a 4:3 deck a box a quarter too short and clips every slide top and
+ * bottom. The library renders into exactly the box it is given and does not
+ * measure the deck itself, so the caller has to.
+ */
+async function slideAspect(bytes: ArrayBuffer): Promise<number> {
+  try {
+    const { default: JSZip } = await import("jszip");
+    const zip = await JSZip.loadAsync(bytes);
+    const xml = await zip.file("ppt/presentation.xml")?.async("text");
+    const size = xml?.match(/<p:sldSz[^>]*\bcx="(\d+)"[^>]*\bcy="(\d+)"/);
+    if (!size) return DEFAULT_ASPECT;
+    const cx = Number(size[1]);
+    const cy = Number(size[2]);
+    return cx > 0 && cy > 0 ? cy / cx : DEFAULT_ASPECT;
+  } catch {
+    return DEFAULT_ASPECT;
+  }
+}
 
 export function PptxPreview({ src, name }: { src: string; name: string }) {
   const host = useRef<HTMLDivElement>(null);
@@ -43,12 +67,16 @@ export function PptxPreview({ src, name }: { src: string; name: string }) {
         const bytes = await response.arrayBuffer();
         if (cancelled) return;
 
+        const aspect = await slideAspect(bytes);
+        if (cancelled) return;
+
         // Sized from the pane it is in rather than a constant: this sits in a
         // resizable split, and a fixed width either overflows or leaves a
-        // margin the deck did not ask for.
+        // margin the deck did not ask for. The pagination controls the library
+        // draws sit inside the slide box, so no room is reserved for them.
         const width = Math.max(node.clientWidth - 32, 320);
         node.replaceChildren();
-        previewer = init(node, { width, height: Math.round(width * ASPECT), mode: "slide" });
+        previewer = init(node, { width, height: Math.round(width * aspect), mode: "slide" });
         await (previewer as { preview: (b: ArrayBuffer) => Promise<unknown> }).preview(bytes);
         if (!cancelled) setReady(true);
       } catch (cause) {
