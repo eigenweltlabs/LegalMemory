@@ -88,10 +88,15 @@ export default authEnabled
       // application's branding applies. The `signInUrl` prop on ClerkProvider
       // does not change it: that is read in the browser, and this runs before
       // any of it is sent.
+      // The return address is relative on purpose. Behind the edge this process
+      // only knows the address it binds — `request.url` is `0.0.0.0:3000` — so
+      // an absolute round trip sends someone who just signed in to a host that
+      // exists nowhere. A path is the same destination without the guess.
       const signIn = request.nextUrl.clone();
       signIn.pathname = "/sign-in";
       signIn.search = "";
-      signIn.searchParams.set("redirect_url", request.url);
+      const from = request.nextUrl.pathname + request.nextUrl.search;
+      if (from !== "/") signIn.searchParams.set("redirect_url", from);
       return NextResponse.redirect(signIn);
     })
   : (request: NextRequest) => {
