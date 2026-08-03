@@ -1,6 +1,6 @@
 """Microsoft Purview sensitivity-label filtering for Graph-backed sources.
 
-Used by the SharePoint Online and OneDrive connectors to skip
+Used by the SharePoint, SharePoint Online, and OneDrive connectors to skip
 content carrying a configured set of Purview sensitivity label GUIDs.
 
 Two filter points:

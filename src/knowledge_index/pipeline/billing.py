@@ -128,9 +128,7 @@ class BillingExtractor:
 
     def extract(self, *, limit: int | None = None) -> BillingResult:
         result = BillingResult()
-        # Billing extraction is metadata extraction over billing documents, so it runs
-        # with the model assigned to the extract_metadata stage.
-        model = self.config.pipeline.stage("extract_metadata").model
+        slot = self.config.models.extract
         with self.session_factory() as session:
             result.identifiers_promoted = promote_entity_identifiers(session)
 
@@ -164,7 +162,7 @@ class BillingExtractor:
                 try:
                     with usage_stage("extract_billing"):
                         extracted = chat_json(
-                            model,
+                            slot,
                             self.config,
                             system=BILLING_SYSTEM,
                             user=_final_text(session, version.content_hash)[:16000],
@@ -204,7 +202,7 @@ class BillingExtractor:
                     tax_total=extracted.tax_total,
                     currency=extracted.currency,
                     source_object_id=source_object_id,
-                    provenance={"model": model, "source": "billing-extractor"},
+                    provenance={"model": slot.model, "source": "billing-extractor"},
                 )
                 session.add(invoice)
                 session.flush()

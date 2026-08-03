@@ -13,7 +13,7 @@ import uuid
 
 import httpx
 import pytest
-from sqlalchemy import create_engine, select, text
+from sqlalchemy import UniqueConstraint, create_engine, select, text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -28,10 +28,6 @@ POSTGRES_ADMIN_URL = "postgresql+pg8000://ki:ki-dev-only@localhost:5439/postgres
 # canonical ki_test.
 TEST_DATABASE = os.environ.get("KI_TEST_DATABASE", "ki_test")
 TEST_DATABASE_URL = f"postgresql+pg8000://ki:ki-dev-only@localhost:5439/{TEST_DATABASE}"
-# Advisory-lock key claimed for the whole run; see the guard in pg_factory. Arbitrary
-# but fixed, and scoped to the database it is taken in, so a run in its own
-# KI_TEST_DATABASE never blocks one in ki_test.
-_RUN_LOCK = 0x4B495F54455354
 
 
 # The suite runs against whatever models the deployment names, exactly as the appliance
@@ -75,32 +71,7 @@ def pg_factory():
         )
     engine = create_engine(TEST_DATABASE_URL)
     Base.metadata.create_all(engine)
-
-    # One run per database, enforced rather than documented. The comment on
-    # TEST_DATABASE has warned about concurrent runs for a while; without a check the
-    # second run still starts, and the two then corrupt each other's fixtures — the
-    # TRUNCATE in `factory` races the other run's inserts, `restore_engine` drops a
-    # database the other run is restoring into, and the damage surfaces as a scatter of
-    # unrelated failures across backup, sync and MCP tests. Observed cost of not having
-    # this: 29 red tests in a 14-minute run, none of which was broken.
-    #
-    # A session-level advisory lock is the cheapest honest guard: it is held by this
-    # connection for exactly as long as the run lasts, and it is released automatically
-    # if the process dies, so a killed run never leaves the database locked.
-    guard = engine.connect().execution_options(isolation_level="AUTOCOMMIT")
-    if not guard.execute(text("SELECT pg_try_advisory_lock(:key)"), {"key": _RUN_LOCK}).scalar():
-        guard.close()
-        engine.dispose()
-        pytest.exit(
-            f"Another pytest run is already using {TEST_DATABASE}. Two runs against one "
-            "database corrupt each other's fixtures and fail in ways that look like real "
-            "bugs. Wait for it to finish, or give this run its own database with "
-            "KI_TEST_DATABASE=<other-name>.",
-            returncode=4,
-        )
-
     yield sessionmaker(engine, expire_on_commit=False)
-    guard.close()
     engine.dispose()
 
 
@@ -129,11 +100,14 @@ def _ensure_database(*, recreate: bool) -> None:
 
 
 def _schema_is_stale() -> bool:
-    """Whether any model column or index is missing from the existing test database.
+    """Whether any model column, index, or unique constraint is missing from the
+    existing test database.
 
-    Indexes count: some of them carry behaviour rather than performance (the partial
-    unique index that allows only one unfinished sync run per source, for instance), and
-    a test database silently missing one would pass a test that production would fail.
+    Indexes and unique constraints count: some carry behaviour rather than performance
+    (the partial unique index that allows only one unfinished sync run per source; the
+    one-chunk-per-version-ordinal constraint), and a test database silently missing one
+    would pass a test that production would fail. Postgres backs a unique constraint
+    with an identically-named index, so both compare against pg_indexes.
     """
     engine = create_engine(TEST_DATABASE_URL)
     try:
@@ -159,6 +133,13 @@ def _schema_is_stale() -> bool:
             if {column.name for column in table.columns} - existing:
                 return True
             if {index.name for index in table.indexes} - indexes:
+                return True
+            unique_constraints = {
+                constraint.name
+                for constraint in table.constraints
+                if isinstance(constraint, UniqueConstraint) and isinstance(constraint.name, str)
+            }
+            if unique_constraints - indexes:
                 return True
         return False
     finally:
@@ -204,7 +185,7 @@ def live_stack() -> None:
     """
     # Match docker-compose.yml's local-development default so an otherwise
     # unconfigured fresh stack can exercise authenticated model endpoints.
-    os.environ.setdefault("LITELLM_MASTER_KEY", "sk-lm-dev-only")
+    os.environ.setdefault("LITELLM_MASTER_KEY", "sk-eigenwelt-dev")
     master_key = os.environ["LITELLM_MASTER_KEY"]
 
     try:
@@ -249,8 +230,8 @@ def live_stack() -> None:
 def integration_config(live_stack: None, tmp_path):
     """Real-stack AppConfig: localhost service URLs, per-test artifact dir and index.
 
-    Model assignments stay at their deployment defaults (KI_LLM_MODEL for every
-    stage, KI_EMBEDDING_MODEL for retrieval.embedding_model).
+    Model slots stay at their gateway defaults (qwen3.6-35b-a3b / qwen3.6-35b-a3b /
+    text-embedding-3-small with api_key_ref env://LITELLM_MASTER_KEY).
     """
     config = AppConfig(
         artifact_dir=tmp_path / "artifacts",

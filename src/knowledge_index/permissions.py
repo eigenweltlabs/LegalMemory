@@ -277,16 +277,11 @@ class AccessService:
             ).all()
         )
 
-    def visible_project_ids(self, principals: set[str]) -> list[str]:
-        if self.is_admin(principals):
-            return list(self.session.scalars(select(Project.id)).all())
-        normalized = canonical_principals(principals)
-        if not normalized:
-            return []
-        values = sorted(normalized)
+    def _directly_granted_project_ids(self, values: list[str]) -> set[str]:
+        """Projects these principals hold a direct allow grant on, minus denies."""
         allow_grant = aliased(ProjectGrant)
         deny_grant = aliased(ProjectGrant)
-        directly_granted = set(
+        return set(
             self.session.scalars(
                 select(allow_grant.project_id)
                 .where(
@@ -303,6 +298,14 @@ class AccessService:
                 .distinct()
             ).all()
         )
+
+    def visible_project_ids(self, principals: set[str]) -> list[str]:
+        if self.is_admin(principals):
+            return list(self.session.scalars(select(Project.id)).all())
+        normalized = canonical_principals(principals)
+        if not normalized:
+            return []
+        directly_granted = self._directly_granted_project_ids(sorted(normalized))
         document_ids = self.visible_document_ids(principals)
         document_projects = set(
             self.session.scalars(
@@ -339,8 +342,31 @@ class AccessService:
         document_ids: Iterable[str] = (),
     ) -> CompiledAccessScope:
         normalized = tuple(sorted(canonical_principals(principals)))
-        visible_projects = set(self.visible_project_ids(set(normalized)))
-        visible_documents = set(self.visible_document_ids(set(normalized)))
+        principal_set = set(normalized)
+        # One authorization query yields the visible documents AND, through their
+        # project column, the document-derived visible projects. The previous shape
+        # evaluated the expensive visibility predicate up to three times per compile
+        # (visible_project_ids → visible_document_ids, then visible_document_ids
+        # again); on the retrieval hot path that multiplied the dominant SQL cost
+        # of every search.
+        rows = self.session.execute(
+            select(Document.id, Document.project_id)
+            .join(DocumentVersion, DocumentVersion.document_id == Document.id)
+            .where(self.version_predicate(principal_set))
+            .distinct()
+        ).all()
+        visible_documents = {document_id for document_id, _ in rows}
+        if self.is_admin(principal_set):
+            visible_projects = set(self.session.scalars(select(Project.id)).all())
+        elif not principal_set:
+            visible_projects = set()
+        else:
+            document_projects = {
+                project_id for _, project_id in rows if project_id is not None
+            }
+            visible_projects = (
+                self._directly_granted_project_ids(sorted(principal_set)) | document_projects
+            )
         requested_projects = {item for item in project_ids if item}
         requested_documents = {item for item in document_ids if item}
         projects = tuple(
@@ -349,13 +375,17 @@ class AccessService:
             )
         )
         if requested_projects:
-            visible_documents = set(
-                self.session.scalars(
-                    select(Document.id).where(
-                        Document.id.in_(visible_documents), Document.project_id.in_(projects)
-                    )
-                ).all()
-            )
+            # Same narrowing the SQL round-trip used to do; the project of every
+            # visible document is already in hand, so filter in place. A document
+            # without a project can never match a requested project (SQL IN said
+            # the same about NULL).
+            allowed_projects = set(projects)
+            project_of_document = dict(rows)
+            visible_documents = {
+                document_id
+                for document_id in visible_documents
+                if project_of_document.get(document_id) in allowed_projects
+            }
         documents = tuple(
             sorted(
                 visible_documents & requested_documents

@@ -281,7 +281,7 @@ class ModelRegistration(BaseModel):
     they belong in the gateway container's environment, never in a browser form,
     a request body, or this appliance's database."""
 
-    model_name: str = Field(min_length=1, max_length=150)  # the alias assignments point at
+    model_name: str = Field(min_length=1, max_length=150)  # the alias slots point at
     model: str = Field(min_length=1, max_length=200)  # upstream id, e.g. openai/gpt-4o-mini
     credential_name: str | None = Field(default=None, max_length=150)
     api_base: str | None = Field(default=None, max_length=500)
@@ -550,9 +550,6 @@ def create_app(
             "principals": sorted(identity.principals),
             "is_admin": identity.is_admin,
             "auth_mode": config_store.get().security.auth_mode,
-            # Sidebar and connector panels link into the hosted documentation; served
-            # here because /api/me is the one config-bearing endpoint non-admins can read.
-            "docs_url": config_store.get().components.docs_url,
         }
 
     @app.get("/api/downloads/{token}/{filename}", include_in_schema=False)
@@ -1433,21 +1430,28 @@ def create_app(
                 party=payload.party,
                 chunk_kind=payload.chunk_kind,
             )
+            # Compiled once and reused for both the query and the response envelope —
+            # the scope compile is the costliest SQL of the request, and compiling it
+            # again after the search doubled that cost for identical output.
+            scope = AccessService(session).compile_scope(
+                set(identity.principals),
+                project_ids=[payload.project_id] if payload.project_id else [],
+            )
             if payload.query.strip():
                 hits = service.search_semantic(
                     payload.query,
                     principals=set(identity.principals),
                     filters=filters,
                     limit=payload.limit,
+                    scope=scope,
                 )
             else:
                 hits = service.search_filter(
-                    principals=set(identity.principals), filters=filters, limit=payload.limit
+                    principals=set(identity.principals),
+                    filters=filters,
+                    limit=payload.limit,
+                    scope=scope,
                 )
-            scope = AccessService(session).compile_scope(
-                set(identity.principals),
-                project_ids=[payload.project_id] if payload.project_id else [],
-            )
             return {
                 "scope": {
                     "fingerprint": scope.fingerprint,
@@ -1472,7 +1476,7 @@ def create_app(
         # book themselves under "search".
         with usage_stage("ask"):
             plan = chat_json(
-                config.ask_model,
+                config.models.classify,
                 config,
                 system=_ASK_PLANNER_SYSTEM,
                 user=json_dumps(
@@ -1487,7 +1491,7 @@ def create_app(
 
         with usage_stage("ask"):
             answer = chat_json(
-                config.ask_model,
+                config.models.judge,
                 config,
                 system=_ASK_SYNTHESIS_SYSTEM,
                 user=json_dumps({"question": payload.question, "evidence": evidence}),
@@ -2018,7 +2022,7 @@ def create_app(
                 )
             config["root"] = str(root)
         if payload.kind == "plugin_drop":
-            # FDE-authored drop directory (docs/src/content/docs/development/plugin-connectors.md)
+            # FDE-authored drop directory (docs/connector-plugins.md)
             if payload.root is None:
                 raise HTTPException(status_code=422, detail="plugin drop root is required")
             root = payload.root.expanduser().resolve()
@@ -2741,7 +2745,7 @@ def create_app(
         return {
             "index_name": config.retrieval.index_name,
             "derived_index_name": config.derived_index_name(),
-            "embedding_model": config.retrieval.embedding_model,
+            "embedding_model": config.models.embed.model,
             "embedding_dimensions": config.retrieval.embedding_dimensions,
             "embedding_signature": config.embedding_signature(),
             "vector_engine": config.retrieval.vector_engine,
@@ -2753,7 +2757,7 @@ def create_app(
 
     @app.get("/api/models/catalog")
     def models_catalog(request: Request) -> dict:
-        """What the gateway actually serves, so a model is picked and not typed.
+        """What the gateway actually serves, so a slot is picked and not typed.
 
         Proxied rather than called from the browser: reading the registry needs the
         gateway master key, and that key never leaves this process."""
@@ -2772,7 +2776,7 @@ def create_app(
                 "credentials": [],
                 "error": f"{type(exc).__name__}: {exc}",
             }
-        # Credentials only gate *adding* a model. Losing them must not empty the model
+        # Credentials only gate *adding* a model. Losing them must not empty the slot
         # lists, which is the page's primary job.
         error = None
         try:
@@ -2791,7 +2795,7 @@ def create_app(
 
     @app.post("/api/models/catalog", status_code=201)
     def add_gateway_model(payload: ModelRegistration, request: Request) -> dict:
-        """Register a model with the gateway so stages can be assigned it.
+        """Register a model with the gateway so slots can select it.
 
         Requires ``store_model_in_db`` on the gateway; when it is off LiteLLM says so
         and that message is passed through verbatim rather than reported as success."""
@@ -2801,7 +2805,7 @@ def create_app(
         params: dict[str, Any] = {"model": payload.model}
         if payload.credential_name:
             # The gateway accepts an unknown credential name and only fails at call
-            # time with a provider auth error. Reject it here so a misconfigured model
+            # time with a provider auth error. Reject it here so a misconfigured slot
             # cannot reach the pipeline and quarantine documents for the wrong reason.
             try:
                 configured = _gateway_credentials(base, gateway_admin_headers())
@@ -2885,7 +2889,7 @@ def create_app(
         launch = _launch_insertion(session_factory, config_store)
         return {
             "target_index": target_index,
-            "embedding_model": config.retrieval.embedding_model,
+            "embedding_model": config.models.embed.model,
             "embedding_dimensions": config.retrieval.embedding_dimensions,
             "chunks_to_reembed": chunk_count,
             "requeued_objects": requeued,
@@ -3162,19 +3166,20 @@ def create_app(
             def _bucket() -> dict[str, float | int]:
                 return {"cost_usd": 0.0, "input_tokens": 0, "output_tokens": 0, "calls": 0}
 
-            # Group by the model that actually ran, not by the gateway alias that was
-            # called. Several aliases may point at one upstream model, so grouping by
-            # alias claims more models than were billed and splits one model's spend
-            # across rows — which the by-stage breakdown below already says, better.
-            # Aliases that resolve to the same model collapse into one row; an alias the
-            # gateway cannot resolve keeps its own name rather than being silently dropped.
+            # Group by the model that actually ran, not by the slot alias that called it.
+            # Three of this appliance's four aliases point at one upstream model, so
+            # grouping by alias claimed three models where two were billed, and split one
+            # model's spend across rows named after pipeline stages — which the by-stage
+            # breakdown below already says, better. Aliases that resolve to the same model
+            # collapse into one row; an alias the gateway cannot resolve keeps its own name
+            # rather than being silently dropped.
             aliases = _gateway_model_aliases(config_store.get())
             by_model: dict[str, dict[str, float | int]] = defaultdict(_bucket)
             by_stage: dict[str, dict[str, float | int]] = defaultdict(_bucket)
-            aliases_for_model: dict[str, set[str]] = defaultdict(set)
+            slots_for_model: dict[str, set[str]] = defaultdict(set)
             for row in rows:
                 model = aliases.get(row.model) or f"{row.provider}/{row.model}"
-                aliases_for_model[model].add(row.model)
+                slots_for_model[model].add(row.model)
                 for bucket in (by_model[model], by_stage[row.pipeline_stage or "unassigned"]):
                     bucket["cost_usd"] += row.cost_usd
                     bucket["input_tokens"] += row.input_tokens
@@ -3196,9 +3201,9 @@ def create_app(
                 "by_model": [
                     {
                         "model": model,
-                        # Which gateway aliases routed to it — the answer to "why is this
-                        # model billed at all", without naming the row after a pipeline stage.
-                        "aliases": sorted(aliases_for_model.get(model, ())),
+                        # Which slots routed to it — the answer to "why is this model
+                        # billed at all", without naming the row after a pipeline stage.
+                        "slots": sorted(slots_for_model.get(model, ())),
                         **values,
                         "priced": bool(values["cost_usd"]),
                     }
@@ -4068,7 +4073,7 @@ def _add_hit_evidence(evidence: list[dict], seen: set[str], hit: Any) -> None:
 def _gateway_model_aliases(config) -> dict[str, str]:
     """Map each gateway alias to the model it actually calls.
 
-    Spend is recorded against the alias an assignment names, because that is all the gateway
+    Spend is recorded against the alias a slot names, because that is all the gateway
     reports back: `x-litellm-model-group` is the alias and `x-litellm-model-id` is an
     opaque deployment hash. Resolving here rather than at write time keeps the ledger
     free of a per-call gateway lookup, and an unreachable gateway costs a nicer label,
@@ -4641,7 +4646,7 @@ def _picker_answers(spec, name: str, field, widget_type: str) -> bool:
     """Whether the folder picker already answers what this config field asks.
 
     A scoping-capable connector settles "which parts of this source" against the
-    provider's own tree, after authorization (docs/src/content/docs/connectors/index.md). Before that
+    provider's own tree, after authorization (docs/connector-scoping.md). Before that
     the appliance has never seen the drive, so a text field asking the same question can
     only be guessed at — the operator is typing folder paths at a system that could show
     them the folders. Those fields are marked so the connect form can defer them; the

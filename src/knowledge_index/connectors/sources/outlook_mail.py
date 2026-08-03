@@ -9,7 +9,7 @@ Follows the same structure as the Gmail connector implementation.
 """
 
 import base64
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
 from tenacity import retry, stop_after_attempt
@@ -197,13 +197,13 @@ class OutlookMailSource(BaseSource):
 
         folder_links[folder_id] = delta_link
         folder_names[folder_id] = folder_name
-        folder_last_sync[folder_id] = datetime.now(timezone.utc).isoformat()
+        folder_last_sync[folder_id] = datetime.utcnow().isoformat()
 
         cursor.update(
             delta_link=delta_link,
             folder_id=folder_id,
             folder_name=folder_name,
-            last_sync=datetime.now(timezone.utc).isoformat(),
+            last_sync=datetime.utcnow().isoformat(),
             folder_delta_links=folder_links,
             folder_names=folder_names,
             folder_last_sync=folder_last_sync,
@@ -249,7 +249,10 @@ class OutlookMailSource(BaseSource):
 
         try:
             received_date = datetime.fromisoformat(received_date_str.replace("Z", "+00:00"))
-            after_dt = datetime.strptime(after_date, "%Y/%m/%d").replace(tzinfo=timezone.utc)
+            after_dt = datetime.strptime(after_date, "%Y/%m/%d")
+            from datetime import timezone
+
+            after_dt = after_dt.replace(tzinfo=timezone.utc)
 
             if received_date < after_dt:
                 self.logger.debug(f"Message {message_data.get('id')} skipped: before after_date")

@@ -65,11 +65,12 @@ def test_admin_ui_status_and_config_round_trip(
 
         config = client.get("/api/config", headers=ADMIN_HEADERS).json()
         config["retrieval"]["rerank_enabled"] = True
-        config["pipeline"]["stages"]["relate"]["model"] = "qwen-relate"
+        config["models"]["judge"]["base_url"] = "http://model-gateway.internal/v1"
+        config["models"]["judge"]["api_key_ref"] = "vault://knowledge-index/judge"
         response = client.put("/api/config", json=config, headers=ADMIN_HEADERS)
         assert response.status_code == 200
         assert store.get().retrieval.rerank_enabled is True
-        assert store.get().pipeline.stage("relate").model == "qwen-relate"
+        assert store.get().models.judge.api_key_ref == "vault://knowledge-index/judge"
 
 
 def test_local_folder_connector_add_sync_and_remove(

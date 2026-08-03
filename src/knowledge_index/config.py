@@ -21,22 +21,38 @@ DEFAULT_LLM_ENV = "KI_LLM_MODEL"
 DEFAULT_EMBEDDING_ENV = "KI_EMBEDDING_MODEL"
 
 
-# Model names are always the names the LiteLLM gateway serves them under. There is no
-# intermediate layer: a stage (or a feature such as retrieval rerank) is assigned a
-# gateway model directly, and every call goes to components.litellm_url. There is no
-# offline mode either: a stage whose model is unreachable fails, retries, and
-# quarantines — it never silently degrades.
-def _default_llm() -> str:
-    # Read from the environment rather than written here: the model a firm runs is a
-    # property of its deployment, and a name compiled into the product is one that has
-    # to be edited in a source file to change. Empty when unset, which the admin UI
-    # shows as "Select a model…" and every caller fails loudly on — the alternative is
-    # guessing at a model and billing for it.
-    return os.environ.get(DEFAULT_LLM_ENV, "")
+class ModelSlot(BaseModel):
+    """One model endpoint, always served through the LiteLLM gateway (or any
+    OpenAI-compatible endpoint). There is no offline mode: a stage whose model is
+    unreachable fails, retries, and quarantines — it never silently degrades."""
+
+    provider: str = "litellm"
+    # Which model, by the name the gateway serves it under. Read from the environment
+    # rather than written here: the model a firm runs is a property of its deployment, and
+    # a name compiled into the product is one that has to be edited in a source file to
+    # change. Empty when unset, which the admin UI shows as "Select a model…" and every
+    # stage fails loudly on — the alternative is guessing at a model and billing for it.
+    model: str = Field(default_factory=lambda: os.environ.get(DEFAULT_LLM_ENV, ""))
+    base_url: str | None = None  # None -> components.litellm_url
+    api_key_ref: str | None = "env://LITELLM_MASTER_KEY"
+    temperature: float = 0.0
 
 
-def _default_embedding_model() -> str:
-    return os.environ.get(DEFAULT_EMBEDDING_ENV, "")
+class ModelsConfig(BaseModel):
+    """Which model does which job. The slot is the job; the value is the model.
+
+    Only ``embed`` differs by default, because an embedding model and an LLM are not
+    interchangeable — everything else is the same LLM until somebody assigns another.
+    """
+
+    classify: ModelSlot = Field(default_factory=ModelSlot)
+    extract: ModelSlot = Field(default_factory=ModelSlot)
+    embed: ModelSlot = Field(
+        default_factory=lambda: ModelSlot(model=os.environ.get(DEFAULT_EMBEDDING_ENV, ""))
+    )
+    rerank: ModelSlot = Field(default_factory=ModelSlot)
+    convert_vlm: ModelSlot = Field(default_factory=ModelSlot)
+    judge: ModelSlot = Field(default_factory=ModelSlot)
 
 
 # What each stage's code currently does, as a version. Owned here and nowhere else: this
@@ -63,12 +79,6 @@ DEFAULT_STAGE_VERSION = "mvp-1"
 
 class StageConfig(BaseModel):
     enabled: bool = True
-    # The gateway model this stage calls, by the name the LiteLLM gateway serves it
-    # under. Read by the stages that talk to a model at all (classify_matter, relate,
-    # extract_metadata, extract_decisions, gen_evals); fetch and convert move bytes,
-    # and index embeds with retrieval.embedding_model because the query path must use
-    # the very same model the vectors were written with.
-    model: str = Field(default_factory=_default_llm)
     # The effective version, and never a setting. It is written by the validator below from
     # the code's own version plus whatever re-runs an operator has asked for, so a saved
     # config.json cannot hold it at a value the code has moved on from.
@@ -161,10 +171,6 @@ class PipelineConfig(BaseModel):
 
 class RetrievalConfig(BaseModel):
     index_name: str = "knowledge-index-chunks-v1"
-    # One embedding model for the whole appliance: the index stage writes vectors with
-    # it and every query embeds with it, so it lives here next to the dimensions that
-    # complete the vector-space identity — not on a stage, and never per-call.
-    embedding_model: str = Field(default_factory=_default_embedding_model)
     embedding_dimensions: int = Field(default=1536, ge=8, le=4096)
     # Vector search is APPROXIMATE (HNSW), never brute-force script_score. Lucene is the
     # default engine: it does native pre-filtered kNN (every leg here is ACL-filtered),
@@ -179,21 +185,46 @@ class RetrievalConfig(BaseModel):
     chunk_chars: int = Field(default=1200, ge=200, le=10000)
     chunk_overlap_chars: int = Field(default=120, ge=0, le=2000)
     rerank_enabled: bool = False
-    # The gateway model that scores the top collapsed hits when rerank_enabled is on.
-    rerank_model: str = Field(default_factory=_default_llm)
     graph_rag_enabled: bool = False
-    # multi-leg fusion (RRF): every leg is ACL-scoped before fusion
-    fusion_rrf_k: int = Field(default=60, ge=1, le=1000)
+    # Multi-leg fusion (RRF): every leg is ACL-scoped before fusion.
+    # k is not a free knob — it is the gain control on how far a document can be
+    # behind on relevance and still win on consensus. At k=60 a document appearing
+    # in two legs beats a single-leg document 60 positions ahead of it, which lets
+    # topically-similar-but-wrong documents outrank an exact lexical match; k=20
+    # cuts that to 20 and measured +0.032 nDCG@10 on the 2026-08-03 benchmark.
+    # Lower it further only together with the pool depth below.
+    fusion_rrf_k: int = Field(default=20, ge=1, le=1000)
     weight_lexical: float = Field(default=1.0, ge=0)
     weight_semantic: float = Field(default=1.0, ge=0)
     weight_identifier: float = Field(default=1.5, ge=0)
     weight_decisions: float = Field(default=0.8, ge=0)
-    # legal authority decays by supersession, not by age
+    # Legal authority decays by supersession, not by age — but supersession is a
+    # property of a document's own version chain, so it is applied where collapse
+    # chooses which version to surface, NOT as a cross-document score multiplier.
+    # As a multiplier it cost 0.057 nDCG@10 on the 2026-08-03 benchmark: at
+    # fusion_rrf_k=60 the old 1.2/0.7 range overrode 26 positions of the fused pool,
+    # burying relevant drafts under irrelevant executed documents from other matters.
+    # Kept as a deliberately gentle cross-document nudge (≤3 positions at k=20); set
+    # all values to 1.0 to disable, or use SearchFilters.only_final for a hard rule.
     version_status_boost: dict[str, float] = Field(
-        default_factory=lambda: {"executed": 1.2, "final": 1.0, "unknown": 0.8, "draft": 0.7}
+        default_factory=lambda: {"executed": 1.05, "final": 1.0, "unknown": 0.98, "draft": 0.95}
     )
     collapse_per_document: bool = True
     max_chunks_per_document: int = Field(default=3, ge=1, le=20)
+    # How many candidates each leg fetches, as a multiple of the requested result
+    # limit. Fusion, the status boost, collapse and rerank all reorder — with a pool
+    # the size of the answer they can only reshuffle what one leg already had in its
+    # own top-N, and a document indexed as body+profile+clause spends three slots on
+    # one document. 10x costs one OpenSearch page and buys the rankers room.
+    candidate_pool_factor: int = Field(default=10, ge=1, le=50)
+    # Boost applied to a chunk whose extracted parties match a name the query uses.
+    # Extracted party metadata is otherwise reachable only through an exact filter
+    # that callers almost never set, so it never reaches ranking. 0 disables.
+    metadata_boost: float = Field(default=2.0, ge=0, le=10)
+    # Restrict the fused search to these chunk kinds ("chunk" | "profile" | "clause");
+    # None = all kinds. Query-time (the benchmark ablates profile/clause rows with it);
+    # an explicit per-request SearchFilters.chunk_kind wins over this default.
+    search_chunk_kinds: list[str] | None = None
     # signal-dense ingestion
     chunk_contextualize: bool = True
     profile_embeddings: bool = True
@@ -638,9 +669,6 @@ class ComponentsConfig(BaseModel):
     # Langfuse as unreachable.
     traces_api_url: str = "http://langfuse:3000"
     traces_url: str = "http://localhost:3001"
-    # Base URL of the hosted product documentation. Browser-facing only: the UI links
-    # to it from the sidebar and the connector setup panels. Empty hides those links.
-    docs_url: str = ""
 
 
 def _model_slug(model: str) -> str:
@@ -655,8 +683,7 @@ class AppConfig(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="KI_", env_nested_delimiter="__")
 
     artifact_dir: Path = Path(".ki/artifacts")
-    # The gateway model the reference /api/ask assistant plans and answers with.
-    ask_model: str = Field(default_factory=_default_llm)
+    models: ModelsConfig = Field(default_factory=ModelsConfig)
     pipeline: PipelineConfig = Field(default_factory=PipelineConfig)
     retrieval: RetrievalConfig = Field(default_factory=RetrievalConfig)
     environments: EnvironmentConfig = Field(default_factory=EnvironmentConfig)
@@ -713,7 +740,7 @@ class AppConfig(BaseSettings):
         """Identity of the vectors an index holds: embedding model + dimension.
 
         Two vectors may share one ANN index only if they share this signature."""
-        return f"{_model_slug(self.retrieval.embedding_model)}-{self.retrieval.embedding_dimensions}"
+        return f"{_model_slug(self.models.embed.model)}-{self.retrieval.embedding_dimensions}"
 
     def derived_index_name(self) -> str:
         """Canonical chunk-index name bound to the embedding signature, so switching

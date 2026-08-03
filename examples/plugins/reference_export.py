@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Reference connector plugin: export a folder to a Knowledge Index drop directory.
 
-The contract (full spec: docs/src/content/docs/development/plugin-connectors.md):
+The contract (full spec: docs/connector-plugins.md):
 1. Emit <out>/observations.jsonl, one JSON object per line, first field
    "schema": "ki-plugin-observation/v1".
 2. Each row: external_id (stable id), path, name, content_file (relative to

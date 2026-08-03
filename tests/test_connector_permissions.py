@@ -1,6 +1,6 @@
 """End-to-end: an ethical wall enforced over an API-backed source.
 
-The concurrent-load wall test covers ``local_fs`` — which is
+The ground-truth verifier and the concurrent-load wall test cover ``local_fs`` — which is
 the one source kind with a *different* permission predicate, because a mounted folder
 delegates to the project boundary while every external source is fail-closed. So the path
 that actually matters for a firm's SharePoint estate was the one path never proven.

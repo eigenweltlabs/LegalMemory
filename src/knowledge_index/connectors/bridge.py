@@ -193,7 +193,7 @@ class ConnectorAdapter:
         self._cursor = cursor
         # Which subtrees to sync. Empty means the whole source — kept as the default so an
         # unscoped connection behaves as before, while the admin UI pushes operators to
-        # choose. See docs/src/content/docs/connectors/index.md.
+        # choose. See docs/connector-scoping.md.
         self._node_selections = list(node_selections or [])
         self._logger = logger
         self._http_client = http_client

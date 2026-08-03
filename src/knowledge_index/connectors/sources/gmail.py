@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any, AsyncGenerator, Dict, List, Optional, Set
 
 import httpx
@@ -226,10 +226,8 @@ class GmailSource(BaseSource):
             return True
 
         try:
-            message_date = datetime.fromtimestamp(int(internal_date_ms) / 1000, tz=timezone.utc)
-            # after_date is a bare calendar day; read it as UTC so both sides of the
-            # comparison are aware — mixing one naive operand in raises TypeError.
-            after_dt = datetime.strptime(after_date, "%Y/%m/%d").replace(tzinfo=timezone.utc)
+            message_date = datetime.utcfromtimestamp(int(internal_date_ms) / 1000)
+            after_dt = datetime.strptime(after_date, "%Y/%m/%d")
             if message_date < after_dt:
                 self.logger.debug(f"Message {message_data.get('id')} skipped: before after_date")
                 return False

@@ -8,7 +8,7 @@ Defines entity schemas for Gmail resources:
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime
 from email.utils import parsedate_to_datetime
 from typing import Any, Dict, List, Optional
 
@@ -41,21 +41,13 @@ def _parse_address_list(value: Optional[str]) -> List[str]:
 
 
 def _parse_rfc2822_date(value: Optional[str]) -> Optional[datetime]:
-    """Parse an RFC 2822 Date header as an aware UTC datetime; *None* on failure.
-
-    A Date header without an offset parses as naive. Every other timestamp on this
-    entity is aware, and one naive value among them is what makes a later comparison
-    raise, so a missing offset is read as UTC rather than left unlabelled.
-    """
+    """Parse an RFC 2822 Date header; returns *None* on failure."""
     if not value:
         return None
     try:
-        parsed = parsedate_to_datetime(value)
+        return parsedate_to_datetime(value)
     except (TypeError, ValueError):
         return None
-    if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
 
 
 def _internal_date_to_datetime(ms: Optional[str]) -> Optional[datetime]:
@@ -63,7 +55,7 @@ def _internal_date_to_datetime(ms: Optional[str]) -> Optional[datetime]:
     if not ms:
         return None
     try:
-        return datetime.fromtimestamp(int(ms) / 1000, tz=timezone.utc)
+        return datetime.utcfromtimestamp(int(ms) / 1000)
     except (TypeError, ValueError):
         return None
 
@@ -76,7 +68,7 @@ class GmailThreadEntity(BaseEntity):
 
     thread_key: str = IndexField(
         ...,
-        description="Stable thread key (thread_<gmail_id>)",
+        description="Stable the connector layer thread key (thread_<gmail_id>)",
         is_entity_id=True,
     )
     gmail_thread_id: str = IndexField(
@@ -160,7 +152,7 @@ class GmailMessageEntity(EmailEntity):
 
     message_key: str = IndexField(
         ...,
-        description="Stable message key (msg_<gmail_id>)",
+        description="Stable the connector layer message key (msg_<gmail_id>)",
         is_entity_id=True,
     )
     message_id: str = IndexField(..., description="Native Gmail message ID", embeddable=False)
@@ -246,7 +238,7 @@ class GmailMessageEntity(EmailEntity):
         date = _parse_rfc2822_date(_parse_header(headers, "date"))
 
         subject_value = subject or f"Message {message_id}"
-        sent_at = date or internal_date or datetime.fromtimestamp(0, tz=timezone.utc)
+        sent_at = date or internal_date or datetime.utcfromtimestamp(0)
         internal_ts = internal_date or sent_at
         web_url = f"https://mail.google.com/mail/u/0/#inbox/{message_id}"
 
@@ -288,7 +280,7 @@ class GmailAttachmentEntity(FileEntity):
 
     attachment_key: str = IndexField(
         ...,
-        description="Stable attachment key (attach_<message>_<filename>)",
+        description="Stable the connector layer attachment key (attach_<message>_<filename>)",
         is_entity_id=True,
     )
     filename: str = IndexField(
@@ -326,7 +318,7 @@ class GmailMessageDeletionEntity(DeletionEntity):
 
     message_key: str = IndexField(
         ...,
-        description="Stable message key (msg_<gmail_id>)",
+        description="Stable the connector layer message key (msg_<gmail_id>)",
         is_entity_id=True,
     )
     label: str = IndexField(

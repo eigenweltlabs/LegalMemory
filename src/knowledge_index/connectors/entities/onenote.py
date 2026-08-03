@@ -133,6 +133,55 @@ class OneNoteNotebookEntity(BaseEntity):
         return f"https://www.onenote.com/notebooks/{self.id}"
 
 
+class OneNoteSectionGroupEntity(BaseEntity):
+    """Schema for a Microsoft OneNote section group.
+
+    Section groups are containers that can hold sections and other section groups.
+
+    Reference:
+        https://learn.microsoft.com/en-us/graph/api/resources/sectiongroup
+    """
+
+    # Base fields are inherited and set during entity creation:
+    # - entity_id (the section group ID)
+    # - breadcrumbs (notebook breadcrumb)
+    # - name (from display_name)
+    # - created_at (from created_datetime)
+    # - updated_at (from last_modified_datetime)
+
+    # API fields
+    notebook_id: str = IndexField(
+        ..., description="ID of the notebook this section group belongs to.", embeddable=False
+    )
+    parent_section_group_id: Optional[str] = IndexField(
+        None, description="ID of the parent section group, if nested.", embeddable=False
+    )
+    display_name: str = IndexField(
+        ..., description="The name of the section group.", embeddable=True
+    )
+    created_by: Optional[Dict[str, Any]] = IndexField(
+        None, description="Identity of the user who created the section group.", embeddable=True
+    )
+    last_modified_by: Optional[Dict[str, Any]] = IndexField(
+        None,
+        description="Identity of the user who last modified the section group.",
+        embeddable=True,
+    )
+    sections_url: Optional[str] = IndexField(
+        None,
+        description=("The endpoint URL where you can get all the sections in the section group."),
+        embeddable=False,
+    )
+    section_groups_url: Optional[str] = IndexField(
+        None,
+        description=(
+            "The endpoint URL where you can get all the section groups "
+            "nested in this section group."
+        ),
+        embeddable=False,
+    )
+
+
 class OneNoteSectionEntity(BaseEntity):
     """Schema for a Microsoft OneNote section.
 

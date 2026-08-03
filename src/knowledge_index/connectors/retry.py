@@ -2,7 +2,7 @@
 
 Provides reusable retry strategies that handle both API rate limits
 and the client's internal rate limiting (via HttpClient), as well
-as the typed domain exceptions from ``knowledge_index.connectors.runtime.errors``.
+as the typed domain exceptions from ``domains.sources.exceptions``.
 """
 
 import logging

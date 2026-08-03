@@ -63,11 +63,11 @@ def test_google_sso_proxy_prefers_email_over_the_opaque_oidc_subject() -> None:
     identity = IdentityResolver(config).resolve(
         {
             "x-auth-request-user": "9f6742e0-opaque-keycloak-subject",
-            "x-auth-request-email": "Me@Example-Firm.com",
+            "x-auth-request-email": "Me@ChrisPoensgen.com",
         }
     )
-    assert identity.subject == "me@example-firm.com"
-    assert "user:me@example-firm.com" in identity.principals
+    assert identity.subject == "me@chrispoensgen.com"
+    assert "user:me@chrispoensgen.com" in identity.principals
 
 
 def test_verified_oidc_email_is_a_source_acl_principal(monkeypatch) -> None:
@@ -85,7 +85,7 @@ def test_verified_oidc_email_is_a_source_acl_principal(monkeypatch) -> None:
         lambda *_args, **_kwargs: {
             "sub": "9f6742e0-opaque-keycloak-subject",
             "preferred_username": "me",
-            "email": "Me@Example-Firm.com",
+            "email": "Me@ChrisPoensgen.com",
             "email_verified": True,
             "groups": [],
         },
@@ -94,8 +94,8 @@ def test_verified_oidc_email_is_a_source_acl_principal(monkeypatch) -> None:
     config.auth_mode = "oidc"
     identity = IdentityResolver(config).resolve({"authorization": "Bearer test"})
     assert "user:9f6742e0-opaque-keycloak-subject" in identity.principals
-    assert "user:me@example-firm.com" in identity.principals
-    assert "username:me@example-firm.com" in identity.principals
+    assert "user:me@chrispoensgen.com" in identity.principals
+    assert "username:me@chrispoensgen.com" in identity.principals
 
 
 @pytest.fixture()

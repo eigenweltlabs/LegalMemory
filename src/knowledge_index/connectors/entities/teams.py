@@ -33,6 +33,66 @@ def _parse_dt(value: Optional[str]) -> Optional[datetime]:
         return None
 
 
+class TeamsUserEntity(BaseEntity):
+    """Schema for a Microsoft Teams user.
+
+    Based on the Microsoft Graph user resource.
+    Reference: https://learn.microsoft.com/en-us/graph/api/resources/user
+    """
+
+    # Base fields are inherited and set during entity creation:
+    # - entity_id (user ID)
+    # - breadcrumbs (empty - users are top-level)
+    # - name (from display_name)
+    # - created_at (None - users don't have creation timestamp in Teams API)
+    # - updated_at (None - users don't have update timestamp in Teams API)
+
+    # API fields
+    id: str = IndexField(
+        ...,
+        description="User ID from Microsoft Graph.",
+        is_entity_id=True,
+    )
+    display_name: str = IndexField(
+        ...,
+        description="The name displayed in the address book for the user.",
+        embeddable=True,
+        is_name=True,
+    )
+    user_principal_name: Optional[str] = IndexField(
+        None,
+        description="The user principal name (UPN) of the user (e.g., user@contoso.com).",
+        embeddable=True,
+    )
+    mail: Optional[str] = IndexField(
+        None, description="The SMTP address for the user.", embeddable=True
+    )
+    job_title: Optional[str] = IndexField(
+        None, description="The user's job title.", embeddable=True
+    )
+    department: Optional[str] = IndexField(
+        None, description="The department in which the user works.", embeddable=True
+    )
+    office_location: Optional[str] = IndexField(
+        None, description="The office location in the user's place of business.", embeddable=True
+    )
+    web_url_override: Optional[str] = IndexField(
+        None,
+        description="Link to the user in Microsoft 365.",
+        embeddable=False,
+        unhashable=True,
+    )
+
+    @computed_field(return_type=str)
+    def web_url(self) -> str:
+        """Return best-effort link to contact the user."""
+        if self.web_url_override:
+            return self.web_url_override
+        if self.mail:
+            return f"mailto:{self.mail}"
+        return "https://teams.microsoft.com/"
+
+
 class TeamsTeamEntity(BaseEntity):
     """Schema for a Microsoft Teams team.
 

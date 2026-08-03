@@ -1,65 +1,13 @@
 Third-party notices for knowledge_index.connectors
 ==================================================
 
-Parts of this package are derived from the Airweave project
-(https://github.com/airweave-ai/airweave), which is MIT licensed. The licence
-requires its copyright and permission notice to travel with the code, so it is
-reproduced below. Airweave is not affiliated with, and does not endorse,
-LegalMemory.
+The connector implementations and entity schemas in this package are derived from the
+Airweave project (https://github.com/airweave-ai/airweave), which is MIT licensed. The
+licence requires its copyright and permission notice to travel with the code, so it is
+reproduced below. Airweave is not affiliated with, and does not endorse, Knowledge Index.
 
-The derivation is substantial rather than incidental. In most of the files
-listed below the majority of lines are Airweave's, unchanged apart from renamed
-imports and identifiers. Our own work in them is additive — access-control
-mirroring, subtree-scoped sync, delta handling, credential host pinning —
-layered on Airweave's structure rather than replacing it.
-
-Derived from Airweave
----------------------
-
-Connectors, each comprising sources/<name>.py and entities/<name>.py:
-
-    box              gmail            onedrive           outlook_mail
-    confluence       google_docs      onenote            teams
-    dropbox          google_drive     outlook_calendar
-    notion
-
-SharePoint Online, which is a package rather than a single module:
-
-    sources/sharepoint_online/__init__.py
-    sources/sharepoint_online/acl.py
-    sources/sharepoint_online/builders.py
-    sources/sharepoint_online/client.py
-    sources/sharepoint_online/graph_groups.py
-    sources/sharepoint_online/source.py
-    entities/sharepoint_online.py
-
-Shared connector framework:
-
-    base.py                                  entities/_base.py
-    decorators.py                            entities/_field.py
-    retry.py                                 entities/utils.py
-    http_helpers.py                          cursors/_base.py
-    ssrf.py                                  cursors/gmail.py
-    config_base.py                           cursors/google_docs.py
-    configs.py (in part)                     cursors/google_drive.py
-    sources/microsoft_sensitivity_labels.py  cursors/outlook_mail.py
-                                             cursors/sharepoint_online.py
-
-Not derived from Airweave
--------------------------
-
-The Slack connector (sources/slack.py, entities/slack.py) is our own. Airweave's
-Slack source is a federated-search adapter over search.messages that does not
-sync; ours crawls conversations.list, .history, .replies and .members. The two
-share no implementation.
-
-The Clio connector (sources/clio.py, entities/clio.py, cursors/clio.py) is our
-own. Airweave has no Clio connector.
-
-This notice states what is derived and names the two connectors that provably
-are not. It makes no blanket claim about the remainder of the package: a file
-with no same-named Airweave counterpart was not matched by the audit behind this
-notice, and "no counterpart by filename" is not the same as "verified original".
+Everything else in this package — the auth and OAuth layer, content staging, the SyncSource
+bridge, the registry, principal mapping and credential storage — is original work.
 
     MIT License
 

@@ -184,16 +184,16 @@ def test_parallel_files_of_one_matter_converge_on_one_matter(
         assert "M-2026-0077" in (matters[0].reference_numbers or [])
 
 
-def test_task_corpus_multi_matter_ingestion(
+def test_harvey_corpus_multi_matter_ingestion(
     factory: sessionmaker[Session],
     integration_config: AppConfig,
     settle_pipeline,
     tmp_path: Path,
 ) -> None:
-    """Several matters ingested concurrently from the benchmark corpus: every document
+    """Several matters ingested concurrently from the Harvey corpus: every document
     must land on the matter of its mandate folder, one matter per mandate — no
     duplicates from parallel classification, no cross-matter leakage."""
-    corpus = Path(__file__).parent.parent / "testdata" / "benchmark" / "mock_dms" / "Mandate"
+    corpus = Path(__file__).parent.parent / "testdata" / "harvey" / "mock_dms" / "Mandate"
     mandates = [
         "M-2026-0001 Isda Master Pack",
         "M-2026-0002 Account Control Agreement",

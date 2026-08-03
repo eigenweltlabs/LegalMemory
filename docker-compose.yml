@@ -1,6 +1,11 @@
 name: knowledge-index
 
 x-ki-env: &ki-env
+  # How long before an unfinished claim is treated as a dead worker's.
+  # Must exceed the slowest legitimate stage: classify_matter is a ~10-turn
+  # agent conversation and ran past the old 900s under load, so live tasks
+  # were declared dead and their documents requeued (2026-08-03).
+  KI_PIPELINE__CLAIM_TIMEOUT_SECONDS: ${KI_CLAIM_TIMEOUT_SECONDS:-1800}
   KI_DATABASE_URL: postgresql+pg8000://ki:${KI_POSTGRES_PASSWORD:-ki-dev-only}@postgres:5432/ki
   KI_ARTIFACT_DIR: /data/artifacts
   KI_CONFIG_PATH: /data/config.json
@@ -22,7 +27,7 @@ x-ki-env: &ki-env
   # they stay in the app process and never reach a browser.
   KI_IDENTITY__PUBLIC_BASE_URL: ${KI_KEYCLOAK_PUBLIC_URL:-http://localhost:8083}
   KI_KEYCLOAK_ADMIN_USERNAME: ${KEYCLOAK_ADMIN:-admin@example.com}
-  KI_KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-lm-dev-only}
+  KI_KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-eigenwelt-dev}
   KI_CONNECTOR_CREDENTIAL_KEY: ${KI_CONNECTOR_CREDENTIAL_KEY:?set a base64 32-byte key; connector credentials are never stored unencrypted}
   KI_COMPONENTS__LITELLM_URL: http://litellm:4000
   KI_COMPONENTS__DOCLING_URL: http://docling:5001
@@ -32,9 +37,7 @@ x-ki-env: &ki-env
   KI_COMPONENTS__ORCHESTRATOR_UI_URL: ${KI_ORCHESTRATOR_UI_URL:-http://localhost:8888}
   KI_COMPONENTS__TRACES_API_URL: ${KI_TRACES_API_URL:-http://langfuse:3000}
   KI_COMPONENTS__TRACES_URL: ${KI_LANGFUSE_PUBLIC_URL:-http://localhost:3001}
-  # Where the hosted product documentation lives. Empty hides the in-app links.
-  KI_COMPONENTS__DOCS_URL: ${KI_DOCS_URL:-}
-  LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-sk-lm-dev-only}
+  LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-sk-eigenwelt-dev}
   HATCHET_CLIENT_TOKEN: ${HATCHET_CLIENT_TOKEN:-}
   HATCHET_CLIENT_HOST_PORT: hatchet:7077
   HATCHET_CLIENT_SERVER_URL: http://hatchet:8888
@@ -79,6 +82,7 @@ x-ki-env: &ki-env
 # the three containers always see the same paths.
 x-ki-volumes: &ki-volumes
   - ki_appdata:/data
+  - ./testdata/generated:/demo:ro
   - ./testdata:/testdata:ro
   # Read-only view of the host filesystem so the local-folder connector can index
   # any absolute path selected in the admin UI. The path is identical inside and
@@ -170,6 +174,7 @@ services:
     # provider subscriptions and consumes their delivery transports.
     volumes:
       - ki_appdata:/data
+      - ./testdata/generated:/demo:ro
       - ./testdata:/testdata:ro
       - ${KI_LOCAL_MOUNT:-/Users}:${KI_LOCAL_MOUNT:-/Users}:ro
       - ${KI_BACKUP_MOUNT:-./runtime/backups}:/backups
@@ -197,11 +202,14 @@ services:
       retries: 12
     restart: unless-stopped
 
-  worker:
+  # The `gpu` lane: every stage that spends the vLLM fleet (see STAGE_LANES in
+  # orchestration/hatchet.py). Sibling lanes below reuse this whole block.
+  worker: &worker-base
     build: .
     command: ["ki", "hatchet-worker", "--slots", "${KI_HATCHET_WORKER_SLOTS:-16}"]
     environment:
       <<: *ki-env
+      KI_WORKER_LANE: gpu
       # A model-backed stage keeps one transaction open while awaiting its API
       # response. Size the worker pool above its task slots so progress updates and
       # retries do not starve behind the long-lived stage sessions.
@@ -224,6 +232,57 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  # Worker lanes. Each stage carries a required `lane` label, so a lane's slot
+  # count is the concurrency of exactly one physical resource and no stage can
+  # spend another's capacity. One shared pool could not do this: Hatchet's
+  # fair-share scheduler let uncapped extract_metadata win the turns and index
+  # ran 23-wide with 562 queued behind it (2026-08-03 smoke run).
+  #
+  # All three lanes must be up. A stage whose lane has no live worker stays
+  # queued until its schedule_timeout rather than falling back to another lane.
+
+  # The `index` lane: embedding provider + OpenSearch. Slots are the number of
+  # concurrent embedding senders, kept at the ceiling the LiteLLM rpm/tpm cap
+  # enforces; KI_INDEX_MODEL_CONCURRENCY stays as the replica-independent backstop.
+  worker-index:
+    <<: *worker-base
+    command: ["ki", "hatchet-worker", "--slots", "${KI_INDEX_WORKER_SLOTS:-384}"]
+    environment:
+      <<: *ki-env
+      KI_WORKER_LANE: index
+      # Pool above slots, as for the gpu lane: a stage holds its session for the
+      # whole call, and a pool short of the slot count starves failure recording.
+      KI_DATABASE_POOL_SIZE: ${KI_INDEX_WORKER_DATABASE_POOL_SIZE:-420}
+      KI_DATABASE_MAX_OVERFLOW: ${KI_INDEX_WORKER_DATABASE_MAX_OVERFLOW:-64}
+      KI_DATABASE_POOL_TIMEOUT_SECONDS: ${KI_WORKER_DATABASE_POOL_TIMEOUT_SECONDS:-60}
+
+  # The `io` lane: local disk + postgres, nothing else. fetch is milliseconds of
+  # work, so slots are generous -- the lane exists to keep those milliseconds out
+  # of the gpu lane's slot budget and out of its utilisation number, not because
+  # fetch is scarce.
+  worker-io:
+    <<: *worker-base
+    command: ["ki", "hatchet-worker", "--slots", "${KI_IO_WORKER_SLOTS:-512}"]
+    environment:
+      <<: *ki-env
+      KI_WORKER_LANE: io
+      KI_DATABASE_POOL_SIZE: ${KI_IO_WORKER_DATABASE_POOL_SIZE:-560}
+      KI_DATABASE_MAX_OVERFLOW: ${KI_IO_WORKER_DATABASE_MAX_OVERFLOW:-64}
+      KI_DATABASE_POOL_TIMEOUT_SECONDS: ${KI_WORKER_DATABASE_POOL_TIMEOUT_SECONDS:-60}
+
+  # The `convert` lane: the docling CPU farm. Slots sit just under the farm's
+  # capacity (12 replicas x 24 workers = 288 parse slots) so queueing happens in
+  # Hatchet rather than as docling ReadTimeouts, which quarantine documents.
+  worker-convert:
+    <<: *worker-base
+    command: ["ki", "hatchet-worker", "--slots", "${KI_CONVERT_WORKER_SLOTS:-256}"]
+    environment:
+      <<: *ki-env
+      KI_WORKER_LANE: convert
+      KI_DATABASE_POOL_SIZE: ${KI_CONVERT_WORKER_DATABASE_POOL_SIZE:-300}
+      KI_DATABASE_MAX_OVERFLOW: ${KI_CONVERT_WORKER_DATABASE_MAX_OVERFLOW:-48}
+      KI_DATABASE_POOL_TIMEOUT_SECONDS: ${KI_WORKER_DATABASE_POOL_TIMEOUT_SECONDS:-60}
+
   # Continuous monitoring for local/mounted folder connectors: watches the roots for
   # filesystem events (debounced), rescans on change, and runs a periodic safety-net
   # full sync to reconcile events the OS coalesced or dropped. Triggers the insertion
@@ -245,6 +304,16 @@ services:
 
   postgres:
     image: pgvector/pgvector:0.8.1-pg16
+    # Docker gives a container 64 MB of /dev/shm. Postgres parallel workers put
+    # their shared tuple stores there, so once processing_state is large enough
+    # for the planner to choose a parallel plan, aggregates fail with 'could not
+    # resize shared memory segment' — which surfaced as a 500 on the admin UI's
+    # status endpoint at 361k rows (2026-08-03).
+    shm_size: 2gb
+    # A fleet-scale run holds one connection per in-flight stage task across
+    # 4 workers — the stock 100-connection cap starves the pipeline outright
+    # ("sorry, too many clients already"). Size with the host.
+    command: postgres -c max_connections=${KI_POSTGRES_MAX_CONNECTIONS:-100} -c shared_buffers=${KI_POSTGRES_SHARED_BUFFERS:-128MB}
     environment:
       POSTGRES_USER: ki
       POSTGRES_PASSWORD: ${KI_POSTGRES_PASSWORD:-ki-dev-only}
@@ -267,7 +336,7 @@ services:
       discovery.type: single-node
       DISABLE_INSTALL_DEMO_CONFIG: "true"
       DISABLE_SECURITY_PLUGIN: "true"
-      OPENSEARCH_JAVA_OPTS: -Xms1g -Xmx1g
+      OPENSEARCH_JAVA_OPTS: "${KI_OPENSEARCH_JAVA_OPTS:--Xms1g -Xmx1g}"
       # The only directory OpenSearch will accept as a snapshot repository location.
       # Snapshots are the sole supported way to get a consistent copy of a live cluster:
       # Lucene segments are written and merged continuously, so a tar of a running node's
@@ -291,16 +360,18 @@ services:
 
   litellm:
     image: ghcr.io/berriai/litellm:v1.85.1
-    command: ["--config", "/app/config.yaml", "--port", "4000"]
+    # A single proxy process saturates one core (~106% CPU) at fleet-run rates
+    # and paces the whole extract/index tail — scale workers with the host.
+    command: ["--config", "/app/config.yaml", "--port", "4000", "--num_workers", "${KI_LITELLM_WORKERS:-1}"]
     environment:
-      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-sk-lm-dev-only}
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-sk-eigenwelt-dev}
       LITELLM_SALT_KEY: ${LITELLM_SALT_KEY:-change-me-too}
       # Models added from the admin UI live in the gateway's own Postgres database
       # next to the config-file models. The env flag has to agree with
       # general_settings.store_model_in_db or the admin model API stays disabled.
       STORE_MODEL_IN_DB: "True"
       UI_USERNAME: ${DEV_ADMIN_EMAIL:-admin@example.com}
-      UI_PASSWORD: ${DEV_ADMIN_PASSWORD:-lm-dev-only}
+      UI_PASSWORD: ${DEV_ADMIN_PASSWORD:-eigenwelt-dev}
       DATABASE_URL: postgresql://ki:${KI_POSTGRES_PASSWORD:-ki-dev-only}@postgres:5432/litellm
       # Trace sink. The keys are the ones Langfuse seeds itself with on first boot,
       # so the gateway can trace from the first call without a manual key exchange.
@@ -315,8 +386,6 @@ services:
       # receives the plain names, which is what deploy/litellm/config.yaml reads.
       OPENAI_API_KEY: ${KI_OPENAI_API_KEY:?set KI_OPENAI_API_KEY in .env (not OPENAI_API_KEY — a shell export would shadow it)}
       SCW_SECRET_KEY: ${KI_SCW_SECRET_KEY:?set KI_SCW_SECRET_KEY in .env (not SCW_SECRET_KEY — a shell export would shadow it)}
-      # May be empty when the scaleway credential is unused; the project-scoped endpoint.
-      SCW_API_BASE: ${KI_SCW_API_BASE-}
       # Which two models this deployment serves. deploy/litellm/config.yaml names none of
       # them; it reads these, so changing model is changing .env rather than editing a
       # file that ships with the product. Required rather than defaulted: a gateway that
@@ -359,15 +428,15 @@ services:
       LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES: "false"
       # Seeded on first boot so the gateway's keys exist before it starts, rather than
       # an operator having to click through a UI to mint them.
-      LANGFUSE_INIT_ORG_ID: legalmemory
-      LANGFUSE_INIT_ORG_NAME: LegalMemory
+      LANGFUSE_INIT_ORG_ID: eigenwelt
+      LANGFUSE_INIT_ORG_NAME: Eigenwelt
       LANGFUSE_INIT_PROJECT_ID: knowledge-index
       LANGFUSE_INIT_PROJECT_NAME: Knowledge Index
       LANGFUSE_INIT_PROJECT_PUBLIC_KEY: ${KI_LANGFUSE_PUBLIC_KEY:-pk-lf-knowledge-index}
       LANGFUSE_INIT_PROJECT_SECRET_KEY: ${KI_LANGFUSE_SECRET_KEY:-sk-lf-knowledge-index}
       LANGFUSE_INIT_USER_EMAIL: ${DEV_ADMIN_EMAIL:-admin@example.com}
       LANGFUSE_INIT_USER_NAME: Admin
-      LANGFUSE_INIT_USER_PASSWORD: ${DEV_ADMIN_PASSWORD:-lm-dev-only}
+      LANGFUSE_INIT_USER_PASSWORD: ${DEV_ADMIN_PASSWORD:-eigenwelt-dev}
     ports:
       - "127.0.0.1:${KI_LANGFUSE_PORT:-3001}:3000"
     depends_on:
@@ -382,9 +451,14 @@ services:
       # sync convert gives up server-side after MAX_SYNC_WAIT while the task keeps
       # running — must exceed the client timeout or retries duplicate conversions
       DOCLING_SERVE_MAX_SYNC_WAIT: "330"
-      DOCLING_SERVE_ENG_LOC_NUM_WORKERS: "4"
-    ports:
-      - "127.0.0.1:${DOCLING_PORT:-5001}:5001"
+      # One docling process converts near-serially regardless of NUM_WORKERS
+      # (~22 docs/min, ~1 core observed on the 2026-08-01 full run) — scale
+      # REPLICAS for fleet runs: docker compose up -d --scale docling=N.
+      # Host port binding must stay off for replicas>1; the pipeline reaches
+      # docling via service DNS (http://docling:5001), the UI port is dev-only.
+      DOCLING_SERVE_ENG_LOC_NUM_WORKERS: "${KI_DOCLING_WORKERS:-4}"
+    # ports:
+    #   - "127.0.0.1:${DOCLING_PORT:-5001}:5001"
     healthcheck:
       test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:5001/health')\""]
       interval: 15s
@@ -412,7 +486,7 @@ services:
     image: ghcr.io/hatchet-dev/hatchet/hatchet-lite:v0.87.1
     environment:
       ADMIN_EMAIL: ${DEV_ADMIN_EMAIL:-admin@example.com}
-      ADMIN_PASSWORD: ${HATCHET_ADMIN_PASSWORD:-Legalmemory1-dev}
+      ADMIN_PASSWORD: ${HATCHET_ADMIN_PASSWORD:-Eigenwelt1-dev}
       DATABASE_URL: postgresql://hatchet:${HATCHET_POSTGRES_PASSWORD:-hatchet-dev-only}@hatchet-postgres:5432/hatchet?sslmode=disable
       SERVER_AUTH_COOKIE_DOMAIN: ${HATCHET_COOKIE_DOMAIN:-localhost}
       SERVER_AUTH_COOKIE_INSECURE: ${HATCHET_COOKIE_INSECURE:-t}
@@ -442,7 +516,7 @@ services:
     command: ["start-dev", "--import-realm"]
     environment:
       KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN:-admin@example.com}
-      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-lm-dev-only}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-eigenwelt-dev}
       KC_HEALTH_ENABLED: "true"
       # One canonical public URL. Without it Keycloak builds every URL from the host the
       # request happened to arrive on, so a browser gets localhost:8443 while a probe on
@@ -487,7 +561,7 @@ services:
       - --oidc-jwks-url=${KI_OIDC_INTERNAL_ISSUER:-http://keycloak:8080/realms/knowledge-index}/protocol/openid-connect/certs
       - --insecure-oidc-skip-issuer-verification=true
       - --client-id=${KI_OIDC_CLIENT_ID:-knowledge-index-ui}
-      - --client-secret=${KI_OIDC_CLIENT_SECRET:-lm-dev-only}
+      - --client-secret=${KI_OIDC_CLIENT_SECRET:-eigenwelt-dev}
       - --cookie-secret=${KI_OAUTH_COOKIE_SECRET:-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=}
       - --cookie-secure=${KI_OAUTH_COOKIE_SECURE:-false}
       - --email-domain=*

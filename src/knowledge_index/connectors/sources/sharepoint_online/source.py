@@ -19,7 +19,9 @@ Incremental sync:
 - Uses Graph delta queries (/drives/{id}/root/delta)
 - Per-drive delta tokens stored in cursor
 
-One source variant ships: SharePointOnlineSource (OAuth, delegated user auth).
+Two source variants:
+- SharePointOnlineSource: OAuth (delegated user auth)
+- SharePointOnlineAppSource: Client credentials (app-only auth)
 """
 
 from __future__ import annotations
@@ -37,11 +39,14 @@ from knowledge_index.connectors.runtime.logging import ContextualLogger
 from knowledge_index.connectors.runtime.types import MembershipTuple
 from knowledge_index.connectors.runtime.types import BrowseNode, NodeSelectionData
 from knowledge_index.connectors.runtime.errors import SourceAuthError
+from knowledge_index.connectors.runtime.tokens import DirectCredentialProvider
 from knowledge_index.connectors.runtime.tokens import TokenProviderProtocol
+from knowledge_index.connectors.runtime.tokens import StaticTokenProvider
 from knowledge_index.connectors.runtime.errors import FileSkippedException
 from knowledge_index.connectors.runtime.files import FileService
 from knowledge_index.connectors.runtime.errors import EntityProcessingError
 from knowledge_index.connectors.cursors.state import SyncCursor
+from knowledge_index.connectors.configs import SharePointOnlineAppAuthConfig
 from knowledge_index.connectors.configs import SharePointOnlineConfig
 from knowledge_index.connectors.cursors.sharepoint_online import SharePointOnlineCursor
 from knowledge_index.connectors.decorators import source
@@ -1804,6 +1809,241 @@ class SharePointOnlineSource(SharePointOnlineBase):
                         f"Could not enumerate any SharePoint site ({exc}). The grant may not "
                         "reach a site, or SharePoint is not licensed on this tenant."
                     )
+
+        self.logger.info(f"Discovered {len(sites)} sites to sync")
+        return sites
+
+
+# =============================================================================
+# Client credentials source — app-only auth
+# =============================================================================
+
+
+@source(
+    name="SharePoint Online (App)",
+    short_name="sharepoint_online_app",
+    auth_methods=[AuthenticationMethod.DIRECT],
+    auth_config_class=SharePointOnlineAppAuthConfig,
+    config_class=SharePointOnlineConfig,
+    supports_continuous=True,
+    cursor_class=SharePointOnlineCursor,
+    supports_access_control=True,
+    supports_browse_tree=True,
+    feature_flag="sharepoint_2019_v2",
+    labels=["Collaboration", "File Storage"],
+)
+class SharePointOnlineAppSource(SharePointOnlineBase):
+    """SharePoint Online source using client credentials (app-only auth).
+
+    Uses client_id + client_secret for Graph API and certificate-based
+    authentication for SharePoint REST API. Requires Azure AD app registration
+    with application permissions and admin consent.
+    """
+
+    _tenant_id: str
+    _client_id: str
+    _client_secret: str
+    _private_key: str
+    _certificate: str
+    _graph_token: Optional[str]
+    _graph_token_expires: float
+    _sp_tokens: Dict[str, tuple[str, float]]
+
+    @classmethod
+    async def create(
+        cls,
+        *,
+        auth: DirectCredentialProvider,
+        logger: ContextualLogger,
+        http_client: HttpClient,
+        config: SharePointOnlineConfig,
+    ) -> SharePointOnlineAppSource:
+        """Create and configure a client-credentials SharePoint Online source."""
+        instance = cls(auth=auth, logger=logger, http_client=http_client)
+        instance._init_common(config)
+
+        creds: SharePointOnlineAppAuthConfig = auth.credentials
+        instance._tenant_id = creds.tenant_id
+        instance._client_id = creds.client_id
+        instance._client_secret = creds.client_secret
+        instance._private_key = creds.private_key
+        instance._certificate = creds.certificate
+
+        # Token cache
+        instance._graph_token = None
+        instance._graph_token_expires = 0.0
+        instance._sp_tokens = {}  # hostname -> (token, expires_at)
+
+        # Exchange for initial Graph token
+        instance._graph_token = await instance._exchange_graph_token()
+        instance._graph_token_expires = asyncio.get_event_loop().time() + 3500
+
+        return instance
+
+    # -- Token exchange (app-only mode) --
+
+    async def _exchange_graph_token(self) -> str:
+        """Exchange client credentials for a Microsoft Graph access token."""
+        url = f"https://login.microsoftonline.com/{self._tenant_id}/oauth2/v2.0/token"
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                url,
+                data={
+                    "grant_type": "client_credentials",
+                    "client_id": self._client_id,
+                    "client_secret": self._client_secret,
+                    "scope": "https://graph.microsoft.com/.default",
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            self.logger.info(f"App-only Graph token obtained (expires_in={data.get('expires_in')})")
+            return str(data["access_token"])
+
+    async def _exchange_sp_token_with_certificate(self, hostname: str) -> str:
+        """Exchange certificate credentials for a SharePoint REST API access token."""
+        import base64
+        import hashlib
+        import time as _time
+
+        import jwt as pyjwt
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey
+        from cryptography.x509 import load_pem_x509_certificate
+
+        token_url = f"https://login.microsoftonline.com/{self._tenant_id}/oauth2/v2.0/token"
+
+        loaded_key = serialization.load_pem_private_key(self._private_key.encode(), password=None)
+        if not isinstance(loaded_key, RSAPrivateKey):
+            raise ValueError("SharePoint certificate auth requires an RSA private key")
+        private_key: RSAPrivateKey = loaded_key
+
+        if not self._certificate:
+            raise ValueError(
+                "Certificate PEM is required for SP REST API token exchange. "
+                "Provide the PEM certificate that was uploaded to the Azure AD app registration."
+            )
+
+        cert = load_pem_x509_certificate(self._certificate.encode())
+        cert_der = cert.public_bytes(serialization.Encoding.DER)
+        cert_hash = hashlib.sha1(cert_der).digest()  # noqa: S324
+        x5t = base64.urlsafe_b64encode(cert_hash).rstrip(b"=").decode()
+
+        now = int(_time.time())
+        assertion = pyjwt.encode(
+            {
+                "aud": token_url,
+                "iss": self._client_id,
+                "sub": self._client_id,
+                "jti": str(now),
+                "nbf": now,
+                "exp": now + 600,
+            },
+            private_key,
+            algorithm="RS256",
+            headers={"x5t": x5t},
+        )
+
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                token_url,
+                data={
+                    "grant_type": "client_credentials",
+                    "client_id": self._client_id,
+                    "client_assertion_type": (
+                        "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
+                    ),
+                    "client_assertion": assertion,
+                    "scope": f"https://{hostname}/.default",
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            self.logger.info(
+                f"App-only SP token for {hostname} obtained (expires_in={data.get('expires_in')})"
+            )
+            return str(data["access_token"])
+
+    async def _get_sp_token(self, hostname: str) -> str:
+        """Get a valid SP REST API token for a hostname, re-exchanging if expired."""
+        now = asyncio.get_event_loop().time()
+        cached = self._sp_tokens.get(hostname)
+        if cached:
+            token, expires_at = cached
+            if now < expires_at:
+                return token
+        token = await self._exchange_sp_token_with_certificate(hostname)
+        self._sp_tokens[hostname] = (token, now + 3500)
+        return token
+
+    # -- Auth hooks --
+
+    async def _get_access_token(self) -> str:
+        now = asyncio.get_event_loop().time()
+        if self._graph_token and now < self._graph_token_expires:
+            return self._graph_token
+        self._graph_token = await self._exchange_graph_token()
+        self._graph_token_expires = now + 3500  # ~58 min
+        return self._graph_token
+
+    async def _handle_401(self) -> str:
+        self._graph_token_expires = 0  # force re-exchange
+        return await self._get_access_token()
+
+    def _make_sp_token_provider_for_site(self, site_url: str) -> Optional[Callable]:
+        """Create SP token provider for a specific site URL via certificate exchange."""
+        if not site_url:
+            return None
+        parsed = urlparse(site_url)
+        hostname = parsed.netloc
+        if not hostname:
+            return None
+
+        async def _provider() -> str:
+            return await self._get_sp_token(hostname)
+
+        return _provider
+
+    @property
+    def _delta_prefer_headers(self) -> List[str]:
+        return [
+            "deltashowsharingchanges",
+            "deltashowremovedasdeleted",
+            "deltatraversepermissiongaps",
+        ]
+
+    async def _get_download_auth(self, url: str) -> Any:
+        """For client-credentials auth, use StaticTokenProvider for Graph URLs."""
+        if "tempauth=" in url:
+            return self.auth  # pre-signed URL, no auth needed
+        graph_token = await self._get_access_token()
+        return StaticTokenProvider(graph_token)
+
+    async def _discover_sites(self, graph_client: GraphClient) -> List[Dict[str, Any]]:
+        """Discover sites via getAllSites (application permissions).
+
+        When site_url is set: resolve the specific site.
+        When empty: use getAllSites for complete enumeration.
+        """
+        sites = []
+
+        if self._site_url:
+            parsed = urlparse(self._site_url)
+            hostname = parsed.netloc
+            site_path = parsed.path.lstrip("/")
+            try:
+                site = await graph_client.get_site_by_url(hostname, site_path)
+                sites.append(site)
+            except SourceAuthError:
+                raise
+            except Exception as e:
+                self.logger.warning(f"Could not resolve site URL {self._site_url}: {e}")
+                raise
+        else:
+            async for site in graph_client.get_all_sites():
+                if not self._include_personal_sites and site.get("isPersonalSite", False):
+                    continue
+                sites.append(site)
 
         self.logger.info(f"Discovered {len(sites)} sites to sync")
         return sites

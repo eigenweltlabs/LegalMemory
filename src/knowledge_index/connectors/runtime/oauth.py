@@ -7,7 +7,7 @@ are data, not code — see ``providers.yaml``.  Adding a provider is a YAML entr
 
 Every deployment is bring-your-own-client (BYOC): the firm registers its own app in
 Entra ID / Google Cloud and supplies the client id and secret.  There is no
-vendor-hosted OAuth broker, and no cloud auth broker (Composio/Pipedream) — both
+Eigenwelt-hosted OAuth broker, and no cloud auth broker (Composio/Pipedream) — both
 would put a third party on the path to a law firm's documents.
 """
 

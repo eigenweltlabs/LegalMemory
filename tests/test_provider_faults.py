@@ -19,7 +19,7 @@ from datetime import UTC, datetime
 import httpx
 import pytest
 
-from knowledge_index.config import AppConfig
+from knowledge_index.config import AppConfig, ModelSlot
 from knowledge_index.pipeline import providers
 from knowledge_index.pipeline.providers import ProviderPermanentError, embed_text
 from tests.conftest import TEST_EMBEDDING_MODEL
@@ -94,7 +94,7 @@ def config(tmp_path) -> AppConfig:
     # No secret reference: the gateway is stubbed, so resolving a real master key would
     # only couple this to the developer's environment.
     config = AppConfig(artifact_dir=tmp_path / "artifacts")
-    config.retrieval.embedding_model = TEST_EMBEDDING_MODEL
+    config.models.embed = ModelSlot(model=TEST_EMBEDDING_MODEL, api_key_ref=None)
     return config
 
 
@@ -325,5 +325,5 @@ def test_a_fault_on_one_model_does_not_block_another(config, monkeypatch):
 
     with pytest.raises(ProviderPermanentError):
         embed_text("Vertragsentwurf", config)
-    config.retrieval.embedding_model = "embedding-local"
+    config.models.embed = ModelSlot(model="embedding-local", api_key_ref=None)
     assert len(embed_text("Vertragsentwurf", config)) == 1536

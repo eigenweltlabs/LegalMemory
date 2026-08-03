@@ -2,7 +2,7 @@
 
 Connectors are read-only and dumb on purpose: enumerate, fetch, report ACLs.
 All intelligence (scheduling, diffing, checkpoints, tombstones, retries) lives in
-the engine. See docs/src/content/docs/concepts/architecture.md §1.
+the engine. See docs/architecture.md §1.
 """
 
 from __future__ import annotations

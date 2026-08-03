@@ -23,7 +23,7 @@ from typing import TypeVar
 import httpx
 from pydantic import BaseModel, ValidationError
 
-from knowledge_index.config import AppConfig
+from knowledge_index.config import AppConfig, ModelSlot
 from knowledge_index.db import get_session
 from knowledge_index.db.models import UsageEvent
 
@@ -36,6 +36,13 @@ log = logging.getLogger(__name__)
 # gateway 408 is reported cleanly and owned by the pipeline retry policy.
 MODEL_REQUEST_TIMEOUT_SECONDS = float(os.getenv("KI_MODEL_REQUEST_TIMEOUT_SECONDS", "660"))
 
+# Degenerate-agent-loop trips (see chat_agent): warn on the Nth identical
+# back-to-back tool call, abort on the Mth; cap the conversation's prompt size
+# well below the model's serving context (262k on the current fleet).
+REPEATED_CALL_WARN = int(os.getenv("KI_AGENT_REPEATED_CALL_WARN", "3"))
+REPEATED_CALL_ABORT = int(os.getenv("KI_AGENT_REPEATED_CALL_ABORT", "6"))
+AGENT_PROMPT_TOKEN_BUDGET = int(os.getenv("KI_AGENT_PROMPT_TOKEN_BUDGET", "160000"))
+
 # One dead billing key must not be rediscovered once per document. After a permanent
 # fault the same model fails fast for this long without touching the network, so a
 # 500-file estate quarantines in seconds under one identical, readable cause instead of
@@ -47,8 +54,8 @@ PERMANENT_FAULT_COOLDOWN_SECONDS = float(
 
 # The stage that owns the model calls made on this thread/task. Set by whoever owns a
 # unit of work (a pipeline stage claim, a search, an assistant answer) rather than
-# threaded through every signature: one model may serve several stages, and the helpers
-# in between — tool loops, retrieval legs, billing extraction — must not have to forward it.
+# threaded through every signature: one slot serves several stages, and the helpers in
+# between — tool loops, retrieval legs, billing extraction — must not have to forward it.
 _USAGE_STAGE: ContextVar[str | None] = ContextVar("knowledge_index_usage_stage", default=None)
 
 
@@ -126,19 +133,19 @@ _DEAD_ACCOUNT_MARKERS = (
 
 
 def embed_text(text: str, config: AppConfig) -> list[float]:
-    model = config.retrieval.embedding_model
-    base = gateway_url(config)
+    slot = config.models.embed
+    base = _base_url(slot, config)
     response = _post_to_gateway(
         f"{base}/v1/embeddings",
-        model=model,
+        slot=slot,
         base=base,
-        headers=_headers(),
-        json={"model": model, "input": [text]},
+        headers=_headers(slot),
+        json={"model": slot.model, "input": [text]},
         timeout=120,
     )
     response.raise_for_status()
     body = response.json()
-    _record_usage(response, body, model, call="embedding")
+    _record_usage(response, body, slot, call="embedding")
     vector = list(body["data"][0]["embedding"])
     expected = config.retrieval.embedding_dimensions
     if len(vector) != expected:
@@ -148,17 +155,18 @@ def embed_text(text: str, config: AppConfig) -> list[float]:
     return [float(value) for value in vector]
 
 
-def _trace_metadata(trace_tags: list[str] | None) -> dict:
-    """LiteLLM request tags: every gateway log row carries the document,
+def _trace_metadata(slot: ModelSlot, trace_tags: list[str] | None) -> dict:
+    """LiteLLM-only request tags: every gateway log row carries the document,
     stage, and a never-recurring per-attempt trace id, so full-message traces
-    are filterable per document/stage and addressable per attempt."""
-    if trace_tags:
+    are filterable per document/stage and addressable per attempt. Never sent
+    to non-LiteLLM endpoints (unknown params may 400)."""
+    if trace_tags and slot.provider == "litellm":
         return {"tags": trace_tags}
     return {}
 
 
 def chat_json(
-    model: str,
+    slot: ModelSlot,
     config: AppConfig,
     *,
     system: str,
@@ -169,20 +177,19 @@ def chat_json(
 ) -> SchemaT:
     """One structured chat completion, validated against the stage's schema.
 
-    ``model`` is the name the LiteLLM gateway serves the model under. The JSON schema
-    is embedded in the system prompt and enforced client-side by pydantic; an invalid
-    payload raises ModelOutputInvalid for bounded stage retry."""
+    The JSON schema is embedded in the system prompt and enforced client-side by
+    pydantic; an invalid payload raises ModelOutputInvalid for bounded stage retry."""
 
     schema_json = json.dumps(schema.model_json_schema(), ensure_ascii=False)
-    base = gateway_url(config)
+    base = _base_url(slot, config)
     response = _post_to_gateway(
         f"{base}/v1/chat/completions",
-        model=model,
+        slot=slot,
         base=base,
-        headers=_headers(),
+        headers=_headers(slot),
         json={
-            "model": model,
-            "temperature": 0.0,  # pipeline output is deterministic by design
+            "model": slot.model,
+            "temperature": slot.temperature,
             "max_tokens": max_output_tokens,
             "response_format": {"type": "json_object"},
             "messages": [
@@ -195,24 +202,24 @@ def chat_json(
                 },
                 {"role": "user", "content": user},
             ],
-            **_trace_metadata(trace_tags),
+            **_trace_metadata(slot, trace_tags),
         },
         timeout=MODEL_REQUEST_TIMEOUT_SECONDS,
     )
     response.raise_for_status()
     body = response.json()
-    _record_usage(response, body, model, call="chat")
+    _record_usage(response, body, slot, call="chat")
     content = body["choices"][0]["message"]["content"]
     try:
         return schema.model_validate_json(content)
     except ValidationError as exc:
         raise ModelOutputInvalid(
-            f"model {model} returned schema-invalid output: {exc}"
+            f"model {slot.model} returned schema-invalid output: {exc}"
         ) from exc
 
 
 def chat_agent(
-    model: str,
+    slot: ModelSlot,
     config: AppConfig,
     *,
     system: str,
@@ -264,8 +271,19 @@ def chat_agent(
         },
         {"role": "user", "content": user},
     ]
-    base = gateway_url(config)
-    headers = _headers()
+    base = _base_url(slot, config)
+    headers = _headers(slot)
+
+    # Degenerate-loop defenses (2026-08-01 run: one classify attempt repeated the
+    # identical tool call ~70 turns, 9.8M prompt tokens, and died on the context
+    # wall an hour later). Two independent trips, both ending in a clean stage
+    # retry instead of an hour-long hang:
+    #  - the same (tool, arguments) call repeated back-to-back is warned once,
+    #    then aborted;
+    #  - the conversation's prompt size is budgeted well below the serving
+    #    context, using the gateway's own reported prompt_tokens.
+    repeat_signature: str | None = None
+    repeat_count = 0
 
     for iteration in range(max_iters):
         # Give the agent freedom to inspect evidence, but make the bounded loop
@@ -276,17 +294,17 @@ def chat_agent(
             tool_choice = {"type": "function", "function": {"name": submit}}
         response = _post_to_gateway(
             f"{base}/v1/chat/completions",
-            model=model,
+            slot=slot,
             base=base,
             headers=headers,
             json={
-                "model": model,
-                "temperature": 0.0,  # pipeline output is deterministic by design
+                "model": slot.model,
+                "temperature": slot.temperature,
                 "max_tokens": max_output_tokens,
                 "tools": tool_specs,
                 "tool_choice": tool_choice,
                 "messages": messages,
-                **_trace_metadata(trace_tags),
+                **_trace_metadata(slot, trace_tags),
             },
             timeout=MODEL_REQUEST_TIMEOUT_SECONDS,
         )
@@ -294,7 +312,14 @@ def chat_agent(
         body = response.json()
         # One row per gateway turn: an agent loop is several real, separately billed
         # calls, not one call retried.
-        _record_usage(response, body, model, call="agent")
+        _record_usage(response, body, slot, call="agent")
+        prompt_tokens = int(((body.get("usage") or {}).get("prompt_tokens")) or 0)
+        if prompt_tokens > AGENT_PROMPT_TOKEN_BUDGET:
+            raise ModelOutputInvalid(
+                f"agent {slot.model} conversation reached {prompt_tokens} prompt tokens "
+                f"(budget {AGENT_PROMPT_TOKEN_BUDGET}) without submitting — aborted "
+                "before the serving context limit"
+            )
         message = body["choices"][0]["message"]
         tool_calls = message.get("tool_calls") or []
 
@@ -348,6 +373,29 @@ def chat_agent(
                     )
                     continue
                 return candidate
+            signature = f"{name}:{fn.get('arguments') or ''}"
+            if signature == repeat_signature:
+                repeat_count += 1
+            else:
+                repeat_signature, repeat_count = signature, 1
+            if repeat_count >= REPEATED_CALL_ABORT:
+                raise ModelOutputInvalid(
+                    f"agent {slot.model} repeated the identical tool call {name!r} "
+                    f"{repeat_count} times in a row — degenerate loop aborted"
+                )
+            if repeat_count >= REPEATED_CALL_WARN:
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": call.get("id"),
+                        "content": (
+                            f"you have made this exact {name} call {repeat_count} times — "
+                            "its result does not change. Use what you already have, make a "
+                            f"DIFFERENT call, or finish with `{submit}`."
+                        ),
+                    }
+                )
+                continue
             handler = registry.get(name)
             if handler is None:
                 result = f"unknown tool: {name}"
@@ -365,11 +413,11 @@ def chat_agent(
             )
 
     raise ModelOutputInvalid(
-        f"agent {model} did not submit a valid result within {max_iters} iterations"
+        f"agent {slot.model} did not submit a valid result within {max_iters} iterations"
     )
 
 
-def _record_usage(response: httpx.Response, body: dict, model: str, *, call: str) -> None:
+def _record_usage(response: httpx.Response, body: dict, slot: ModelSlot, *, call: str) -> None:
     """Book one UsageEvent for one gateway response.
 
     Called once per HTTP response that the gateway actually answered, so a stage that
@@ -402,8 +450,8 @@ def _record_usage(response: httpx.Response, body: dict, model: str, *, call: str
             session.add(
                 UsageEvent(
                     pipeline_stage=_USAGE_STAGE.get(),
-                    provider="litellm",
-                    model=model,
+                    provider=slot.provider,
+                    model=slot.model,
                     input_tokens=int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0),
                     output_tokens=int(
                         usage.get("completion_tokens") or usage.get("output_tokens") or 0
@@ -415,19 +463,21 @@ def _record_usage(response: httpx.Response, body: dict, model: str, *, call: str
                 )
             )
     except Exception:
-        log.warning("usage accounting failed for model %s (%s)", model, call, exc_info=True)
+        log.warning("usage accounting failed for model %s (%s)", slot.model, call, exc_info=True)
 
 
 def gateway_url(config: AppConfig) -> str:
-    """Base URL of the shared LiteLLM gateway — every model call goes here."""
+    """Base URL of the shared gateway. The admin API lives on the proxy itself, so a
+    per-slot base_url override is deliberately ignored here."""
     return config.components.litellm_url.rstrip("/")
 
 
 def gateway_admin_headers() -> dict[str, str]:
     """Master-key headers for LiteLLM's admin API (model registry, credentials).
 
-    The master key must never leave this process — the browser talks to the app,
-    only the app talks to the gateway's admin routes."""
+    Separate from ``_headers``: a slot's api_key_ref may be a virtual key with no
+    administrative rights, and the master key must never leave this process — the
+    browser talks to the app, only the app talks to the gateway's admin routes."""
     key = os.environ.get("LITELLM_MASTER_KEY")
     if not key:
         raise ValueError(
@@ -483,10 +533,10 @@ def _permanent_cause(response) -> str | None:
     return _PERMANENT_STATUS_CAUSES.get(status)
 
 
-def _permanent_error_message(model: str, response, cause: str) -> str:
+def _permanent_error_message(slot: ModelSlot, response, cause: str) -> str:
     detail = " ".join(str(getattr(response, "text", "") or "").split())[:400]
     return (
-        f"Model '{model}' cannot be used: {cause}. Retrying cannot help — an "
+        f"Model '{slot.model}' cannot be used: {cause}. Retrying cannot help — an "
         f"administrator has to fix the model account or the gateway configuration, "
         f"then requeue the affected documents. "
         f"Gateway answered HTTP {getattr(response, 'status_code', '?')}: {detail}"
@@ -494,7 +544,7 @@ def _permanent_error_message(model: str, response, cause: str) -> str:
 
 
 def _post_to_gateway(
-    url: str, *, model: str, base: str, **kwargs
+    url: str, *, slot: ModelSlot, base: str, **kwargs
 ) -> httpx.Response:
     """Retry a transient gateway 429 in-place; fail fast on a permanent refusal.
 
@@ -508,16 +558,16 @@ def _post_to_gateway(
     first response, and the fault is remembered briefly so the rest of the corpus fails
     fast under the same message rather than each document rediscovering it.
     """
-    fault_key = (base, model)
+    fault_key = (base, slot.model)
     remembered = _remembered_fault(fault_key)
     if remembered is not None:
-        log.debug("skipping %s call: %s", model, remembered)
+        log.debug("skipping %s call: %s", slot.model, remembered)
         raise ProviderPermanentError(remembered)
     for attempt in range(7):
         response = httpx.post(url, **kwargs)
         cause = _permanent_cause(response)
         if cause is not None:
-            message = _permanent_error_message(model, response, cause)
+            message = _permanent_error_message(slot, response, cause)
             _remember_fault(fault_key, message)
             # The cause in plain words, without the gateway's raw body: that goes into
             # the exception (and so into the quarantine reason an admin reads in the UI),
@@ -525,7 +575,7 @@ def _post_to_gateway(
             # an admin login rather than in the container log.
             log.error(
                 "model %s is unusable: %s (gateway answered HTTP %s)",
-                model,
+                slot.model,
                 cause,
                 getattr(response, "status_code", "?"),
             )
@@ -543,9 +593,26 @@ def _post_to_gateway(
     raise RuntimeError("unreachable")
 
 
-def _headers() -> dict[str, str]:
+def _base_url(slot: ModelSlot, config: AppConfig) -> str:
+    return (slot.base_url or config.components.litellm_url).rstrip("/")
+
+
+def _headers(slot: ModelSlot) -> dict[str, str]:
     headers = {"content-type": "application/json"}
-    key = os.environ.get("LITELLM_MASTER_KEY")
-    if key:
-        headers["authorization"] = f"Bearer {key}"
+    secret = _resolve_secret(slot)
+    if secret:
+        headers["authorization"] = f"Bearer {secret}"
     return headers
+
+
+def _resolve_secret(slot: ModelSlot) -> str | None:
+    reference = slot.api_key_ref
+    if not reference:
+        return None
+    if reference.startswith("env://"):
+        name = reference.removeprefix("env://")
+        value = os.environ.get(name)
+        if not value:
+            raise ValueError(f"model secret environment variable {name!r} is not set")
+        return value
+    raise ValueError("this deployment resolves model secrets only through env:// references")

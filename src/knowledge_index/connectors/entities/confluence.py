@@ -510,3 +510,105 @@ class ConfluenceLabelEntity(BaseEntity):
         if self.site_url:
             return f"{self.site_url}/wiki/label/{self.label_name}"
         return f"https://your-domain.atlassian.net/wiki/label/{self.label_name}"
+
+
+class ConfluenceTaskEntity(BaseEntity):
+    """Schema for a Confluence Task object.
+
+    For example, tasks extracted from Confluence pages or macros.
+    """
+
+    # Base fields are inherited and set during entity creation:
+    # - entity_id (the task ID)
+    # - breadcrumbs (space and content breadcrumbs)
+    # - name (from task text)
+    # - created_at (from createdAt timestamp)
+    # - updated_at (from updatedAt timestamp)
+
+    # API fields
+    task_id: str = IndexField(
+        ..., description="Unique identifier for the task.", embeddable=False, is_entity_id=True
+    )
+    content_id: Optional[str] = IndexField(
+        None,
+        description="The content ID (page, blog, etc.) that this task is associated with.",
+        embeddable=False,
+    )
+    space_key: Optional[str] = IndexField(
+        None, description="Space key if task is associated with a space.", embeddable=True
+    )
+    text: str = IndexField(..., description="Text of the task.", embeddable=True, is_name=True)
+    assignee: Optional[Dict[str, Any]] = IndexField(
+        None, description="Information about the user assigned to this task.", embeddable=True
+    )
+    completed: bool = IndexField(
+        False, description="Indicates if this task is completed.", embeddable=True
+    )
+    due_date: Optional[Any] = IndexField(
+        None, description="Due date/time if applicable.", embeddable=True
+    )
+
+
+class ConfluenceWhiteboardEntity(BaseEntity):
+    """Schema for a Confluence Whiteboard object.
+
+    Note: The "whiteboard" content type in Confluence Cloud.
+    """
+
+    # Base fields are inherited and set during entity creation:
+    # - entity_id (the whiteboard content ID)
+    # - breadcrumbs (space breadcrumb)
+    # - name (from whiteboard title)
+    # - created_at (from createdAt timestamp)
+    # - updated_at (from updatedAt timestamp)
+
+    # API fields
+    whiteboard_id: str = IndexField(
+        ...,
+        description="Unique identifier for the whiteboard.",
+        embeddable=False,
+        is_entity_id=True,
+    )
+    title: str = IndexField(
+        ..., description="Title of the whiteboard.", embeddable=True, is_name=True
+    )
+    space_key: Optional[str] = IndexField(
+        None, description="Key of the space this whiteboard is in.", embeddable=True
+    )
+    status: Optional[str] = IndexField(
+        None, description="Status of the whiteboard (e.g., 'current').", embeddable=False
+    )
+
+
+class ConfluenceCustomContentEntity(BaseEntity):
+    """Schema for a Confluence Custom Content object.
+
+    Note: The "custom content" type in Confluence Cloud.
+    """
+
+    # Base fields are inherited and set during entity creation:
+    # - entity_id (the custom content ID)
+    # - breadcrumbs (space breadcrumb)
+    # - name (from title)
+    # - created_at (from createdAt timestamp)
+    # - updated_at (from updatedAt timestamp)
+
+    # API fields
+    custom_content_id: str = IndexField(
+        ...,
+        description="Unique identifier for the custom content.",
+        embeddable=False,
+        is_entity_id=True,
+    )
+    title: str = IndexField(
+        ..., description="Title or name of this custom content.", embeddable=True, is_name=True
+    )
+    space_key: Optional[str] = IndexField(
+        None, description="Key of the space this content resides in.", embeddable=True
+    )
+    body: Optional[str] = IndexField(
+        None, description="Optional HTML body or representation.", embeddable=True
+    )
+    status: Optional[str] = IndexField(
+        None, description="Status of the custom content item (e.g., 'current').", embeddable=False
+    )

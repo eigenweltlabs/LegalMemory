@@ -99,7 +99,7 @@ class EnvironmentBuilder:
         cfg = self.config.environments
         result = BuildResult()
         max_run = min(limit or cfg.max_candidates_per_run, cfg.max_candidates_per_run)
-        model = self.config.pipeline.stage("gen_evals").model
+        slot = self.config.models.judge
 
         # Environment building is the gen_evals stage even though it runs outside the
         # insertion DAG, so its spend lands under the stage name the cost centre knows.
@@ -150,7 +150,7 @@ class EnvironmentBuilder:
                 input_refs = _input_refs(session, document, version)
                 try:
                     generation = chat_json(
-                        model,
+                        slot,
                         self.config,
                         system=EVAL_SYSTEM,
                         user=json.dumps(
@@ -200,7 +200,7 @@ class EnvironmentBuilder:
                         authored_internally=True,
                         practice_area=area,
                         provenance={
-                            "model": model,
+                            "model": slot.model,
                             "confidence": generation.confidence,
                             "source": "environment-builder",
                         },

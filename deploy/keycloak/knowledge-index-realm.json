@@ -29,7 +29,7 @@
       "credentials": [
         {
           "type": "password",
-          "value": "lm-dev-only",
+          "value": "eigenwelt-dev",
           "temporary": false
         }
       ],
@@ -47,7 +47,7 @@
       "credentials": [
         {
           "type": "password",
-          "value": "lm-dev-only",
+          "value": "eigenwelt-dev",
           "temporary": false
         }
       ],
@@ -57,16 +57,16 @@
       ]
     },
     {
-      "username": "lit.user@example.com",
+      "username": "lit.user@chriseigenweltlabs.onmicrosoft.com",
       "enabled": true,
-      "email": "lit.user@example.com",
+      "email": "lit.user@chriseigenweltlabs.onmicrosoft.com",
       "emailVerified": true,
       "firstName": "Litigation",
       "lastName": "User",
       "credentials": [
         {
           "type": "password",
-          "value": "lm-dev-only",
+          "value": "eigenwelt-dev",
           "temporary": false
         }
       ],
@@ -76,16 +76,16 @@
       ]
     },
     {
-      "username": "corp.user@example.com",
+      "username": "corp.user@chriseigenweltlabs.onmicrosoft.com",
       "enabled": true,
-      "email": "corp.user@example.com",
+      "email": "corp.user@chriseigenweltlabs.onmicrosoft.com",
       "emailVerified": true,
       "firstName": "Corporate",
       "lastName": "User",
       "credentials": [
         {
           "type": "password",
-          "value": "lm-dev-only",
+          "value": "eigenwelt-dev",
           "temporary": false
         }
       ],
@@ -101,7 +101,7 @@
       "name": "Knowledge Index UI",
       "enabled": true,
       "publicClient": false,
-      "secret": "lm-dev-only",
+      "secret": "eigenwelt-dev",
       "standardFlowEnabled": true,
       "directAccessGrantsEnabled": true,
       "attributes": {

@@ -1,7 +1,7 @@
 """HTTP response → domain exception translation for source connectors.
 
 Translates raw ``httpx`` responses into the typed exception hierarchy
-in ``knowledge_index.connectors.runtime.errors``:
+from ``domains.sources.exceptions``:
 
 - **401** → ``SourceAuthError`` (credentials dead, abort sync)
 - **403** → ``SourceEntityForbiddenError`` (skip — source decides severity)

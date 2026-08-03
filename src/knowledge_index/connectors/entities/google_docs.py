@@ -11,7 +11,7 @@ References:
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from pydantic import computed_field
@@ -139,7 +139,7 @@ class GoogleDocsDocumentEntity(FileEntity):
             f"https://www.googleapis.com/drive/v3/files/{file_id}/export?mimeType={export_mime}"
         )
 
-        created_time = _parse_dt(data.get("createdTime")) or datetime.now(timezone.utc)
+        created_time = _parse_dt(data.get("createdTime")) or datetime.utcnow()
         modified_time = _parse_dt(data.get("modifiedTime")) or created_time
 
         doc_name = data.get("name", "Untitled Document")

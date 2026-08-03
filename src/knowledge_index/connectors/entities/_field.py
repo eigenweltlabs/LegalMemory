@@ -34,7 +34,7 @@ def IndexField(  # noqa: D417
     init: Optional[bool] = None,
     init_var: Optional[bool] = None,
     kw_only: Optional[bool] = None,
-    # connector-layer metadata
+    # the connector layer-specific metadata
     embeddable: bool = False,
     is_entity_id: bool = False,
     is_name: bool = False,
@@ -43,7 +43,7 @@ def IndexField(  # noqa: D417
     unhashable: bool = False,
     **extra: Any,
 ) -> Any:
-    """Create a Pydantic Field carrying connector-layer metadata.
+    """Create a Pydantic Field with the connector layer-specific metadata.
 
     This extends the standard Pydantic Field to include metadata for:
     - embeddable: Whether this field should be included in embeddable text generation
@@ -64,7 +64,7 @@ def IndexField(  # noqa: D417
         **extra: Any additional metadata to be added to the field
 
     Returns:
-        Field descriptor with connector-layer metadata in json_schema_extra
+        Field descriptor with the connector layer metadata in json_schema_extra
 
     Example:
         >>> class AsanaTaskEntity(BaseEntity):
@@ -76,7 +76,7 @@ def IndexField(  # noqa: D417
         ...     modified_at: Optional[datetime] = IndexField(None, is_updated_at=True)
         ...     permalink_url: Optional[str] = IndexField(None, unhashable=True)
     """
-    # Build json_schema_extra with the connector-layer metadata
+    # Build json_schema_extra with the connector layer metadata
     field_metadata = {}
     if embeddable:
         field_metadata["embeddable"] = True

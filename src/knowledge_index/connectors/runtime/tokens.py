@@ -2,11 +2,12 @@
 
 Connectors touch exactly four members of this contract —
 ``get_token()``, ``force_refresh()``, ``supports_refresh`` and ``provider_kind`` —
-so that is the whole surface we have to own.  Two implementations cover every
+so that is the whole surface we have to own.  Three implementations cover every
 connector we ship:
 
 ``OAuthTokenProvider``      OAuth2 with proactive refresh, credentials persisted encrypted
 ``StaticTokenProvider``     a bare token (PAT, app password, ``validate()`` probes)
+``DirectCredentialProvider``structured non-token credentials (SharePoint app auth)
 
 Refresh is serialized under a lock and the refreshed pair is persisted through a
 caller-supplied sink, so a rotating-refresh provider (Confluence, Dropbox) cannot
@@ -19,7 +20,7 @@ import asyncio
 import time
 from collections.abc import Awaitable, Callable
 from enum import Enum
-from typing import Protocol, runtime_checkable
+from typing import Generic, Protocol, TypeVar, runtime_checkable
 
 from knowledge_index.connectors.runtime.errors import (
     SourceAuthError,
@@ -89,6 +90,32 @@ class StaticTokenProvider:
             "this connection was configured with a static token; it cannot be refreshed. "
             "Re-authorize the connector to obtain new credentials."
         )
+
+
+CredentialsT = TypeVar("CredentialsT")
+
+
+class DirectCredentialProvider(Generic[CredentialsT]):
+    """Structured credentials (client id/secret, certificate thumbprint, …).
+
+    Used where the connector performs its own token acquisition — SharePoint Online
+    app-only auth mints per-resource tokens itself.
+    """
+
+    def __init__(self, credentials: CredentialsT) -> None:
+        self._credentials = credentials
+
+    @property
+    def credentials(self) -> CredentialsT:
+        return self._credentials
+
+    @property
+    def provider_kind(self) -> AuthProviderKind:
+        return AuthProviderKind.CREDENTIAL
+
+    @property
+    def supports_refresh(self) -> bool:
+        return False
 
 
 # (access_token, refresh_token, expires_in_seconds)

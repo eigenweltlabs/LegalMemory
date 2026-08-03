@@ -83,7 +83,7 @@ class BaseSource:
         """Initialize with injected dependencies.
 
         Args:
-            auth: Auth provider (TokenProviderProtocol or a static token).
+            auth: Auth provider (TokenProviderProtocol or DirectCredentialProvider).
             logger: Contextual logger with sync/search metadata.
             http_client: Pre-built HttpClient with rate limiting.
         """
@@ -124,7 +124,7 @@ class BaseSource:
             return await self._auth.get_token()
         raise RuntimeError(
             f"{self.__class__.__name__}: auth provider {type(self._auth).__name__} "
-            f"does not support get_token()."
+            f"does not support get_token(). Use DirectCredentialProvider.credentials instead."
         )
 
     async def get_token_for_resource(self, resource_scope: str) -> Optional[str]:
@@ -201,7 +201,7 @@ class BaseSource:
         Pydantic model (the source's ``config_class``).
 
         Args:
-            auth: Auth provider — ``TokenProviderProtocol`` or a static token.
+            auth: Auth provider — ``TokenProviderProtocol`` or ``DirectCredentialProvider``.
             logger: Contextual logger with sync/search metadata.
             http_client: Pre-built HttpClient with rate limiting.
             config: Typed config instance (source's config_class, parsed by lifecycle).

@@ -14,7 +14,7 @@ References:
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from pydantic import computed_field
@@ -209,7 +209,7 @@ class GoogleDriveFileEntity(FileEntity):
         else:
             download_url = f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media"
 
-        created_time = _parse_drive_dt(data.get("createdTime")) or datetime.now(timezone.utc)
+        created_time = _parse_drive_dt(data.get("createdTime")) or datetime.utcnow()
         modified_time = _parse_drive_dt(data.get("modifiedTime")) or created_time
 
         return cls(

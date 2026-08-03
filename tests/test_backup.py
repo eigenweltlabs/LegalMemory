@@ -168,23 +168,9 @@ def appliance_restic(appliance: AppConfig, tmp_path: Path) -> AppConfig:
     return appliance
 
 
-def restic_required(test):
-    """Needs the restic binary, and is slow enough to keep out of the default run.
-
-    restic derives its repository key on every single invocation, on purpose: measured
-    here at ~2.9s for `init` and ~0.75s for each command afterwards. That is the whole
-    cost — the corpus these tests back up is a few kilobytes. Five tests drive restic
-    end to end (backup, re-backup, dedup accounting, retention, restore) and together
-    they took 169s of this file's 202s, so leaving them in the default suite makes every
-    local run six times longer to exercise a third-party binary's behaviour.
-
-    They are not skipped, they are deselected: CI runs them in its own step. Run them
-    locally with `pytest -m slow`.
-    """
-    test = pytest.mark.skipif(
-        shutil.which("restic") is None, reason="restic is not installed on this machine"
-    )(test)
-    return pytest.mark.slow(test)
+restic_required = pytest.mark.skipif(
+    shutil.which("restic") is None, reason="restic is not installed on this machine"
+)
 
 
 # --------------------------------------------------------------- incremental destination

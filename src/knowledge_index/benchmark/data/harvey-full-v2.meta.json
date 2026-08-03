@@ -1,0 +1,19 @@
+{
+  "name": "harvey-full-v2",
+  "source": "harveyai/harvey-labs (MIT)",
+  "corpus_config": {
+    "areas": [
+      "<all>"
+    ],
+    "matters": 1238,
+    "scenarios": 1748,
+    "documents": 14050,
+    "seed": 42,
+    "content_hash": "c4f0662aa18e3d70"
+  },
+  "gold_queries": 1282,
+  "by_kind": {
+    "request": 1282
+  },
+  "reproduce": "ki generate-benchmark <out> --source <harvey-labs> --areas <all> --seed 42"
+}

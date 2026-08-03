@@ -133,7 +133,7 @@ def test_chat_agent_runs_tools_then_submits(monkeypatch) -> None:
     monkeypatch.setattr(providers.httpx, "post", lambda *a, **k: _Resp())
 
     result = chat_agent(
-        "test",
+        providers.ModelSlot(model="test", api_key_ref=None),
         AppConfig(),
         system="classify",
         user="{}",
@@ -157,7 +157,7 @@ def test_chat_agent_raises_when_never_submits(monkeypatch, tmp_path: Path) -> No
     monkeypatch.setattr(providers.httpx, "post", lambda *a, **k: _Resp())
     try:
         chat_agent(
-            "test",
+            providers.ModelSlot(model="test", api_key_ref=None),
             AppConfig(),
             system="s",
             user="u",
@@ -179,24 +179,32 @@ def test_create_matter_tool_is_get_or_create_and_commits(
         session.commit()
         source_id = source.id
 
+    # Track handler-bound sessions so their read transactions are rolled back
+    # before the next test's TRUNCATE reset.
+    tool_sessions: list[Session] = []
+
     def build_tools(seen: set[str]) -> dict[str, AgentTool]:
-        with factory() as session:
-            tools = classification_tools(
-                session,
-                AppConfig(),
-                source_id,
-                "Mandate/Falke/vertrag.pdf",
-                session_factory=factory,
-                project_id=None,
-                fallback_reference="UNASSIGNED-FALKE",
-                provenance={"model": "test"},
-                seen_matter_ids=seen,
-            )
+        session = factory()
+        tool_sessions.append(session)
+        tools = classification_tools(
+            session,
+            AppConfig(),
+            source_id,
+            "Mandate/Falke/vertrag.pdf",
+            session_factory=factory,
+            project_id=None,
+            fallback_reference="UNASSIGNED-FALKE",
+            provenance={"model": "test"},
+            seen_matter_ids=seen,
+        )
         return {tool.name: tool for tool in tools}
 
+    # the enforced create protocol: search first, create as the next action
     seen_a: set[str] = set()
+    tools_a = build_tools(seen_a)
+    tools_a["search_matters"].handler({"query": "M-2026-0042"})
     created = json.loads(
-        build_tools(seen_a)["create_matter"].handler(
+        tools_a["create_matter"].handler(
             {"reference_number": " m-2026-0042 ", "title": "Projekt Falke"}
         )
     )
@@ -210,8 +218,10 @@ def test_create_matter_tool_is_get_or_create_and_commits(
 
     # a concurrently classifying document's agent gets the existing matter, not a duplicate
     seen_b: set[str] = set()
+    tools_b = build_tools(seen_b)
+    tools_b["search_matters"].handler({"query": "M-2026-0042"})
     second = json.loads(
-        build_tools(seen_b)["create_matter"].handler(
+        tools_b["create_matter"].handler(
             {"reference_number": "M-2026-0042", "title": "Projekt Falke (Kopie)"}
         )
     )
@@ -222,7 +232,9 @@ def test_create_matter_tool_is_get_or_create_and_commits(
         assert session.scalar(select(func.count()).select_from(Matter)) == 1
 
     # without a reference number, the folder-derived fallback keeps the ref deterministic
-    fallback = json.loads(build_tools(set())["create_matter"].handler({"title": "Neu"}))
+    tools_c = build_tools(set())
+    tools_c["search_matters"].handler({"query": "Neu"})
+    fallback = json.loads(tools_c["create_matter"].handler({"title": "Neu"}))
     assert fallback["created"] is True
     assert fallback["reference_numbers"] == ["UNASSIGNED-FALKE"]
     # a placeholder-ref creation is a triage pile, not a real case file
@@ -233,6 +245,10 @@ def test_create_matter_tool_is_get_or_create_and_commits(
             if matter.reference_numbers == ["UNASSIGNED-FALKE"]
         )
         assert placeholder.status == "unassigned"
+
+    for tool_session in tool_sessions:
+        tool_session.rollback()
+        tool_session.close()
 
 
 def test_classify_matter_reuses_agent_created_matter(
@@ -275,6 +291,7 @@ def test_classify_matter_reuses_agent_created_matter(
         # mid-loop (committing the matter), then submits the returned id.
         def fake_chat_agent(*args, **kwargs) -> MatterClassification:
             tools = {tool.name: tool for tool in kwargs["tools"]}
+            tools["search_matters"].handler({"query": "M-7"})
             created = json.loads(
                 tools["create_matter"].handler(
                     {"reference_number": "M-7", "title": "Projekt Falke"}

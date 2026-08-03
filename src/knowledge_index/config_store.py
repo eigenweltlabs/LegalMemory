@@ -81,7 +81,7 @@ class ConfigStore:
         The app and the Hatchet worker run in separate processes with separate
         ConfigStore instances but share ``KI_CONFIG_PATH``. The worker resolves the
         config once per task via this getter, so it must observe admin edits (model
-        assignments, stage toggles, the reindex target) written by the app — hence the
+        slots, stage toggles, the reindex target) written by the app — hence the
         mtime check rather than a permanent in-process cache. The environment is
         re-applied on every reload, so it can never be shadowed by a later save."""
         mtime_ns = self.path.stat().st_mtime_ns if self.path.exists() else None

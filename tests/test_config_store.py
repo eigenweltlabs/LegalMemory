@@ -25,26 +25,26 @@ def test_config_store_reloads_when_file_changes_on_disk(tmp_path: Path) -> None:
     path = tmp_path / "config.json"
     app_store = ConfigStore(path)
     app_store.save(AppConfig(artifact_dir=tmp_path / "artifacts"))
-    assert app_store.get().retrieval.embedding_model == TEST_EMBEDDING_MODEL
+    assert app_store.get().models.embed.model == TEST_EMBEDDING_MODEL
 
     # A different process (e.g. the admin API) rewrites the shared config file.
     worker_store = ConfigStore(path)
-    assert worker_store.get().retrieval.embedding_model == TEST_EMBEDDING_MODEL
+    assert worker_store.get().models.embed.model == TEST_EMBEDDING_MODEL
     changed = app_store.get().model_copy(deep=True)
-    changed.retrieval.embedding_model = "bge-m3"
+    changed.models.embed.model = "bge-m3"
     changed.retrieval.embedding_dimensions = 1024
     app_store.save(changed)
 
     # The worker's store must observe the new model on its next resolve, not serve a
     # permanently cached snapshot.
     reloaded = worker_store.get()
-    assert reloaded.retrieval.embedding_model == "bge-m3"
+    assert reloaded.models.embed.model == "bge-m3"
     assert reloaded.retrieval.embedding_dimensions == 1024
 
 
 def test_derived_index_name_binds_model_and_dimension(tmp_path: Path) -> None:
     config = AppConfig(artifact_dir=tmp_path / "artifacts")
-    config.retrieval.embedding_model = "text-embedding-3-large"
+    config.models.embed.model = "text-embedding-3-large"
     config.retrieval.embedding_dimensions = 3072
     assert config.embedding_signature() == "text-embedding-3-large-3072"
     assert config.derived_index_name() == "knowledge-index-chunks-text-embedding-3-large-3072"
@@ -68,14 +68,14 @@ def test_the_environment_only_wins_where_it_actually_speaks(tmp_path: Path, monk
     path = tmp_path / "config.json"
     saved = AppConfig(artifact_dir=tmp_path / "artifacts")
     saved.security.admin_groups = ["partners"]
-    saved.retrieval.embedding_model = "bge-m3"
+    saved.models.embed.model = "bge-m3"
     ConfigStore(path).save(saved)
 
     monkeypatch.setenv("KI_SECURITY__AUTH_MODE", "oidc")
     config = ConfigStore(path).get()
     assert config.security.auth_mode == "oidc"  # from the environment
     assert config.security.admin_groups == ["partners"]  # still from the file
-    assert config.retrieval.embedding_model == "bge-m3"
+    assert config.models.embed.model == "bge-m3"
 
 
 def test_saving_cannot_quietly_change_a_pinned_setting(tmp_path: Path, monkeypatch) -> None:
@@ -103,12 +103,12 @@ def test_runtime_configuration_still_works_around_a_pinned_setting(
     app_store = ConfigStore(path)
     draft = app_store.get().model_copy(deep=True)
     draft.security.admin_groups = ["partners"]
-    draft.retrieval.embedding_model = "bge-m3"
+    draft.models.embed.model = "bge-m3"
     app_store.save(draft)
 
     worker = ConfigStore(path).get()
     assert worker.security.admin_groups == ["partners"]
-    assert worker.retrieval.embedding_model == "bge-m3"
+    assert worker.models.embed.model == "bge-m3"
     assert worker.security.auth_mode == "oidc"
 
 

@@ -502,3 +502,49 @@ class OAuth2WithRefreshAuthConfig(OAuth2AuthConfig):
 
 class BoxAuthConfig(OAuth2WithRefreshAuthConfig):
     """Box authentication credentials schema."""
+
+
+class SharePointOnlineAppAuthConfig(AuthConfig):
+    """SharePoint Online app-only authentication using client credentials.
+
+    Uses client_id + client_secret for Microsoft Graph API calls,
+    and a certificate private key for SharePoint REST API calls.
+    Requires an Azure AD app registration with application permissions
+    and admin consent.
+    """
+
+    tenant_id: str = Field(
+        title="Tenant ID",
+        description="Azure AD tenant ID (e.g., 'contoso.onmicrosoft.com' or a UUID)",
+        min_length=1,
+    )
+    client_id: str = Field(
+        title="Client ID",
+        description="Application (client) ID from the Azure AD app registration",
+        min_length=1,
+    )
+    client_secret: str = Field(
+        title="Client Secret",
+        description="Client secret from the Azure AD app registration (for Graph API)",
+        min_length=1,
+        json_schema_extra={"is_secret": True},
+    )
+    private_key: str = Field(
+        title="Private Key (PEM)",
+        description=(
+            "PEM-encoded private key for certificate authentication "
+            "(for SharePoint REST API). Starts with '-----BEGIN PRIVATE KEY-----'"
+        ),
+        min_length=1,
+        json_schema_extra={"is_secret": True},
+    )
+    certificate: str = Field(
+        default="",
+        title="Certificate (PEM)",
+        description=(
+            "PEM-encoded certificate that was uploaded to the Azure AD app registration. "
+            "Used to compute the x5t thumbprint for SP REST API token exchange. "
+            "If omitted, SP site group expansion will not work."
+        ),
+        json_schema_extra={"is_secret": True},
+    )

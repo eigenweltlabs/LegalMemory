@@ -5,7 +5,7 @@ standalone script (see ``examples/plugins/reference_export.py``) that reads a
 customer DMS — RA-MICRO, AnNoText, Advoware, an in-house SQL export — and writes a
 *drop directory* in a versioned schema.  This connector reads that directory; no
 connector code lands in this repo per customer.  The full contract lives in
-``docs/src/content/docs/development/plugin-connectors.md``.
+``docs/connector-plugins.md``.
 
 Drop directory layout::
 

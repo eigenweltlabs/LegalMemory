@@ -1,7 +1,7 @@
 """Direct LiteLLM-gateway chat helpers for the benchmark agent + judge.
 
 Kept separate from ``pipeline.providers.chat_json`` (which injects a German schema
-instruction) so vendored prompts — like the rubric judge — are sent verbatim.
+instruction) so vendored prompts — like Harvey LAB's rubric judge — are sent verbatim.
 ``httpx`` is imported lazily so this module stays offline-importable.
 """
 
@@ -10,46 +10,75 @@ from __future__ import annotations
 import json
 import re
 
-from knowledge_index.config import AppConfig
+from knowledge_index.config import AppConfig, ModelSlot
+
+#: How long one model call may take before the harness gives up on it. Deliberately
+#: generous: this bounds the BENCHMARK's patience, not the system's behaviour, and a
+#: timeout here is indistinguishable in the results from the system getting an answer
+#: wrong. Latency is reported per run, so a slow system is still visibly slow.
+_REQUEST_TIMEOUT_SECONDS = 900
 
 
 def complete(
     config: AppConfig,
-    model: str,
+    slot: ModelSlot,
     messages: list[dict],
     *,
     tools: list[dict] | None = None,
+    tool_choice: str | dict | None = None,
     max_tokens: int = 4000,
     usage_sink: dict | None = None,
 ) -> dict:
     """One chat completion through the gateway; returns the raw message dict.
 
-    Retries on 429 with exponential backoff so a rate-limit blip does not turn into a
-    silent FAIL verdict (the judge fans out many concurrent calls). When ``usage_sink``
-    is given, the response's token usage is accumulated into it (for per-run cost).
+    Retries on 429 (rate-limit blips) AND transient faults — 5xx and connection
+    errors — with capped exponential backoff. A fleet backend scaling away mid-run
+    surfaces as a brief LB 503; without the retry, one such blip killed an entire
+    200-query eval config. When ``usage_sink`` is given, the response's token usage
+    is accumulated into it (for per-run cost).
     """
-    import os
     import time
 
     import httpx
 
-    base = config.components.litellm_url.rstrip("/")
-    key = os.environ.get("LITELLM_MASTER_KEY")
+    from knowledge_index.pipeline.providers import _resolve_secret
+
+    base = (slot.base_url or config.components.litellm_url).rstrip("/")
+    key = _resolve_secret(slot)
     payload: dict = {
-        "model": model,
-        "temperature": 0.0,
+        "model": slot.model,
+        "temperature": slot.temperature,
         "max_tokens": max_tokens,
         "messages": messages,
     }
     if tools:
         payload["tools"] = tools
-        payload["tool_choice"] = "auto"
+        payload["tool_choice"] = tool_choice or "auto"
+    # An agent that reads several documents accumulates a very large prompt — measured
+    # up to 145k tokens on the full tool surface, which the model needs 600-720s to
+    # prefill. At the old 240s the client abandoned calls that would have SUCCEEDED,
+    # then retried into the same wall eight times, so those items could never complete
+    # and scored as failures. Worse, they were not a random subset: a context gets that
+    # large precisely because the request was hard. This is a harness bound, not a
+    # model one, so it is set above the observed worst case rather than tuned to it.
+    # ``timeout`` is also sent in the payload because the gateway applies its own
+    # request_timeout (600s) and would cut the call off first.
+    payload["timeout"] = _REQUEST_TIMEOUT_SECONDS
     headers = {"authorization": f"Bearer {key}"} if key else {}
     for attempt in range(8):
-        response = httpx.post(
-            f"{base}/v1/chat/completions", headers=headers, json=payload, timeout=240
-        )
-        if response.status_code == 429 and attempt < 7:
+        try:
+            response = httpx.post(
+                f"{base}/v1/chat/completions",
+                headers=headers,
+                json=payload,
+                timeout=_REQUEST_TIMEOUT_SECONDS,
+            )
+        except httpx.HTTPError:
+            if attempt < 7:
+                time.sleep(min(2**attempt, 30))
+                continue
+            raise
+        if (response.status_code == 429 or response.status_code >= 500) and attempt < 7:
             # honor the server's Retry-After when present; otherwise capped exp backoff.
             retry_after = response.headers.get("retry-after")
             delay = float(retry_after) if retry_after else min(2**attempt, 30)

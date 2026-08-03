@@ -1,6 +1,6 @@
 """LLM resolution of the ``(client, counterparty)`` for each firm-layout matter.
 
-The deterministic guess in ``task_corpus._firm_parties`` reads the leading token of
+The deterministic guess in ``harvey_corpus._firm_parties`` reads the leading token of
 each filename, which is noisy: document-type words ("security", "amortization",
 "lender") masquerade as clients, and it can't tell *which* side the firm represents.
 This resolves the parties with the model instead, in two stages:
@@ -21,18 +21,16 @@ builds. This is a one-time corpus-generation step, not a query-time path.
 
 from __future__ import annotations
 
-import os
-
 from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, Field
 
 from knowledge_index.benchmark.gold import _document_text
-from knowledge_index.benchmark.task_corpus import _firm_parties
-from knowledge_index.config import DEFAULT_LLM_ENV, AppConfig
+from knowledge_index.benchmark.harvey_corpus import _firm_parties
+from knowledge_index.config import AppConfig, ModelSlot
 
 if TYPE_CHECKING:
-    from knowledge_index.benchmark.task_corpus import PartyResolver, _Scenario
+    from knowledge_index.benchmark.harvey_corpus import PartyResolver, _Scenario
 
 PROMPT_VERSION = "firm-parties-1"
 _MAX_DOCS = 4  # documents shown per scenario (recitals live in the first agreement/draft)
@@ -117,7 +115,7 @@ def resolve_parties_llm(
     scenarios: list[_Scenario],
     config: AppConfig,
     *,
-    model: str = "",
+    model_slot: ModelSlot | None = None,
 ) -> list[tuple[str, str]]:
     """Return an aligned ``[(client, counterparty), ...]`` for ``scenarios`` via the model.
 
@@ -128,7 +126,7 @@ def resolve_parties_llm(
     """
     from knowledge_index.pipeline.providers import chat_json
 
-    model = model or os.environ.get(DEFAULT_LLM_ENV, "")
+    slot = model_slot or config.models.judge
 
     # stage 1 — per-scenario extraction, deterministic fallback on any failure
     clients_full: list[str] = []
@@ -138,7 +136,7 @@ def resolve_parties_llm(
         det_client, det_counterparty = _firm_parties([d.name for d in scenario.documents])
         try:
             extracted = chat_json(
-                model,
+                slot,
                 config,
                 system=_EXTRACT_SYSTEM,
                 user=_extract_prompt(scenario),
@@ -156,7 +154,7 @@ def resolve_parties_llm(
         counterparties.append(_clean_label(extracted.counterparty_short) or det_counterparty)
 
     # stage 2 — one global pass to merge client-name variants into canonical folders
-    canonical = _canonicalize(clients_full, config, model, chat_json)
+    canonical = _canonicalize(clients_full, config, slot, chat_json)
 
     clients = [
         canonical.get(full) or short
@@ -166,7 +164,7 @@ def resolve_parties_llm(
 
 
 def _canonicalize(
-    names: list[str], config: AppConfig, model: str, chat_json
+    names: list[str], config: AppConfig, slot: ModelSlot, chat_json
 ) -> dict[str, str]:
     """Map each distinct client name to a canonical short label (best-effort, one call)."""
     unique = sorted({n for n in names if n})
@@ -175,7 +173,7 @@ def _canonicalize(
     listing = "\n".join(f"- {name}" for name in unique)
     try:
         result = chat_json(
-            model,
+            slot,
             config,
             system=_CANON_SYSTEM,
             user=f"Client names:\n{listing}",
@@ -192,11 +190,11 @@ def _canonicalize(
 
 
 def make_llm_party_resolver(
-    config: AppConfig, *, model: str = ""
+    config: AppConfig, *, model_slot: ModelSlot | None = None
 ) -> PartyResolver:
-    """Bind ``config`` into a :data:`~task_corpus.PartyResolver` for the firm builder."""
+    """Bind ``config`` into a :data:`~harvey_corpus.PartyResolver` for the firm builder."""
 
     def resolver(scenarios: list[_Scenario]) -> list[tuple[str, str]]:
-        return resolve_parties_llm(scenarios, config, model=model)
+        return resolve_parties_llm(scenarios, config, model_slot=model_slot)
 
     return resolver

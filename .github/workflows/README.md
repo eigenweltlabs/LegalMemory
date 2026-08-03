@@ -63,8 +63,8 @@ whatever the runner happened to have, and the values nobody could see would be t
 that mattered. `scripts/ci-env.sh` generates it instead, so the dummy values live in
 version control where they can be read and reviewed. It refuses to write to `.env`.
 
-Every value it writes is obvious rubbish. `docker-compose.yml` marks eleven variables
-required with `${VAR:?}` and refuses to start anything without them; none of the eleven
+Every value it writes is obvious rubbish. `docker-compose.yml` marks twelve variables
+required with `${VAR:?}` and refuses to start anything without them; none of the twelve
 has to be real, because nothing in CI calls a model.
 
 ## Why the round-trip job is so large
@@ -137,3 +137,14 @@ that no integration test skipped and at least one ran. A skipped backup test is 
 exit code over an estate nothing checked, which is the same failure as a backup reporting
 success with six of ten components.
 
+## `ruff check` is red on main today
+
+`ruff check .` reports 23 findings on the tree this workflow was added to — 2 `F541` in
+`src/knowledge_index/cli.py`, 12 `F401`, 6 `E402` and 3 `F811`, concentrated in
+`src/knowledge_index/connectors/configs.py` (which carries a duplicated import block from
+line 435) plus `src/knowledge_index/retrieval.py` and a vendored script under
+`src/knowledge_index/benchmark/harvey/skills/`. 17 are fixable with `ruff check --fix .`.
+
+They are not excluded here, and no path carve-out was added for them. A linter configured
+around the code that fails it reports nothing worth knowing. Fix them in the same change
+that merges this workflow, or the `lint` job is red from its first run.

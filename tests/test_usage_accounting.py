@@ -18,7 +18,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
-from knowledge_index.config import AppConfig
+from knowledge_index.config import AppConfig, ModelSlot
 from knowledge_index.db import engine as engine_module
 from knowledge_index.db.models import UsageEvent
 from knowledge_index.pipeline import providers
@@ -28,6 +28,12 @@ from tests.conftest import TEST_LLM_MODEL
 
 class _Answer(BaseModel):
     antwort: str
+
+
+def _slot(model: str = TEST_LLM_MODEL) -> ModelSlot:
+    """A slot with no secret reference: the gateway is stubbed, so resolving a real
+    master key here would only couple these tests to the developer's environment."""
+    return ModelSlot(model=model, api_key_ref=None)
 
 
 class _Response:
@@ -83,7 +89,7 @@ def test_a_chat_completion_books_one_row_for_the_stage_that_made_it(ledger, monk
     )
     config = AppConfig()
     with usage_stage("extract_metadata"):
-        chat_json(TEST_LLM_MODEL, config, system="s", user="u", schema=_Answer)
+        chat_json(_slot(), config, system="s", user="u", schema=_Answer)
 
     rows = _rows(ledger)
     assert len(rows) == 1
@@ -111,7 +117,7 @@ def test_an_unpriced_model_still_books_its_tokens(ledger, monkeypatch) -> None:
     )
     config = AppConfig()
     with usage_stage("classify_matter"):
-        chat_json("classify-default", config, system="s", user="u", schema=_Answer)
+        chat_json(_slot("classify-default"), config, system="s", user="u", schema=_Answer)
 
     (row,) = _rows(ledger)
     assert row.cost_usd == 0.0
@@ -130,7 +136,7 @@ def test_an_agent_loop_books_every_turn_it_actually_spent(ledger, monkeypatch) -
     config = AppConfig()
     with usage_stage("relate"):
         chat_agent(
-            TEST_LLM_MODEL,
+            _slot(TEST_LLM_MODEL),
             config,
             system="s",
             user="u",
@@ -153,7 +159,7 @@ def test_a_response_without_usage_books_nothing(ledger, monkeypatch) -> None:
     )
     config = AppConfig()
     with usage_stage("extract_decisions"):
-        chat_json(TEST_LLM_MODEL, config, system="s", user="u", schema=_Answer)
+        chat_json(_slot(), config, system="s", user="u", schema=_Answer)
 
     assert _rows(ledger) == []
 
@@ -177,7 +183,7 @@ def test_accounting_failure_never_fails_the_model_call(ledger, monkeypatch, capl
     monkeypatch.setattr(providers, "get_session", _broken_session)
     config = AppConfig()
     with caplog.at_level("WARNING"), usage_stage("index"):
-        result = chat_json(TEST_LLM_MODEL, config, system="s", user="u", schema=_Answer)
+        result = chat_json(_slot(), config, system="s", user="u", schema=_Answer)
 
     assert result.antwort == "Berlin"
     assert _rows(ledger) == []
@@ -194,7 +200,7 @@ def test_a_call_outside_any_stage_is_recorded_as_unassigned(ledger, monkeypatch)
         ),
     )
     config = AppConfig()
-    chat_json(TEST_LLM_MODEL, config, system="s", user="u", schema=_Answer)
+    chat_json(_slot(), config, system="s", user="u", schema=_Answer)
 
     (row,) = _rows(ledger)
     assert row.pipeline_stage is None

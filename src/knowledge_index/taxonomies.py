@@ -1,4 +1,4 @@
-"""Controlled vocabularies from docs/src/content/docs/concepts/data-model.md.
+"""Controlled vocabularies from docs/ontology.md.
 
 Leaf ids are stable API: they appear in the database, in MCP tool filters, and in
 LLM extraction prompts. All ids and labels are English; localized display names

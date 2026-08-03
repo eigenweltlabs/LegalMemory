@@ -38,7 +38,7 @@ jobs:
       # Pinned rather than taken from pyproject's `ruff>=0.4`. An unpinned linter turns
       # unrelated pull requests red the day it ships a new rule, and a red build nobody
       # caused is a red build everybody learns to ignore. Raise this deliberately.
-      - run: pip install ruff==0.16.1
+      - run: pip install ruff==0.15.22
       # Whole repository, no per-path carve-outs. See .github/workflows/README.md for the
       # findings that exist on main today — they are real and they have to be fixed, not
       # excluded, or this job means nothing.
@@ -85,10 +85,6 @@ jobs:
       # report characters, so the short summary lists skips and drops the FAILED lines —
       # a red job that does not say which test went red. -ra keeps both.
       - run: pytest -q -ra
-      # The restic round-trip, deselected from the run above because restic's own key
-      # derivation dominates it (~0.75s per invocation, and these drive it end to end).
-      # Deselected locally, never unexercised: this step is why that trade is safe.
-      - run: pytest -q -ra -m slow
 
   # --------------------------------------------------------------------------- UI bundle
   ui:

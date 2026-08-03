@@ -75,6 +75,7 @@ from knowledge_index.pipeline.folder_context import (
 )
 from knowledge_index.pipeline.matter_search import (
     classification_tools,
+    entity_search_covered,
     party_resolution_tools,
     relation_tools,
 )
@@ -578,6 +579,16 @@ class PipelineRunner:
         *,
         deterministic: bool,
     ) -> str:
+        # A manually-expired task's zombie attempt can outlive its claim: the
+        # re-dispatched attempt completes the stage, then the zombie fails and
+        # would stamp its failure over the finished work (2026-08-01 run: a
+        # done classify flagged quarantined). A failure may only be recorded
+        # over a claim this attempt still plausibly owns — never over DONE.
+        current_status = session.scalar(
+            select(ProcessingState.status).where(ProcessingState.id == state.id)
+        )
+        if current_status == ProcessingStatus.DONE.value:
+            return "superseded"
         stage_config = self.config.pipeline.stage(state.stage)
         quarantine = deterministic or state.attempts >= stage_config.max_attempts
         state.status = (
@@ -700,7 +711,7 @@ class PipelineRunner:
         converted = _required_artifact(session, source_object.content_hash, "structured_json")
         text = (converted.payload or {}).get("text", "")
         folder = _parent_folder(source_object.path)
-        model = self.config.pipeline.stage("classify_matter").model
+        slot = self.config.models.classify
         trace_id, trace_tags = _stage_trace(source_object.id, "classify_matter")
         # Area of Law is a shallow facet: a compact menu in the prompt beats an
         # agentic walk. Only offered (and validated) when the facet is active.
@@ -758,7 +769,7 @@ class PipelineRunner:
         # dumping a truncated list into the prompt, the model SEARCHES existing matters and
         # inspects the ±2-level folder neighbourhood before deciding.
         classification = chat_agent(
-            model,
+            slot,
             self.config,
             system=classify_system,
             user=json.dumps(
@@ -784,7 +795,7 @@ class PipelineRunner:
                 project_id=source.project_id,
                 fallback_reference=fallback_reference,
                 provenance={
-                    "model": model,
+                    "model": slot.model,
                     "prompt_version": self.config.pipeline.stage(
                         "classify_matter"
                     ).producer_version,
@@ -819,7 +830,7 @@ class PipelineRunner:
         )
         matter_ref = (classification.matter_ref or "").strip().upper() or fallback_reference
         provenance = {
-            "model": model,
+            "model": slot.model,
             "prompt_version": self.config.pipeline.stage("classify_matter").producer_version,
             "confidence": classification.confidence,
             "evidence": [source_object.path, classification.reasoning],
@@ -1001,7 +1012,7 @@ class PipelineRunner:
         folder_neighbourhood: str,
         trace_tags: list[str] | None = None,
     ) -> FileRelationResult:
-        model = self.config.pipeline.stage("relate").model
+        slot = self.config.models.judge
         opened_refs: set[str] = set()
 
         def validate_opened_refs(candidate: FileRelationResult) -> str | None:
@@ -1014,7 +1025,7 @@ class PipelineRunner:
             )
 
         result = chat_agent(
-            model,
+            slot,
             self.config,
             system=FILE_RELATION_SYSTEM,
             user=json.dumps(
@@ -1056,7 +1067,7 @@ class PipelineRunner:
         trace_id: str | None = None,
     ) -> None:
         provenance = {
-            "model": self.config.pipeline.stage("relate").model,
+            "model": self.config.models.judge.model,
             "prompt_version": producer_version,
             "method": "file-scoped-ai-relation",
             "confidence": result.confidence,
@@ -1932,7 +1943,7 @@ class PipelineRunner:
         source_object, document, version = _knowledge_entities(session, state)
         converted = _required_artifact(session, source_object.content_hash, "structured_json")
         text = (converted.payload or {}).get("text", "")
-        model = self.config.pipeline.stage("extract_metadata").model
+        slot = self.config.models.extract
         prompt_version = self.config.pipeline.stage("extract_metadata").producer_version
         scope = self.config.doc_ontology()
         clause_scope = (
@@ -1944,6 +1955,7 @@ class PipelineRunner:
         visited: set[str] = set()
         clause_visited: set[str] = set()
         seen_ids: set[str] = set()
+        searched_queries: set[str] = set()
 
         def validate_metadata(candidate: DocumentMetadata) -> str | None:
             if candidate.type_node is not None:
@@ -1969,6 +1981,9 @@ class PipelineRunner:
                     return f"clause_type_node {node!r} is not part of the active clause facet"
             # A linked party must be one the agent actually saw via search_entities —
             # the "a matching name is not enough" guard against merging two entities.
+            # And symmetrically: a NEW party is only accepted when the agent actually
+            # searched for it — without this, create is the frictionless default and
+            # the entity layer fills with same-name twins instead of resolutions.
             for party in candidate.parties:
                 if party.existing_id and party.existing_id not in seen_ids:
                     return (
@@ -1976,14 +1991,25 @@ class PipelineRunner:
                         "not appear in any search_entities result; search first and reuse only "
                         "an id you have seen, or set existing_id to null to create a new party"
                     )
+                if party.existing_id is None and not entity_search_covered(
+                    party.name, searched_queries
+                ):
+                    return (
+                        f"party {party.name!r} would create a NEW entity, but no "
+                        "search_entities call looked for it; search for this party first, "
+                        "then reuse a matching candidate's id — or keep existing_id null "
+                        "if the search confirms the firm does not know it yet"
+                    )
             return None
 
         tools = ontology_navigation_tools(scope, visited)
         if clause_scope is not None:
             tools.append(clause_search_tool(clause_scope, clause_visited))
-        tools.extend(party_resolution_tools(session, self.config, seen_ids))
+        tools.extend(
+            party_resolution_tools(session, self.config, seen_ids, searched_queries)
+        )
         metadata = chat_agent(
-            model,
+            slot,
             self.config,
             system=METADATA_SYSTEM,
             user=json.dumps(
@@ -2044,13 +2070,13 @@ class PipelineRunner:
             doc_date_source = "none"
         document.title = metadata.title or document.title
         document.parties = _resolve_document_parties(
-            session, document, metadata.parties, model=model, evidence=source_object.id
+            session, document, metadata.parties, model=slot.model, evidence=source_object.id
         )
         document.identifiers = sorted(
             {value.strip() for value in metadata.identifiers if value.strip()}
         )
         document.provenance = {
-            "model": model,
+            "model": slot.model,
             "prompt_version": prompt_version,
             "confidence": metadata.confidence,
             "evidence": [source_object.id],
@@ -2085,7 +2111,7 @@ class PipelineRunner:
                     target_entity="document",
                     target_id=document.id,
                     fields=["doc_type", "language", "doc_date", "title", "parties"],
-                    model=model,
+                    model=slot.model,
                     prompt_version=prompt_version,
                     input_artifact_refs=[converted.id],
                     confidence=metadata.confidence,
@@ -2109,10 +2135,10 @@ class PipelineRunner:
         )
         if existing is not None:
             return StageResult()
-        model = self.config.pipeline.stage("extract_decisions").model
+        slot = self.config.models.extract
         trace_id, trace_tags = _stage_trace(source_object.id, "extract_decisions")
         result = chat_json(
-            model,
+            slot,
             self.config,
             system=DECISION_SYSTEM,
             user=json.dumps(
@@ -2149,7 +2175,7 @@ class PipelineRunner:
                 generalizable=result.generalizable,
                 source_evidence=[{"source_object_id": source_object.id, "artifact": converted.id}],
                 provenance={
-                    "model": model,
+                    "model": slot.model,
                     "prompt_version": self.config.pipeline.stage(
                         "extract_decisions"
                     ).producer_version,
@@ -2171,6 +2197,10 @@ class PipelineRunner:
 
     def _index(self, session: Session, state: ProcessingState) -> StageResult:
         source_object, document, version = _knowledge_entities(session, state)
+        # A merged version is fed by several source objects, each with its own
+        # index task; serialize them (like relate does per file ref) so the
+        # read-then-diff below never runs twice concurrently on one version.
+        _advisory_xact_lock(session, f"index-version:{version.id}")
         access_only = (state.last_error or {}).get("reason") == ACCESS_ONLY_REINDEX
         converted = _required_artifact(session, source_object.content_hash, "structured_json")
         text = (converted.payload or {}).get("text", "")
@@ -2230,12 +2260,20 @@ class PipelineRunner:
                     )
                 )
 
-        existing = {
-            chunk.ordinal: chunk
-            for chunk in session.scalars(
-                select(Chunk).where(Chunk.document_version_id == version.id)
-            ).all()
-        }
+        # Keyed by ordinal for the re-index diff; a duplicate ordinal (a version
+        # double-indexed before the unique constraint / lock existed) would be
+        # shadowed by the dict and become undeletable — collect and heal instead.
+        existing: dict[int, Chunk] = {}
+        duplicate_chunks: list[Chunk] = []
+        for chunk in session.scalars(
+            select(Chunk)
+            .where(Chunk.document_version_id == version.id)
+            .order_by(Chunk.ordinal, Chunk.id)
+        ):
+            if chunk.ordinal in existing:
+                duplicate_chunks.append(chunk)
+            else:
+                existing[chunk.ordinal] = chunk
         source_grants = session.scalars(
             select(SourceObjectGrant)
             .join(
@@ -2271,10 +2309,13 @@ class PipelineRunner:
                 chunk.allowed_principals = allowed_principals
                 chunk.denied_principals = denied_principals
                 chunk.access_version = (chunk.access_version or 0) + 1
+            duplicate_ids = [chunk.id for chunk in duplicate_chunks]
+            for duplicate in duplicate_chunks:
+                session.delete(duplicate)
             from knowledge_index.search_backend import OpenSearchIndex
 
             session.flush()
-            OpenSearchIndex(self.config).bulk_sync(deletes=[], upserts=active_chunks)
+            OpenSearchIndex(self.config).bulk_sync(deletes=duplicate_ids, upserts=active_chunks)
             return StageResult()
 
         active_chunks: list[Chunk] = []
@@ -2310,10 +2351,11 @@ class PipelineRunner:
             chunk.access_version = 1
             # embed the context-prefixed string; store raw text above
             chunk.embedding = embed_text(contextualize(value, header), self.config)
-            chunk.embedding_model = self.config.retrieval.embedding_model
+            chunk.embedding_model = self.config.models.embed.model
             active_chunks.append(chunk)
-        removed_chunk_ids = [chunk.id for chunk in existing.values()]
-        for obsolete in existing.values():
+        obsolete_chunks = [*existing.values(), *duplicate_chunks]
+        removed_chunk_ids = [chunk.id for chunk in obsolete_chunks]
+        for obsolete in obsolete_chunks:
             session.delete(obsolete)
         from knowledge_index.search_backend import OpenSearchIndex
 
@@ -2388,7 +2430,7 @@ def connector_from_source(source: Source, session: Session | None = None) -> Syn
             allow_private_hosts=bool(config.get("allow_private_hosts")),
         )
     if source.kind == "plugin_drop":
-        # FDE-authored drop directory (see docs/src/content/docs/development/plugin-connectors.md)
+        # FDE-authored drop directory (see docs/connector-plugins.md)
         return PluginDropSource(config["root"])
     acl_map = config.get("acl_by_path", {})
 
@@ -2413,13 +2455,15 @@ def _resolve_document_parties(
 
     Resolution is the AGENT's: it either LINKED to an existing entity (set existing_id,
     which the stage validator confirmed it saw via search_entities) or decided CREATE.
-    There is no deterministic name matching here — deduplication is the job of the
-    semantic search_entities tool + the agent's judgment, so nothing is tuned to one
-    corpus's naming. The firm's client (role=client) lands in ``clients`` +
-    ``matter_clients``; every other party lands in ``parties`` + ``matter_parties``.
-    Typed identifiers are promoted to ``entity_identifiers``. Link writes are
-    idempotent via the composite PKs. Returns the ``document.parties`` payload with
-    each mention's resolved entity id.
+    One deterministic safety net backs the agent up: a CREATE whose verbatim name this
+    matter already knows (case-insensitively) reuses that entity instead of minting a
+    twin — same-name entities in DIFFERENT matters stay distinct on purpose, since
+    different companies share names and that ambiguity is genuinely the agent's call.
+    The firm's client (role=client) lands in ``clients`` + ``matter_clients``; every
+    other party lands in ``parties`` + ``matter_parties``. Typed identifiers are
+    promoted to ``entity_identifiers``. Link writes are idempotent via the composite
+    PKs. Returns the ``document.parties`` payload with each mention's resolved entity
+    id.
     """
     matter_id = document.matter_id
     provenance = {"method": "inferred", "model": model, "evidence": [evidence]}
@@ -2431,6 +2475,28 @@ def _resolve_document_parties(
         model_cls = Client if is_client else Party
 
         entity = session.get(model_cls, party.existing_id) if party.existing_id else None
+        if entity is None and matter_id:
+            normalized_name = party.name.strip().lower()
+            if is_client:
+                entity = session.scalar(
+                    select(Client)
+                    .join(MatterClient, MatterClient.client_id == Client.id)
+                    .where(
+                        MatterClient.matter_id == matter_id,
+                        func.lower(func.trim(Client.name)) == normalized_name,
+                    )
+                    .limit(1)
+                )
+            else:
+                entity = session.scalar(
+                    select(Party)
+                    .join(MatterParty, MatterParty.party_id == Party.id)
+                    .where(
+                        MatterParty.matter_id == matter_id,
+                        func.lower(func.trim(Party.name)) == normalized_name,
+                    )
+                    .limit(1)
+                )
         if entity is None:
             entity = model_cls(
                 name=party.name,
