@@ -26,6 +26,22 @@ model_list:
       api_key: os.environ/KI_EMBEDDING_API_KEY
       input_cost_per_token: os.environ/KI_EMBEDDING_INPUT_COST_PER_TOKEN
       output_cost_per_token: 0.0
+      # Hard ceiling on the upstream embedding key so the index stage cannot
+      # outrun the provider's account limits. The router gates on these before
+      # dispatch; excess is refused here rather than sent upstream, which
+      # previously answered a fan-out burst with a 429 storm. The index stage is
+      # *also* concurrency-capped (KI_INDEX_MODEL_CONCURRENCY) so steady state
+      # stays under the cap instead of relying on refusals.
+      #
+      # THESE VALUES MUST MATCH THE PROVIDER BEHIND KI_EMBEDDING_UPSTREAM.
+      # Active: OpenAI text-embedding-3-small (3,000 RPM / 1M TPM account limit).
+      # On the Gemini Embedding 2 swap (20,000 RPM / 20M TPM measured on this
+      # account), flip to the commented pair in the same commit as the .env
+      # model change:
+      #   rpm: 18000
+      #   tpm: 18000000
+      rpm: 2800
+      tpm: 950000
 
 general_settings:
   master_key: os.environ/LITELLM_MASTER_KEY

@@ -831,6 +831,10 @@ class Chunk(Base):
     __table_args__ = (
         Index("ix_chunks_version", "document_version_id"),
         Index("ix_chunks_matter", "matter_id"),
+        # One chunk per position per version — two index executions racing on a
+        # merged version (each source file carries its own index task) must not
+        # be able to store the corpus twice (2026-08-01 audit: 96 dup pairs).
+        UniqueConstraint("document_version_id", "ordinal", name="uq_chunks_version_ordinal"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)

@@ -13,7 +13,7 @@ import uuid
 
 import httpx
 import pytest
-from sqlalchemy import create_engine, select, text
+from sqlalchemy import UniqueConstraint, create_engine, select, text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -129,11 +129,14 @@ def _ensure_database(*, recreate: bool) -> None:
 
 
 def _schema_is_stale() -> bool:
-    """Whether any model column or index is missing from the existing test database.
+    """Whether any model column, index, or unique constraint is missing from the
+    existing test database.
 
-    Indexes count: some of them carry behaviour rather than performance (the partial
-    unique index that allows only one unfinished sync run per source, for instance), and
-    a test database silently missing one would pass a test that production would fail.
+    Indexes and unique constraints count: some carry behaviour rather than performance
+    (the partial unique index that allows only one unfinished sync run per source; the
+    one-chunk-per-version-ordinal constraint), and a test database silently missing one
+    would pass a test that production would fail. Postgres backs a unique constraint
+    with an identically-named index, so both compare against pg_indexes.
     """
     engine = create_engine(TEST_DATABASE_URL)
     try:
@@ -159,6 +162,13 @@ def _schema_is_stale() -> bool:
             if {column.name for column in table.columns} - existing:
                 return True
             if {index.name for index in table.indexes} - indexes:
+                return True
+            unique_constraints = {
+                constraint.name
+                for constraint in table.constraints
+                if isinstance(constraint, UniqueConstraint) and isinstance(constraint.name, str)
+            }
+            if unique_constraints - indexes:
                 return True
         return False
     finally:

@@ -122,6 +122,7 @@ def create_mcp_server(
                         principals=principals, filters=filters, limit=min(limit, 100)
                     )
                 ]
+                result = _with_empty_result_help(result, retrieval, principals, filters)
                 audit.update(result_count=len(result), filters=_active_filters(filters))
                 return result
             finally:
@@ -191,6 +192,7 @@ def create_mcp_server(
                         query, principals=principals, filters=filters, limit=min(limit, 100)
                     )
                 ]
+                result = _with_empty_result_help(result, retrieval, principals, filters)
                 audit.update(
                     result_count=len(result),
                     filters=_active_filters(filters),
@@ -973,6 +975,57 @@ def _download_base_url(headers: dict[str, str]) -> str:
     if not host or any(character in host for character in "/\\\r\n"):
         host = "127.0.0.1:8000"
     return f"{scheme}://{host}"
+
+
+def _with_empty_result_help(
+    result: list[dict],
+    retrieval,
+    principals: set[str],
+    filters: SearchFilters,
+) -> list[dict]:
+    """Turn an empty filtered result into an actionable one.
+
+    An empty list does not distinguish a misspelled filter from an empty matter
+    from something the caller may not see, so a client either guesses again or
+    abandons the matter — both measured on real agent traffic, where 41 filter
+    calls returned nothing and the caller almost never recovered. When filters were
+    set and nothing matched, one advisory row is returned carrying the values that
+    WOULD have matched in this caller's own scope.
+
+    Shaped so it cannot be mistaken for a hit: no ``citations``, and the server's
+    own instructions forbid a factual claim from a result without them.
+    """
+    if result or not any(
+        getattr(filters, name, None) for name in ("party", "identifier", "doc_type", "matter_id")
+    ):
+        return result
+    try:
+        suggestions = retrieval.suggest_for_empty(principals=principals, filters=filters)
+    except Exception:  # never turn a clean empty result into an error
+        return result
+    applied = sorted(
+        name
+        for name in ("party", "identifier", "doc_type", "matter_id")
+        if getattr(filters, name, None)
+    )
+    advisory = {
+        "no_results": True,
+        "filters_applied": applied,
+        "message": (
+            "No documents matched those filters in your access scope. These values exist "
+            "here — reissue the call with one of them, or drop the filter."
+            if suggestions
+            else (
+                "No documents matched those filters in your access scope, and nothing "
+                f"resembling the {'/'.join(applied)} you gave is indexed. Drop that filter "
+                "and search by content instead — a company or project name is usually a "
+                "party or a search term, not a legal identifier."
+            )
+        ),
+    }
+    if suggestions:
+        advisory["did_you_mean"] = suggestions
+    return [advisory]
 
 
 def _active_filters(filters: SearchFilters) -> dict:

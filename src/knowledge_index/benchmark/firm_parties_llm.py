@@ -1,6 +1,6 @@
 """LLM resolution of the ``(client, counterparty)`` for each firm-layout matter.
 
-The deterministic guess in ``task_corpus._firm_parties`` reads the leading token of
+The deterministic guess in ``harvey_corpus._firm_parties`` reads the leading token of
 each filename, which is noisy: document-type words ("security", "amortization",
 "lender") masquerade as clients, and it can't tell *which* side the firm represents.
 This resolves the parties with the model instead, in two stages:
@@ -28,11 +28,11 @@ from typing import TYPE_CHECKING
 from pydantic import BaseModel, Field
 
 from knowledge_index.benchmark.gold import _document_text
-from knowledge_index.benchmark.task_corpus import _firm_parties
-from knowledge_index.config import DEFAULT_LLM_ENV, AppConfig
+from knowledge_index.benchmark.harvey_corpus import _firm_parties
+from knowledge_index.config import AppConfig
 
 if TYPE_CHECKING:
-    from knowledge_index.benchmark.task_corpus import PartyResolver, _Scenario
+    from knowledge_index.benchmark.harvey_corpus import PartyResolver, _Scenario
 
 PROMPT_VERSION = "firm-parties-1"
 _MAX_DOCS = 4  # documents shown per scenario (recitals live in the first agreement/draft)
@@ -117,7 +117,7 @@ def resolve_parties_llm(
     scenarios: list[_Scenario],
     config: AppConfig,
     *,
-    model: str = "",
+    model_name: str | None = None,
 ) -> list[tuple[str, str]]:
     """Return an aligned ``[(client, counterparty), ...]`` for ``scenarios`` via the model.
 
@@ -128,7 +128,7 @@ def resolve_parties_llm(
     """
     from knowledge_index.pipeline.providers import chat_json
 
-    model = model or os.environ.get(DEFAULT_LLM_ENV, "")
+    model = model_name or os.environ.get("KI_LLM_MODEL", "")
 
     # stage 1 — per-scenario extraction, deterministic fallback on any failure
     clients_full: list[str] = []
@@ -192,11 +192,11 @@ def _canonicalize(
 
 
 def make_llm_party_resolver(
-    config: AppConfig, *, model: str = ""
+    config: AppConfig, *, model_name: str | None = None
 ) -> PartyResolver:
-    """Bind ``config`` into a :data:`~task_corpus.PartyResolver` for the firm builder."""
+    """Bind ``config`` into a :data:`~harvey_corpus.PartyResolver` for the firm builder."""
 
     def resolver(scenarios: list[_Scenario]) -> list[tuple[str, str]]:
-        return resolve_parties_llm(scenarios, config, model=model)
+        return resolve_parties_llm(scenarios, config, model_name=model_name)
 
     return resolver

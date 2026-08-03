@@ -1,17 +1,17 @@
 """Frozen gold store — gold is created once and committed into the package.
 
-Gold-label creation (deterministic + optional LLM + human review) is a one-time job.
-The result is *frozen* here as a version-controlled artifact under ``data/`` and read
-by ``run-retrieval-eval`` on every run; the bulky document corpus stays regenerable and
-git-ignored. A frozen set is two files:
+Gold-label creation (``generate-gold``: LLM proposals + machine verification) is a
+one-time job. The result is *frozen* here as a version-controlled artifact under
+``data/`` and read by the eval commands on every run; the bulky document corpus stays
+regenerable and git-ignored. A frozen set is two files:
 
 - ``<name>.gold.jsonl``  — the gold queries (the benchmark)
 - ``<name>.meta.json``   — the corpus config it was frozen against (source, areas,
   matters, docs_target, seed, content_hash, counts), so the exact corpus can be
   reproduced and matched before scoring.
 
-``freeze`` copies a reviewed gold out of a generated corpus directory into the store;
-nothing regenerates it thereafter.
+``freeze`` copies a generated gold out of a corpus directory into the store; nothing
+regenerates it thereafter.
 """
 
 from __future__ import annotations
@@ -51,7 +51,7 @@ def resolve(name_or_path: str, *, data_dir: Path | None = None) -> Path:
 
 
 def freeze(corpus_dir: str | Path, name: str, *, data_dir: Path | None = None) -> dict:
-    """Copy the reviewed gold from a generated corpus into the committed store."""
+    """Copy the generated gold from a corpus directory into the committed store."""
     corpus_dir = Path(corpus_dir).resolve()
     directory = data_dir or DATA_DIR
     directory.mkdir(parents=True, exist_ok=True)
@@ -77,7 +77,7 @@ def freeze(corpus_dir: str | Path, name: str, *, data_dir: Path | None = None) -
         "gold_queries": len(lines),
         "by_kind": by_kind,
         "reproduce": (
-            f"ki generate-benchmark <out> --source <task-set checkout> "
+            f"ki generate-benchmark <out> --source <harvey-labs> "
             f"--areas {','.join(scenario.get('areas', []))} "
             f"--seed {scenario.get('seed')}"
         ),

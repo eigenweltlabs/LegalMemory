@@ -1433,21 +1433,28 @@ def create_app(
                 party=payload.party,
                 chunk_kind=payload.chunk_kind,
             )
+            # Compiled once and reused for both the query and the response envelope —
+            # the scope compile is the costliest SQL of the request, and compiling it
+            # again after the search doubled that cost for identical output.
+            scope = AccessService(session).compile_scope(
+                set(identity.principals),
+                project_ids=[payload.project_id] if payload.project_id else [],
+            )
             if payload.query.strip():
                 hits = service.search_semantic(
                     payload.query,
                     principals=set(identity.principals),
                     filters=filters,
                     limit=payload.limit,
+                    scope=scope,
                 )
             else:
                 hits = service.search_filter(
-                    principals=set(identity.principals), filters=filters, limit=payload.limit
+                    principals=set(identity.principals),
+                    filters=filters,
+                    limit=payload.limit,
+                    scope=scope,
                 )
-            scope = AccessService(session).compile_scope(
-                set(identity.principals),
-                project_ids=[payload.project_id] if payload.project_id else [],
-            )
             return {
                 "scope": {
                     "fingerprint": scope.fingerprint,

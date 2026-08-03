@@ -182,18 +182,45 @@ class RetrievalConfig(BaseModel):
     # The gateway model that scores the top collapsed hits when rerank_enabled is on.
     rerank_model: str = Field(default_factory=_default_llm)
     graph_rag_enabled: bool = False
-    # multi-leg fusion (RRF): every leg is ACL-scoped before fusion
-    fusion_rrf_k: int = Field(default=60, ge=1, le=1000)
+    # Multi-leg fusion (RRF): every leg is ACL-scoped before fusion.
+    # k is not a free knob — it is the gain control on how far a document can be
+    # behind on relevance and still win on consensus. At k=60 a document appearing
+    # in two legs beats a single-leg document 60 positions ahead of it, which lets
+    # topically-similar-but-wrong documents outrank an exact lexical match; k=20
+    # cuts that to 20 and measured +0.032 nDCG@10 on the 2026-08-03 benchmark.
+    # Lower it further only together with the pool depth below.
+    fusion_rrf_k: int = Field(default=20, ge=1, le=1000)
     weight_lexical: float = Field(default=1.0, ge=0)
     weight_semantic: float = Field(default=1.0, ge=0)
     weight_identifier: float = Field(default=1.5, ge=0)
     weight_decisions: float = Field(default=0.8, ge=0)
-    # legal authority decays by supersession, not by age
+    # Legal authority decays by supersession, not by age — but supersession is a
+    # property of a document's own version chain, so it is applied where collapse
+    # chooses which version to surface, NOT as a cross-document score multiplier.
+    # As a multiplier it cost 0.057 nDCG@10 on the 2026-08-03 benchmark: at
+    # fusion_rrf_k=60 the old 1.2/0.7 range overrode 26 positions of the fused pool,
+    # burying relevant drafts under irrelevant executed documents from other matters.
+    # Kept as a deliberately gentle cross-document nudge (≤3 positions at k=20); set
+    # all values to 1.0 to disable, or use SearchFilters.only_final for a hard rule.
     version_status_boost: dict[str, float] = Field(
-        default_factory=lambda: {"executed": 1.2, "final": 1.0, "unknown": 0.8, "draft": 0.7}
+        default_factory=lambda: {"executed": 1.05, "final": 1.0, "unknown": 0.98, "draft": 0.95}
     )
     collapse_per_document: bool = True
     max_chunks_per_document: int = Field(default=3, ge=1, le=20)
+    # How many candidates each leg fetches, as a multiple of the requested result
+    # limit. Fusion, the status boost, collapse and rerank all reorder — with a pool
+    # the size of the answer they can only reshuffle what one leg already had in its
+    # own top-N, and a document indexed as body+profile+clause spends three slots on
+    # one document. 10x costs one OpenSearch page and buys the rankers room.
+    candidate_pool_factor: int = Field(default=10, ge=1, le=50)
+    # Boost applied to a chunk whose extracted parties match a name the query uses.
+    # Extracted party metadata is otherwise reachable only through an exact filter
+    # that callers almost never set, so it never reaches ranking. 0 disables.
+    metadata_boost: float = Field(default=2.0, ge=0, le=10)
+    # Restrict the fused search to these chunk kinds ("chunk" | "profile" | "clause");
+    # None = all kinds. Query-time (the benchmark ablates profile/clause rows with it);
+    # an explicit per-request SearchFilters.chunk_kind wins over this default.
+    search_chunk_kinds: list[str] | None = None
     # signal-dense ingestion
     chunk_contextualize: bool = True
     profile_embeddings: bool = True

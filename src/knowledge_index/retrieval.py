@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import mimetypes
+from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from pydantic import BaseModel
 from pydantic import Field as PydanticField
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, attributes
 
 from knowledge_index.config import AppConfig
 from knowledge_index.db.models import (
@@ -29,9 +30,15 @@ from knowledge_index.db.models import (
     SourceObject,
     SourceObjectGrant,
 )
-from knowledge_index.permissions import AccessService
+from knowledge_index.permissions import AccessService, CompiledAccessScope
 from knowledge_index.pipeline.providers import chat_json, embed_text, usage_stage
 from knowledge_index.retrieval_types import SearchFilters
+
+# Smallest slice of ranked documents authorized per bulk round-trip. Each batch
+# costs a fixed handful of set-based statements no matter how many rows it covers,
+# so batches are sized generously: index rows that turn out stale or unauthorized
+# must not force a second round for a page that one round could have filled.
+_VERIFY_BATCH_MIN = 24
 
 
 @dataclass
@@ -104,6 +111,11 @@ class RerankResult(BaseModel):
     scores: list[RerankScore]
 
 
+#: Authority ordering used when collapse picks WHICH version of a document to
+#: surface. Higher wins. This is the right home for supersession — inside one
+#: document's chain — as opposed to scaling scores across unrelated documents.
+_VERSION_STATUS_ORDER: dict[str, int] = {"executed": 3, "final": 2, "unknown": 1, "draft": 0}
+
 @dataclass
 class _Candidate:
     """One fused chunk-level candidate before SQL re-verify and collapse."""
@@ -125,10 +137,40 @@ class RetrievalService:
         principals: set[str],
         filters: SearchFilters | None = None,
         limit: int = 20,
+        scope: CompiledAccessScope | None = None,
     ) -> list[SearchHit]:
         return self._search(
-            query=None, principals=principals, filters=filters or SearchFilters(), limit=limit
+            query=None,
+            principals=principals,
+            filters=filters or SearchFilters(),
+            limit=limit,
+            scope=scope,
         )
+
+    def suggest_for_empty(
+        self,
+        *,
+        principals: set[str],
+        filters: SearchFilters | None = None,
+        scope: CompiledAccessScope | None = None,
+    ) -> dict[str, list[str]]:
+        """What the caller could have filtered on, when its filters matched nothing.
+
+        An empty result is the least useful thing a search can say: it does not
+        distinguish "wrong spelling" from "not in this matter" from "you cannot see
+        it". Returns near-miss values for each filter that was set, inside the
+        caller's own access scope, so the next call can be corrected rather than
+        guessed.
+        """
+        from knowledge_index.search_backend import OpenSearchIndex
+
+        filters = self._resolve_practice_area(filters or SearchFilters())
+        if scope is None:
+            scope = AccessService(self.session).compile_scope(
+                principals,
+                project_ids=[filters.project_id] if filters.project_id else [],
+            )
+        return OpenSearchIndex(self.config).suggest_filter_values(scope=scope, filters=filters)
 
     def search_semantic(
         self,
@@ -137,11 +179,16 @@ class RetrievalService:
         principals: set[str],
         filters: SearchFilters | None = None,
         limit: int = 20,
+        scope: CompiledAccessScope | None = None,
     ) -> list[SearchHit]:
         if not query.strip():
             raise ValueError("semantic query must not be empty")
         return self._search(
-            query=query, principals=principals, filters=filters or SearchFilters(), limit=limit
+            query=query,
+            principals=principals,
+            filters=filters or SearchFilters(),
+            limit=limit,
+            scope=scope,
         )
 
     def get_document(
@@ -758,12 +805,13 @@ class RetrievalService:
         principals: set[str],
         filters: SearchFilters,
         limit: int,
+        scope: CompiledAccessScope | None = None,
     ) -> list[SearchHit]:
         # Query embedding and the optional rerank are both spend on the read path;
         # they belong to "search", not to whichever ingestion stage ran last.
         with usage_stage("search"):
             return self._search_opensearch(
-                query=query, principals=principals, filters=filters, limit=limit
+                query=query, principals=principals, filters=filters, limit=limit, scope=scope
             )
 
     def _select_document_version(
@@ -848,12 +896,18 @@ class RetrievalService:
         principals: set[str],
         filters: SearchFilters,
         limit: int,
+        scope: CompiledAccessScope | None = None,
     ) -> list[SearchHit]:
         """Fuse ACL-scoped ranked legs, collapse version sprawl, re-verify in SQL.
 
         Fusion never sees an unauthorized row (every leg runs inside the compiled
         scope), the SQL re-verify is the authoritative backstop, and legal authority
-        decays by version status (supersession), not by age."""
+        decays by version status (supersession), not by age.
+
+        ``scope`` lets a caller that already compiled the access scope (the API
+        layer reports it in its response envelope) hand it in instead of paying the
+        compile twice per request. It must have been compiled for the same
+        principals and the same project filter."""
 
         from knowledge_index.search_backend import OpenSearchIndex
 
@@ -862,10 +916,15 @@ class RetrievalService:
         filters = self._resolve_practice_area(filters)
 
         retrieval = self.config.retrieval
-        scope = AccessService(self.session).compile_scope(
-            principals,
-            project_ids=[filters.project_id] if filters.project_id else [],
-        )
+        # Config-level chunk-kind scope (benchmark ablations ride on this); an explicit
+        # per-request kind filter wins.
+        if retrieval.search_chunk_kinds and not filters.chunk_kind and not filters.chunk_kinds:
+            filters = replace(filters, chunk_kinds=list(retrieval.search_chunk_kinds))
+        if scope is None:
+            scope = AccessService(self.session).compile_scope(
+                principals,
+                project_ids=[filters.project_id] if filters.project_id else [],
+            )
         index = OpenSearchIndex(self.config)
 
         # Metadata-only search: no query, so no legs to fuse — deterministic order.
@@ -883,12 +942,21 @@ class RetrievalService:
         # regex parsing of the query; a pasted case number simply matches its document.
         # All three legs run in a single `_msearch` round-trip (query embedding is the
         # only synchronous model call on the hot path).
+        # Fetch a deeper candidate pool than the caller asked for: fusion, the
+        # version-status boost, collapse and rerank all reorder, and a pool the size
+        # of the answer can only ever surface what a single leg already ranked in its
+        # own top-`limit`. The ranking stages need room to work.
+        pool = max(limit * retrieval.candidate_pool_factor, limit)
+        # A zero-weight leg is a disabled leg: it must not be embedded, queried, or
+        # allowed to contribute candidates. It previously still filled result slots
+        # at score 0.0, so "lexical off" quietly returned lexical hits ranked last.
+        want_semantic = retrieval.weight_semantic > 0
         leg_hits = index.multi_search(
             query_text=query,
-            query_vector=embed_text(query, self.config),
+            query_vector=embed_text(query, self.config) if want_semantic else None,
             scope=scope,
             filters=filters,
-            limit=limit,
+            limit=pool,
         )
         legs: list[tuple[float, list[dict]]] = [
             (retrieval.weight_lexical, leg_hits["lexical"]),
@@ -899,6 +967,8 @@ class RetrievalService:
         # RRF fuse: score(chunk) += weight_leg / (k + rank), aggregated by chunk id.
         candidates: dict[str, _Candidate] = {}
         for leg_index, (weight, rows) in enumerate(legs):
+            if weight <= 0:
+                continue
             is_identifier_leg = leg_index == len(legs) - 1
             for rank, row in enumerate(rows):
                 source = row.get("_source") or {}
@@ -932,6 +1002,9 @@ class RetrievalService:
             query_terms=query_terms,
             collapse=retrieval.collapse_per_document,
             max_per_document=retrieval.max_chunks_per_document,
+            # _rerank reorders the fused top-20, so with rerank on the top 20 must
+            # be exact, not just the top `limit`.
+            needed=max(limit, 20) if retrieval.rerank_enabled else limit,
         )
         hits.sort(key=lambda item: item.score, reverse=True)
 
@@ -942,21 +1015,49 @@ class RetrievalService:
     def _materialize_metadata(
         self, rows: list[dict], *, principals: set[str], limit: int
     ) -> list[SearchHit]:
+        """First authorized hit per version, in index order, verified in batches.
+
+        Rows are authorized lazily front-to-back: the common case fills ``limit``
+        from the first batch, and a page whose head is unauthorized keeps reading
+        until the page is full or the rows run out — same results as verifying
+        everything, without paying for rows that were never going to be shown."""
         best_by_version: dict[str, SearchHit] = {}
-        for row in rows:
-            source = row.get("_source") or {}
-            hit = self._hit_from_source(
-                source,
-                principals=principals,
-                query_terms=set(),
-                score=0.0,
-                chunk_id=row.get("_id"),
+        batch_size = max(limit, _VERIFY_BATCH_MIN)
+        position = 0
+        while position < len(rows) and len(best_by_version) < limit:
+            batch = rows[position : position + batch_size]
+            position += len(batch)
+            sources = [row.get("_source") or {} for row in batch]
+            # All three maps stay referenced for the whole batch (the projects
+            # one only as a keep-alive for citation building) — see
+            # _warm_identity_map for why dropping them would resurrect the N+1.
+            documents, versions, _projects = self._warm_identity_map(sources)
+            authorized = self._bulk_authorized_sources(
+                (
+                    source.get("document_version_id")
+                    for source in sources
+                    if source.get("document_version_id") in versions
+                ),
+                principals,
             )
-            if hit is None:
-                continue
-            previous = best_by_version.get(hit.version_id)
-            if previous is None:
+            for row, source in zip(batch, sources, strict=True):
+                if source.get("document_id") not in documents:
+                    continue  # stale index row: the document is gone from SQL
+                visible = authorized.get(source.get("document_version_id") or "", [])
+                if not visible:
+                    continue
+                hit = self._hit_from_source(
+                    source,
+                    query_terms=set(),
+                    score=0.0,
+                    authorized_sources=visible,
+                    chunk_id=row.get("_id"),
+                )
+                if hit is None or hit.version_id in best_by_version:
+                    continue
                 best_by_version[hit.version_id] = hit
+                if len(best_by_version) >= limit:
+                    break
         return list(best_by_version.values())[:limit]
 
     def _collapse_and_verify(
@@ -967,47 +1068,115 @@ class RetrievalService:
         query_terms: set[str],
         collapse: bool,
         max_per_document: int,
+        needed: int,
     ) -> list[SearchHit]:
+        """Rank first, authorize lazily, and always in bulk.
+
+        Candidates are grouped per document in fused-score order and authorized
+        batch-wise through set-based queries (:meth:`_bulk_authorized_sources`)
+        instead of per-candidate round-trips — the difference between ~460 and a
+        handful of SQL statements per search. Processing stops once the top
+        ``needed`` hits are exact: a group's provisional score (its best chunk)
+        bounds its final score from above, so when ``needed`` verified hits all
+        score at least the next group's provisional score, no unprocessed group
+        can displace them. Laziness changes how much work is done, never what
+        survives — unauthorized rows are still dropped before anything is
+        returned, and the SQL check remains the authoritative backstop."""
         ordered = sorted(candidates, key=lambda item: item.fused_score, reverse=True)
-        self._warm_identity_map(ordered)
-        by_document: dict[str, list[SearchHit]] = {}
+        groups: dict[str, list[_Candidate]] = {}
         for candidate in ordered:
-            hit = self._hit_from_source(
-                candidate.source,
-                principals=principals,
-                query_terms=query_terms,
-                score=candidate.fused_score,
-                chunk_id=candidate.chunk_id,
-                matched_identifiers=candidate.matched_identifiers,
-            )
-            if hit is None:
+            document_id = candidate.source.get("document_id")
+            if not document_id or not candidate.source.get("document_version_id"):
                 continue
-            by_document.setdefault(hit.document_id, []).append(hit)
+            groups.setdefault(document_id, []).append(candidate)
+        # Each key is inserted at its best-scoring candidate, so dict order is
+        # already descending provisional score; every group inherits the global
+        # candidate order, so group[0] is that document's best chunk.
+        ordered_groups = list(groups.items())
 
         results: list[SearchHit] = []
-        for document_id, group in by_document.items():
-            if collapse:
-                latest_final = self._latest_final_version_id(document_id)
-                group.sort(
-                    key=lambda item: (item.score, item.version_id == latest_final),
-                    reverse=True,
-                )
-                results.append(group[0])
-            else:
-                group.sort(key=lambda item: item.score, reverse=True)
-                results.extend(group[:max_per_document])
+        batch_size = max(needed, _VERIFY_BATCH_MIN)
+        position = 0
+        while position < len(ordered_groups):
+            if len(results) >= needed:
+                floor = sorted((hit.score for hit in results), reverse=True)[needed - 1]
+                if ordered_groups[position][1][0].fused_score <= floor:
+                    break
+            batch = ordered_groups[position : position + batch_size]
+            position += len(batch)
+            batch_candidates = [candidate for _, group in batch for candidate in group]
+            # All three maps stay referenced for the whole batch (the projects
+            # one only as a keep-alive for citation building) — see
+            # _warm_identity_map for why dropping them would resurrect the N+1.
+            documents, versions, _projects = self._warm_identity_map(
+                [candidate.source for candidate in batch_candidates]
+            )
+            authorized = self._bulk_authorized_sources(
+                (
+                    candidate.source.get("document_version_id")
+                    for candidate in batch_candidates
+                    if candidate.source.get("document_version_id") in versions
+                ),
+                principals,
+            )
+            for document_id, group in batch:
+                if document_id not in documents:
+                    continue  # stale index row: the document is gone from SQL
+                hits: list[SearchHit] = []
+                for candidate in group:
+                    visible = authorized.get(
+                        candidate.source.get("document_version_id") or "", []
+                    )
+                    if not visible:
+                        continue
+                    hit = self._hit_from_source(
+                        candidate.source,
+                        query_terms=query_terms,
+                        score=candidate.fused_score,
+                        authorized_sources=visible,
+                        chunk_id=candidate.chunk_id,
+                        matched_identifiers=candidate.matched_identifiers,
+                    )
+                    if hit is not None:
+                        hits.append(hit)
+                if not hits:
+                    continue
+                if collapse:
+                    # Supersession is a WITHIN-CHAIN concept — "which version of this
+                    # document do I show" — so it is decided here, among versions of
+                    # one document, and not by scaling the cross-document score
+                    # (which demoted a relevant draft below an irrelevant executed
+                    # document elsewhere in the corpus; see version_status_boost).
+                    latest_final = self._latest_final_version_id(document_id)
+                    hits.sort(
+                        key=lambda item: (
+                            item.score,
+                            item.version_id == latest_final,
+                            _VERSION_STATUS_ORDER.get(item.version_status, 0),
+                        ),
+                        reverse=True,
+                    )
+                    results.append(hits[0])
+                else:
+                    hits.sort(key=lambda item: item.score, reverse=True)
+                    results.extend(hits[:max_per_document])
         return results
 
     def _hit_from_source(
         self,
         source: dict,
         *,
-        principals: set[str],
         query_terms: set[str],
         score: float,
+        authorized_sources: list[SourceObject],
         chunk_id: str | None = None,
         matched_identifiers: list[str] | None = None,
     ) -> SearchHit | None:
+        """Materialize one index row into a SearchHit.
+
+        Authorization happened before this point: ``authorized_sources`` is the
+        caller-supplied output of :meth:`_bulk_authorized_sources` for this row's
+        version, and an empty list keeps the row fail-closed."""
         version_id = source.get("document_version_id")
         document_id = source.get("document_id")
         if not version_id or not document_id:
@@ -1016,7 +1185,6 @@ class RetrievalService:
         version = self.session.get(DocumentVersion, version_id)
         if document is None or version is None or version.document_id != document.id:
             return None
-        authorized_sources = self._authorized_sources(version.id, principals)
         if not authorized_sources:
             return None
         meta = source.get("meta") if isinstance(source.get("meta"), dict) else {}
@@ -1064,26 +1232,51 @@ class RetrievalService:
             citations=[citation],
         )
 
-    def _warm_identity_map(self, candidates) -> None:
-        """Bulk-load candidate documents and versions in two queries so the
-        per-candidate ``session.get`` calls below hit the identity map instead of
-        issuing N+1 round-trips. Pure performance — no effect on authorization."""
-        doc_ids = {
-            candidate.source.get("document_id")
-            for candidate in candidates
-            if candidate.source.get("document_id")
-        }
-        version_ids = {
-            candidate.source.get("document_version_id")
-            for candidate in candidates
-            if candidate.source.get("document_version_id")
-        }
+    def _warm_identity_map(
+        self, sources: Iterable[dict]
+    ) -> tuple[dict[str, Document], dict[str, DocumentVersion], dict[str, Project]]:
+        """Bulk-load the documents, versions and projects these index rows point at.
+
+        The caller MUST hold the returned maps for as long as it materializes
+        hits: the session identity map only weak-references clean instances, so
+        without a strong reference the rows bulk-loaded here are collected right
+        away and every later ``session.get`` silently turns back into one SQL
+        round-trip per row — the exact N+1 this warm-up exists to prevent (and
+        exactly how the previous fire-and-forget warm-up quietly failed to).
+
+        An id absent from its map is a stale index row whose SQL row is gone
+        (deleted since the last index sweep); callers skip those up front —
+        materializing them would return ``None`` anyway, after wasted queries.
+        """
+        sources = list(sources)
+        doc_ids = {source.get("document_id") for source in sources} - {None, ""}
+        version_ids = {source.get("document_version_id") for source in sources} - {None, ""}
+        project_ids = {source.get("project_id") for source in sources} - {None, ""}
+        documents: dict[str, Document] = {}
+        versions: dict[str, DocumentVersion] = {}
+        projects: dict[str, Project] = {}
         if doc_ids:
-            self.session.scalars(select(Document).where(Document.id.in_(doc_ids))).all()
+            documents = {
+                document.id: document
+                for document in self.session.scalars(
+                    select(Document).where(Document.id.in_(doc_ids))
+                )
+            }
         if version_ids:
-            self.session.scalars(
-                select(DocumentVersion).where(DocumentVersion.id.in_(version_ids))
-            ).all()
+            versions = {
+                version.id: version
+                for version in self.session.scalars(
+                    select(DocumentVersion).where(DocumentVersion.id.in_(version_ids))
+                )
+            }
+        if project_ids:
+            projects = {
+                project.id: project
+                for project in self.session.scalars(
+                    select(Project).where(Project.id.in_(project_ids))
+                )
+            }
+        return documents, versions, projects
 
     def _latest_final_version_id(self, document_id: str) -> str | None:
         document = self.session.get(Document, document_id)
@@ -1110,6 +1303,11 @@ class RetrievalService:
             ),
             user=f"Anfrage: {query}\n\nDokumente:\n{listing}",
             schema=RerankResult,
+            # A reasoning model spends part of its budget on hidden reasoning tokens
+            # before emitting anything. On the default budget it produced EMPTY
+            # content for every rerank call — 20 scored ids need real room, and a
+            # rerank that always fails is a rerank that is never used.
+            max_output_tokens=8000,
         )
         scored: list[SearchHit] = []
         for entry in result.scores:
@@ -1176,57 +1374,102 @@ class RetrievalService:
         }
 
     def _authorized_sources(self, version_id: str, principals: set[str]) -> list[SourceObject]:
-        version = self.session.get(DocumentVersion, version_id)
-        if version is None:
-            return []
-        document = self.session.get(Document, version.document_id)
-        if document is None:
-            return []
-        if not self.session.scalar(
-            select(DocumentVersion.id)
-            .join(Document, Document.id == DocumentVersion.document_id)
+        return self._bulk_authorized_sources([version_id], principals).get(version_id, [])
+
+    def _bulk_authorized_sources(
+        self, version_ids: Iterable[str], principals: set[str]
+    ) -> dict[str, list[SourceObject]]:
+        """Set-based ``_authorized_sources`` for many versions at once.
+
+        Same fail-closed semantics as checking one version at a time — an entry
+        exists only for versions the caller may see, and only with the source
+        observations they may see — but at a fixed SQL cost regardless of how
+        many versions are checked: one ACL-predicate pass, one source fetch, one
+        connector bulk-load and (for non-admins) one grant fetch. This is what
+        keeps retrieval verification off the per-candidate N+1 path."""
+        requested = sorted({version_id for version_id in version_ids if version_id})
+        if not requested:
+            return {}
+        access = AccessService(self.session)
+        authorized_ids = set(
+            self.session.scalars(
+                select(DocumentVersion.id)
+                .join(Document, Document.id == DocumentVersion.document_id)
+                .where(
+                    DocumentVersion.id.in_(requested),
+                    access.version_predicate(principals),
+                )
+            ).all()
+        )
+        if not authorized_ids:
+            return {}
+        pairs = self.session.execute(
+            select(DocumentVersionSource.version_id, SourceObject)
+            .join(SourceObject, SourceObject.id == DocumentVersionSource.source_object_id)
             .where(
-                DocumentVersion.id == version_id,
-                AccessService(self.session).version_predicate(principals),
-            )
-        ):
-            return []
-        sources = self.session.scalars(
-            select(SourceObject)
-            .join(
-                DocumentVersionSource,
-                DocumentVersionSource.source_object_id == SourceObject.id,
-            )
-            .where(
-                DocumentVersionSource.version_id == version_id,
+                DocumentVersionSource.version_id.in_(sorted(authorized_ids)),
                 SourceObject.deleted_at.is_(None),
             )
         ).all()
+        sources_by_version: dict[str, list[SourceObject]] = {}
+        sources_by_id: dict[str, SourceObject] = {}
+        for version_id, source in pairs:
+            sources_by_version.setdefault(version_id, []).append(source)
+            sources_by_id[source.id] = source
+        if not sources_by_id:
+            return {}
+        # Bulk-load the connectors, then bind each observation's `source`
+        # relationship WHILE the loaded rows are strongly referenced: the identity
+        # map alone is weak, so an unbound relationship would lazy-load one
+        # connector per source object later (in the grants loop below and in
+        # citation building) — the N+1 in a different coat.
+        connectors = {
+            connector.id: connector
+            for connector in self.session.scalars(
+                select(Source).where(
+                    Source.id.in_({source.source_id for source in sources_by_id.values()})
+                )
+            )
+        }
+        for source_object in sources_by_id.values():
+            connector = connectors.get(source_object.source_id)
+            if connector is not None:
+                attributes.set_committed_value(source_object, "source", connector)
+
         if AccessService.is_admin(principals):
-            return list(sources)
+            return sources_by_version
+        grants_by_source: dict[str, list[SourceObjectGrant]] = {}
+        for grant in self.session.scalars(
+            select(SourceObjectGrant).where(
+                SourceObjectGrant.source_object_id.in_(sorted(sources_by_id))
+            )
+        ):
+            grants_by_source.setdefault(grant.source_object_id, []).append(grant)
         # Must be the EXPANDED set. Mirrored ACLs name source groups ("group:entra:<guid>"),
         # while a caller authenticates as themselves; without the membership expansion this
         # comparison never matches and every mirrored document silently vanishes — the
         # compiler is fail-closed, so the caller sees an empty result, not an error.
         # `version_predicate` above already expands, which is what made this look correct.
-        normalized = AccessService(self.session).resolve_principals(principals)
-        visible: list[SourceObject] = []
-        for source in sources:
-            grants = self.session.scalars(
-                select(SourceObjectGrant).where(SourceObjectGrant.source_object_id == source.id)
-            ).all()
-            if not grants:
-                # Only the explicit local-filesystem adapter may delegate an unreadable
-                # ACL to project grants. External connector ACL gaps fail closed.
-                if source.source.kind == "local_fs":
+        normalized = access.resolve_principals(principals)
+        visible_by_version: dict[str, list[SourceObject]] = {}
+        for version_id, sources in sources_by_version.items():
+            visible: list[SourceObject] = []
+            for source in sources:
+                grants = grants_by_source.get(source.id, [])
+                if not grants:
+                    # Only the explicit local-filesystem adapter may delegate an unreadable
+                    # ACL to project grants. External connector ACL gaps fail closed.
+                    if source.source.kind == "local_fs":
+                        visible.append(source)
+                    continue
+                matching = [item for item in grants if item.principal in normalized]
+                if any(item.effect == "deny" for item in matching):
+                    continue
+                if any(item.effect == "allow" for item in matching):
                     visible.append(source)
-                continue
-            matching = [item for item in grants if item.principal in normalized]
-            if any(item.effect == "deny" for item in matching):
-                continue
-            if any(item.effect == "allow" for item in matching):
-                visible.append(source)
-        return visible
+            if visible:
+                visible_by_version[version_id] = visible
+        return visible_by_version
 
     def _entity_visible(self, entity_type: str, entity_id: str, principals: set[str]) -> bool:
         """Resolve every traversable entity back to at least one authorized source object."""
@@ -1236,9 +1479,7 @@ class RetrievalService:
             version_ids = self.session.scalars(
                 select(DocumentVersion.id).where(DocumentVersion.document_id == entity_id)
             ).all()
-            return any(
-                self._authorized_sources(version_id, principals) for version_id in version_ids
-            )
+            return bool(self._bulk_authorized_sources(version_ids, principals))
         if entity_type == "thread":
             document_ids = self.session.scalars(
                 select(Relation.from_id).where(

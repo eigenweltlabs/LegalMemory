@@ -9,7 +9,7 @@ seeded so it is messy the same way on every rebuild:
   ``Working Papers`` / ``Executed``) instead of the canonical one.
 - **system junk** — ``.DS_Store`` / ``Thumbs.db`` cruft and empty ``_To File`` folders.
 
-Document *versions* are deliberately NOT fabricated: the source bundles already ship genuine
+Document *versions* are deliberately NOT fabricated: Harvey bundles already ship genuine
 version material (initial draft, counterparty markup, round-N redlines — different
 documents, differently dated, in 31 of 48 matters), so synthetic ``-v2`` copies would be
 both fake and redundant. The mess here is only structural + junk.
