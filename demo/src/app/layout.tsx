@@ -35,6 +35,13 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
   // the tree at all.
   return authEnabled ? (
     <ClerkProvider
+      // Sign-in happens here, not on Clerk's hosted portal on another origin.
+      // Without these, redirectToSignIn() sends people to accounts.<domain>,
+      // where none of the branding below applies.
+      signInUrl="/sign-in"
+      signUpUrl="/sign-up"
+      signInFallbackRedirectUrl="/"
+      signUpFallbackRedirectUrl="/"
       appearance={{
         // The sign-in box is the first thing anyone sees on a shared URL, so it
         // is the product's orange rather than Clerk's default indigo.

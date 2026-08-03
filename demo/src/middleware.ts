@@ -54,6 +54,10 @@ const selfAuthenticating = (pathname: string) =>
   // Liveness. Docker and the edge probe this before anyone has signed in, and a
   // 307 to a sign-in page reads as "unhealthy" to both.
   pathname === "/healthz" ||
+  // The door itself. Gating it would redirect the sign-in page to the sign-in
+  // page, which browsers report as a redirect loop rather than as a login.
+  pathname.startsWith("/sign-in") ||
+  pathname.startsWith("/sign-up") ||
   pathname === "/mcp" ||
   pathname.startsWith("/mcp/") ||
   pathname.startsWith("/.well-known/") ||
