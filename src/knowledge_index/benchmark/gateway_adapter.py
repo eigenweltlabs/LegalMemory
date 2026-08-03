@@ -19,6 +19,7 @@ class GatewayAdapter(ModelAdapter):
         self.config = config
         self.model = model
         self.max_tokens = max_tokens
+        self.usage: dict = {}  # token usage accumulated across the whole agent loop
 
     @staticmethod
     def _to_openai_tools(tools: list[dict]) -> list[dict]:
@@ -39,6 +40,7 @@ class GatewayAdapter(ModelAdapter):
             messages,
             tools=self._to_openai_tools(tools) or None,
             max_tokens=self.max_tokens,
+            usage_sink=self.usage,
         )
         tool_calls = [
             ToolCall(

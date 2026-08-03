@@ -40,6 +40,7 @@ class OpenSearchIndex:
             "clause_type": (chunk.meta or {}).get("clause_type"),
             "identifiers": getattr(chunk, "identifiers", None) or [],
             "identifiers_text": " ".join(getattr(chunk, "identifiers", None) or []),
+            "parties": getattr(chunk, "parties", None) or [],
             "allowed_principals": chunk.allowed_principals or [],
             "denied_principals": chunk.denied_principals or [],
             "access_version": chunk.access_version,
@@ -148,7 +149,13 @@ class OpenSearchIndex:
                 "size": size,
                 **_SOURCE_EXCLUDES,
                 "query": strict_filter,
-                "sort": [{"doc_date": {"order": "desc"}}],
+                # F6 date-trust guard: after O10, undated docs carry a null
+                # doc_date (honest) rather than a fake mtime. Sort them last
+                # instead of letting the null jump to the top. A date_from/date_to
+                # range filter already excludes null-dated docs (a range query
+                # never matches a missing field), so bounded date searches drop
+                # them entirely — undated == not date-searchable, by design.
+                "sort": [{"doc_date": {"order": "desc", "missing": "_last"}}],
             }
             return self._run_search(body)
         return self._run_search(self._knn_body(query_vector, strict_filter, size))
@@ -306,6 +313,7 @@ class OpenSearchIndex:
             "doc_date": {"type": "date"},
             "identifiers": {"type": "keyword"},
             "identifiers_text": {"type": "text"},
+            "parties": {"type": "keyword"},
             "allowed_principals": {"type": "keyword"},
             "denied_principals": {"type": "keyword"},
             "access_version": {"type": "integer"},
@@ -396,11 +404,24 @@ def _combined_filter(scope: CompiledAccessScope, filters: SearchFilters) -> dict
     # interior node ("Agreements") matches every document typed at or below it.
     if filters.doc_type:
         clauses.append({"term": {"doc_type_ancestors": filters.doc_type}})
+    # matter_ids carries a resolved practice_area (the matters it covers); RetrievalService
+    # sets it. An empty list is meaningful — the practice_area matched no matter — so it
+    # short-circuits to no hits instead of being ignored.
+    if filters.matter_ids is not None:
+        if not filters.matter_ids:
+            return {"match_none": {}}
+        clauses.append({"terms": {"matter_id": filters.matter_ids}})
     for field, value in (
         ("project_id", filters.project_id),
         ("matter_id", filters.matter_id),
         ("version_status", filters.version_status),
         ("language", filters.language),
+        # F3/F4 exact-term filters. `identifier` matches the typed identifier
+        # keyword (distinct from the fuzzy identifiers_text ranking leg); `party`
+        # matches a party_id or canonical name; `clause_type` a clause-facet node
+        # id on clause chunks; `chunk_kind` scopes to body/profile/clause chunks.
+        ("identifiers", filters.identifier),
+        ("parties", filters.party),
         ("clause_type", filters.clause_type),
         ("chunk_kind", filters.chunk_kind),
     ):
@@ -409,6 +430,11 @@ def _combined_filter(scope: CompiledAccessScope, filters: SearchFilters) -> dict
     date_range = _date_range(filters.date_from, filters.date_to)
     if date_range:
         clauses.append({"range": {"doc_date": date_range}})
+    if filters.only_final:
+        # VersionStatus.FINAL / EXECUTED — authoritative versions only. All three
+        # legs inherit this because they share this strict filter. It ANDs with any
+        # version_status term above, so draft + only_final yields no hits (not an error).
+        clauses.append({"terms": {"version_status": ["final", "executed"]}})
     return {"bool": {"filter": clauses}}
 
 

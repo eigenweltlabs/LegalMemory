@@ -189,6 +189,149 @@ def test_build_corpus_supports_flat_task_layout(tmp_path: Path) -> None:
     assert summary["principals"] == ["group:banking-finance-team"]
 
 
+def test_firm_layout_uses_the_injected_party_resolver(tmp_path: Path) -> None:
+    """The firm builder names each matter via the injected resolver and groups matters
+    under one client folder + one per-client ACL — the seam the LLM resolver plugs into."""
+    source = _mini_task_set(tmp_path / "task_set")
+    seen: list[int] = []
+
+    def resolver(scenarios):  # both matters belong to one client, distinct counterparties
+        seen.append(len(scenarios))
+        return [("Northwind", "Acme"), ("Northwind", "Globex")]
+
+    summary = build_task_corpus(
+        tmp_path / "out",
+        source,
+        areas=["contracts/banking"],
+        layout="firm",
+        resolve_parties=resolver,
+    )
+
+    assert seen == [2]  # the resolver saw exactly the selected scenarios
+    assert summary["layout"] == "firm"
+    assert summary["clients"] == 1
+    assert summary["client_names"] == ["Northwind"]
+    assert summary["matters"] == 2
+    assert summary["principals"] == ["group:northwind"]
+    acl = json.loads(Path(summary["acl_by_path"]).read_text(encoding="utf-8"))
+    assert acl and all(path.startswith("Clients/Northwind/") for path in acl)
+    # each matter is "<instrument> — <counterparty>"; pairing follows the seeded order
+    titles = {r["matter_title"] for r in _read_scenarios(summary)}
+    assert {t.split(" — ")[0] for t in titles} == {
+        "Account Control Agreement",
+        "Credit Support Annex",
+    }
+    assert {t.split(" — ")[1] for t in titles} == {"Acme", "Globex"}
+
+
+def test_firm_naming_resolver_rejected_for_flat_layout(tmp_path: Path) -> None:
+    source = _mini_task_set(tmp_path / "task_set")
+    with pytest.raises(ValueError, match="firm layout"):
+        build_task_corpus(
+            tmp_path / "out",
+            source,
+            areas=["contracts/banking"],
+            layout="flat",
+            resolve_parties=lambda scenarios: [("X", "Y")],
+        )
+
+
+def test_firm_layout_applies_a_curated_structure_manifest(tmp_path: Path) -> None:
+    """A structure manifest is authoritative: its client / matter number / title are used
+    verbatim, matters group under the shared client, and a '/' in a title is folder-safe."""
+    source = _mini_task_set(tmp_path / "task_set")
+    structure = {
+        "matters": {
+            "contracts/banking/account-control-agreement-first-draft/scenario-01": {
+                "client": "Northwind Capital",
+                "matter_no": "NC-001",
+                "counterparty": "Acme",
+                "matter_title": "ISDA / Credit Support Annex — Acme",
+            },
+            "contracts/banking/credit-support-annex-first-draft/scenario-01": {
+                "client": "Northwind Capital",
+                "matter_no": "NC-002",
+                "counterparty": "Globex",
+                "matter_title": "Account Control Agreement — Globex",
+            },
+        }
+    }
+    summary = build_task_corpus(
+        tmp_path / "out", source, areas=["contracts/banking"], layout="firm", structure=structure
+    )
+
+    assert summary["clients"] == 1
+    assert summary["client_names"] == ["Northwind Capital"]
+    assert summary["matters"] == 2
+    recs = _read_scenarios(summary)
+    assert {r["matter_ref"] for r in recs} == {"NC-001", "NC-002"}
+    # the '/' in the first title is sanitized to '-' so it stays one matter folder
+    assert {r["matter_title"] for r in recs} == {
+        "ISDA - Credit Support Annex — Acme",
+        "Account Control Agreement — Globex",
+    }
+    acl = json.loads(Path(summary["acl_by_path"]).read_text(encoding="utf-8"))
+    assert acl and all(p.startswith("Clients/Northwind Capital/NC-00") for p in acl)
+    # no path segment was split by the slashed title (would appear as ".../ISDA /...")
+    assert not any("/ISDA /" in p for p in acl)
+
+
+def test_noise_primitives_are_deterministic_and_structural(tmp_path: Path) -> None:
+    from knowledge_index.benchmark import noise
+
+    cfg = noise.LEVELS["heavy"]
+    assert noise.place("Drafts", "flat") == ""  # flat -> matter root
+    assert noise.place("Drafts", "alt") == "Working Papers"  # renamed vocabulary
+    assert noise.place("Drafts", "standard") == "Drafts"  # unchanged
+    # a matter's style is stable across calls (seeded per matter)
+    assert noise.matter_style(cfg, 42, "MCP-006") == noise.matter_style(cfg, 42, "MCP-006")
+
+    # junk leaves an empty limbo dir and returns cruft files for the caller to wall
+    matter = tmp_path / "matter"
+    matter.mkdir()
+    junk = noise.scatter_junk(matter, 42, "MCP-006")
+    assert any(d.is_dir() and d.name.startswith("_") for d in matter.iterdir())
+    assert all(j.exists() for j in junk)
+
+
+def test_firm_noise_keeps_every_file_walled_and_is_deterministic(tmp_path: Path) -> None:
+    """Noise may flatten/rename folders, add versions and junk — but every file stays
+    walled to its own client, and the whole build is reproducible."""
+    import re
+
+    source = _mini_task_set(tmp_path / "task_set")
+    summary = build_task_corpus(
+        tmp_path / "out", source, areas=["contracts/banking"], layout="firm", noise_level="heavy"
+    )
+    assert set(summary["noise"]) == {"flat", "alt", "junk"}
+
+    root = Path(summary["source_root"])
+    acl = json.loads(Path(summary["acl_by_path"]).read_text(encoding="utf-8"))
+    files = [p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file()]
+    assert files and all(f in acl for f in files)  # every file (incl. junk/versions) walled
+    for path, grants in acl.items():  # and walled to its OWN client — no leak
+        client_slug = re.sub(r"[^a-z0-9]+", "-", path.split("/")[1].lower()).strip("-")
+        assert [g["principal"] for g in grants] == [f"group:{client_slug}"]
+
+    repeat = build_task_corpus(
+        tmp_path / "out2", source, areas=["contracts/banking"], layout="firm", noise_level="heavy"
+    )
+    assert repeat["content_hash"] == summary["content_hash"]
+
+
+def test_noise_requires_firm_layout(tmp_path: Path) -> None:
+    source = _mini_task_set(tmp_path / "task_set")
+    with pytest.raises(ValueError, match="firm layout"):
+        build_task_corpus(
+            tmp_path / "out", source, areas=["contracts/banking"], layout="flat", noise_level="light"
+        )
+
+
+def _read_scenarios(summary: dict) -> list[dict]:
+    lines = Path(summary["scenarios_manifest"]).read_text(encoding="utf-8").splitlines()
+    return [json.loads(line) for line in lines if line.strip()]
+
+
 def test_gold_derivation_emits_working_set_and_clean_factoids(tmp_path: Path) -> None:
     source = _mini_task_set(tmp_path / "tasks")
     build_task_corpus(tmp_path / "out", source, areas=["contracts/banking"])
@@ -407,15 +550,28 @@ def test_task_run_aggregation_groups_by_mode() -> None:
     assert summary["agentic"]["avg_tool_calls"] == 4.0
 
 
-def test_tool_suite_exposes_the_mcp_surface() -> None:
-    from knowledge_index.benchmark.agent import ToolSuite, _filters
+def test_tool_suite_exposes_the_real_mcp_surface() -> None:
+    import asyncio
+    from types import SimpleNamespace
 
-    names = {spec["function"]["name"] for spec in ToolSuite(None, "group:x").specs()}
-    assert names == {"search_filter", "search_semantic", "list_matters", "get_document", "traverse"}
-    for spec in ToolSuite(None, "group:x").specs():
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from knowledge_index.benchmark.agent import ToolSuite
+    from knowledge_index.mcp_server import create_mcp_server
+
+    engine = create_engine("sqlite://")
+    service = SimpleNamespace(session=sessionmaker(engine)(), config=AppConfig())
+    suite = ToolSuite(service, "group:x")
+
+    # one source of truth: the benchmark exposes exactly the real MCP server's tools
+    server = create_mcp_server(sessionmaker(engine), AppConfig)
+    expected = {tool.name for tool in asyncio.run(server.list_tools())}
+    names = {spec["function"]["name"] for spec in suite.specs()}
+    assert names == expected
+    assert {"search_semantic", "get_document", "list_matters", "resolve_entity"} <= names
+    for spec in suite.specs():
         assert spec["type"] == "function" and "parameters" in spec["function"]
-    filters = _filters({"matter_id": "M-1", "doc_type": "email"})
-    assert filters.matter_id == "M-1" and filters.doc_type == "email"
 
 
 # ------------------------------------------------------------------------------- qa eval

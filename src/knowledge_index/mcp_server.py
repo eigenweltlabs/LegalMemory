@@ -68,7 +68,15 @@ def create_mcp_server(
         description=(
             "List documents using exact legal metadata filters. Use before semantic search "
             "when the matter, document type, status, language, or date range is known. Each "
-            "hit includes exact project, document-version, and source-object citations."
+            "hit includes exact project, document-version, and source-object citations. "
+            "only_final=true restricts to authoritative final/executed versions; the default "
+            "searches every version including drafts and redlines. identifier is an EXACT "
+            "match on a legal identifier (case number, Aktenzeichen, HRB, statute ref). "
+            "party matches a resolved party_id or a party's exact canonical name. chunk_kind "
+            "restricts to 'chunk' (document body), 'profile', or 'clause' chunks. "
+            "practice_area filters by an Area of Law ontology node id with SUBTREE semantics "
+            "(a parent area matches its children) — it restricts to documents in matters of "
+            "that practice area."
         )
     )
     def search_filter(
@@ -79,7 +87,12 @@ def create_mcp_server(
         language: str | None = None,
         date_from: str | None = None,
         date_to: str | None = None,
+        only_final: bool = False,
+        identifier: str | None = None,
+        party: str | None = None,
+        chunk_kind: str | None = None,
         clause_type: str | None = None,
+        practice_area: str | None = None,
         limit: int = 20,
         headers: dict[str, str] = CurrentHeaders(),
     ) -> list[dict]:
@@ -96,8 +109,12 @@ def create_mcp_server(
                     language=language,
                     date_from=_parse_datetime(date_from),
                     date_to=_parse_datetime(date_to),
+                    only_final=only_final,
+                    identifier=identifier,
+                    party=party,
                     clause_type=clause_type,
-                    chunk_kind="clause" if clause_type else None,
+                    chunk_kind=chunk_kind or ("clause" if clause_type else None),
+                    practice_area=practice_area,
                 )
                 result = [
                     hit.as_dict()
@@ -119,7 +136,13 @@ def create_mcp_server(
             "the user where an indexed document is. Hybrid semantic and lexical search over "
             "document chunks with ACL filtering before ranking. Prefer 5-8 focused results "
             "instead of repeated broad 20-result searches. Each hit includes exact project, "
-            "document-version, source-object, and matched-chunk citations."
+            "document-version, source-object, and matched-chunk citations. only_final=true "
+            "restricts to authoritative final/executed versions; the default searches every "
+            "version including drafts and redlines. identifier is an EXACT match on a legal "
+            "identifier; party matches a resolved party_id or exact canonical name; chunk_kind "
+            "restricts to 'chunk' (body), 'profile', or 'clause' chunks. practice_area filters "
+            "by an Area of Law ontology node id with SUBTREE semantics (a parent area matches "
+            "its children), restricting to documents in matters of that practice area."
         )
     )
     def search_semantic(
@@ -129,7 +152,12 @@ def create_mcp_server(
         doc_type: str | None = None,
         version_status: str | None = None,
         language: str | None = None,
+        only_final: bool = False,
+        identifier: str | None = None,
+        party: str | None = None,
+        chunk_kind: str | None = None,
         clause_type: str | None = None,
+        practice_area: str | None = None,
         limit: int = 8,
         headers: dict[str, str] = CurrentHeaders(),
     ) -> list[dict]:
@@ -150,8 +178,12 @@ def create_mcp_server(
                     doc_type=doc_type,
                     version_status=version_status,
                     language=language,
+                    only_final=only_final,
+                    identifier=identifier,
+                    party=party,
                     clause_type=clause_type,
-                    chunk_kind="clause" if clause_type else None,
+                    chunk_kind=chunk_kind or ("clause" if clause_type else None),
+                    practice_area=practice_area,
                 )
                 result = [
                     hit.as_dict()
@@ -944,11 +976,16 @@ def _download_base_url(headers: dict[str, str]) -> str:
 
 
 def _active_filters(filters: SearchFilters) -> dict:
-    return {
+    active = {
         key: value.isoformat() if isinstance(value, datetime) else value
         for key, value in vars(filters).items()
         if value is not None
     }
+    # only_final defaults False on every call; record it only when it actually
+    # narrows the search, to avoid a constant noise column on every audit row.
+    if not filters.only_final:
+        active.pop("only_final", None)
+    return active
 
 
 def _parse_datetime(value: str | None) -> datetime | None:

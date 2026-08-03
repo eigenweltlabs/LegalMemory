@@ -22,9 +22,10 @@ from knowledge_index.db.models import Base, ProcessingState
 from knowledge_index.pipeline import PipelineRunner
 
 POSTGRES_ADMIN_URL = "postgresql+pg8000://ki:ki-dev-only@localhost:5439/postgres"
-# Two concurrent runs against one database deadlock on the per-test TRUNCATE — which
-# surfaces as unrelated tests "failing", not as a lock error, so it costs a real
-# investigation every time. Set KI_TEST_DATABASE to give a run its own database.
+# Overridable so parallel worktrees/agents don't share one test database: the
+# session fixture DROPs it WITH (FORCE), which would terminate a concurrent run's
+# connections. Set KI_TEST_DATABASE=ki_test_<name> per worktree. Defaults to the
+# canonical ki_test.
 TEST_DATABASE = os.environ.get("KI_TEST_DATABASE", "ki_test")
 TEST_DATABASE_URL = f"postgresql+pg8000://ki:ki-dev-only@localhost:5439/{TEST_DATABASE}"
 # Advisory-lock key claimed for the whole run; see the guard in pg_factory. Arbitrary

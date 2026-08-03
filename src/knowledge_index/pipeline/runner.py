@@ -24,15 +24,20 @@ from knowledge_index.db.models import (
     Artifact,
     Blob,
     Chunk,
+    Client,
     CommunicationThread,
     DecisionRecord,
     Document,
     DocumentGrant,
     DocumentVersion,
     DocumentVersionSource,
+    EntityIdentifier,
     Extraction,
     Matter,
     MatterAssignment,
+    MatterClient,
+    MatterParty,
+    Party,
     ProcessingState,
     Project,
     ProjectGrant,
@@ -60,6 +65,7 @@ from knowledge_index.pipeline.extraction import (
     METADATA_SYSTEM,
     DecisionExtraction,
     DocumentMetadata,
+    ExtractedParty,
     FileRelationResult,
     MatterClassification,
 )
@@ -67,7 +73,11 @@ from knowledge_index.pipeline.folder_context import (
     build_member_doc,
     folder_ls,
 )
-from knowledge_index.pipeline.matter_search import classification_tools, relation_tools
+from knowledge_index.pipeline.matter_search import (
+    classification_tools,
+    party_resolution_tools,
+    relation_tools,
+)
 from knowledge_index.pipeline.providers import (
     ModelOutputInvalid,
     chat_agent,
@@ -89,6 +99,7 @@ from knowledge_index.taxonomies import (
     ACCESS_ONLY_REINDEX,
     DISABLED_BY_CONFIGURATION,
     PIPELINE_STAGE_ORDER,
+    PartyRole,
     WAITING_FOR_PREVIOUS_STAGE,
     PipelineStage,
     ProcessingStatus,
@@ -688,9 +699,6 @@ class PipelineRunner:
             raise RetryableStageError("source record is missing")
         converted = _required_artifact(session, source_object.content_hash, "structured_json")
         text = (converted.payload or {}).get("text", "")
-        known_titles = session.scalars(
-            select(Document.title).where(Document.title.isnot(None)).limit(200)
-        ).all()
         folder = _parent_folder(source_object.path)
         model = self.config.pipeline.stage("classify_matter").model
         trace_id, trace_tags = _stage_trace(source_object.id, "classify_matter")
@@ -712,8 +720,12 @@ class PipelineRunner:
         if "service" in self.config.ontology.active_facets:
             service_scope = self.config.ontology_facet("service")
             classify_system = classify_system + MATTER_KIND_INSTRUCTION
-        top_folder = source_object.path.split("/", 1)[0]
-        fallback_reference = f"UNASSIGNED-{_slug(top_folder) or 'ROOT'}"
+        # The fallback bucket is keyed to the file's OWN folder, not the top-level
+        # folder: strays of one folder likely belong together (the folder is the
+        # firm's own filing statement), but strays of different clients/cases must
+        # never converge into one shared matter (audit §4.3 — 25 files of many
+        # clients ended up in one "UNASSIGNED-CLIENTS" matter).
+        fallback_reference = f"UNASSIGNED-{_slug(folder) or 'ROOT'}"
         seen_matter_ids: set[str] = set()
 
         def validate_classification(candidate: MatterClassification) -> str | None:
@@ -757,7 +769,6 @@ class PipelineRunner:
                     "folder_neighbourhood": folder_ls(
                         session, source_object.source_id, source_object.path
                     ),
-                    "known_document_titles": sorted({title for title in known_titles if title}),
                     "text": text[:8000],
                 },
                 ensure_ascii=False,
@@ -840,13 +851,22 @@ class PipelineRunner:
             project = session.get(Project, source.project_id) if source.project_id else None
             if source.project_id and project is None:
                 raise RetryableStageError("source's assigned project is missing")
+            # A fallback holding matter announces itself: named after its folder
+            # (never after whichever document arrived first — the audit's bucket
+            # called itself after a random member and read as a real matter) and
+            # status "unassigned" so the UI can surface it as a triage pile.
+            unassigned = matter_ref == fallback_reference
             matter = Matter(
                 project_id=project.id if project else None,
                 reference_numbers=[matter_ref],
-                title=classification.matter_title or matter_ref,
+                title=(
+                    f"Unassigned — {folder or '/'}"
+                    if unassigned
+                    else classification.matter_title or matter_ref
+                ),
                 practice_area=practice_area,
                 matter_kind=matter_kind,
-                status="unknown",
+                status="unassigned" if unassigned else "unknown",
                 imported=False,
                 provenance=provenance,
             )
@@ -1088,11 +1108,44 @@ class PipelineRunner:
             )
         elif not _document_is_exclusive_to_source(
             session, current_document.id, source_object.id
+        ) and not _version_is_chain_anchor(
+            session, current_document.id, current_version.id
         ):
+            # identity=new_document while sharing a document with other files. Two very
+            # different situations produce this: (a) THIS file previously declared
+            # itself a version of another file's document (an identity flip on
+            # re-relate) — it must be able to leave; (b) OTHER files declared
+            # themselves versions of THIS file (live merge or replayed intent) — the
+            # anchor honestly answering "I am not a version of anything I see" is NOT
+            # a contradiction of their attachment, and splitting the anchor out would
+            # undo the merge. Only the non-anchor case moves out.
             current_document, current_version = self._create_file_entity(
                 session, source_object, matter, provenance
             )
             _relink_version_source(session, current_version.id, source_object.id)
+        if (
+            result.identity in {"duplicate", "new_version"}
+            and identity_ref
+            and identity_ref != source_object.id
+            and target_entity is None
+        ):
+            # The model identified this file as a version/copy of a neighbour that has
+            # no matter assignment yet (bulk ingest races arrival order). The file
+            # stays a standalone document for now; the identity decision is parked and
+            # replayed by the target's classify — the replay merges the two documents
+            # and requeues this file's knowledge stages under the survivor.
+            self._park_intent(
+                session,
+                source_object.id,
+                identity_ref,
+                intent="identity",
+                relation_kind="",
+                payload={
+                    "identity": result.identity,
+                    "relative_order": result.relative_order,
+                },
+                provenance=provenance,
+            )
 
         # Typing is owned by extract_metadata (the ontology walk); relate only
         # establishes identity, versions, and relations. The logical title belongs
@@ -1105,12 +1158,23 @@ class PipelineRunner:
         current_document.matter_id = matter.id
         current_document.project_id = matter.project_id
         current_document.provenance = provenance
-        current_version.status = (
-            result.status
-            if result.status in {item.value for item in VersionStatus}
-            else VersionStatus.UNKNOWN.value
-        )
-        current_version.status_evidence = {"related_from": source_object.id}
+        if _is_email_file(session, source_object):
+            # A sent email IS its final record — there is no draft of a received
+            # email. The prompt states this, but models ignored it 78× in the audit
+            # (§2.4), dropping those emails out of every only_final view. Emails are
+            # the one status the code can decide deterministically, so it does.
+            current_version.status = VersionStatus.FINAL.value
+            current_version.status_evidence = {
+                "related_from": source_object.id,
+                "rule": "email_is_final",
+            }
+        else:
+            current_version.status = (
+                result.status
+                if result.status in {item.value for item in VersionStatus}
+                else VersionStatus.UNKNOWN.value
+            )
+            current_version.status_evidence = {"related_from": source_object.id}
         current_version.provenance = provenance
 
         redline_entity = self._file_entity_for_ref(session, result.redline_of, provenance)
@@ -1192,6 +1256,10 @@ class PipelineRunner:
             survivor_version_id=current_version.id,
         )
         _refresh_latest_final(session, current_document)
+        # relate can move a dated document into (or create it in) this matter — e.g.
+        # a replayed identity merge folding a fully-processed file in — so the span
+        # is re-derived here as well as where dates are born (extract_metadata).
+        _refresh_matter_time_range(session, matter)
 
     def _absorb_abandoned_entity(
         self,
@@ -1241,9 +1309,30 @@ class PipelineRunner:
                     record.version_from = survivor_version_id
                 if record.version_to == ghost_version_id:
                     record.version_to = survivor_version_id
+            ghost_chunk_ids = session.scalars(
+                select(Chunk.id).where(Chunk.document_version_id == ghost_version_id)
+            ).all()
             session.execute(
                 delete(Chunk).where(Chunk.document_version_id == ghost_version_id)
             )
+            if ghost_chunk_ids:
+                # The ghost was already indexed (a replayed identity merge, or a
+                # re-relate after the index stage ran). Postgres is authoritative and
+                # just dropped the rows; sync the deletion to OpenSearch best-effort —
+                # a search hiccup must not fail the merge, and an orphaned search doc
+                # is invisible anyway once its chunk row is gone.
+                try:
+                    from knowledge_index.search_backend import OpenSearchIndex
+
+                    OpenSearchIndex(self.config).bulk_sync(
+                        deletes=ghost_chunk_ids, upserts=[]
+                    )
+                except Exception:
+                    log.warning(
+                        "could not sync %d ghost-chunk deletions to the search index",
+                        len(ghost_chunk_ids),
+                        exc_info=True,
+                    )
             session.delete(version)
             session.flush()
         document = (
@@ -1547,10 +1636,93 @@ class PipelineRunner:
                     self._unify_document_threads(
                         session, thread_matter, target_entity[0].id, thread
                     )
+            elif item.intent == "identity":
+                # The origin file declared itself a version/copy of this file while it
+                # was unclassified and was materialized standalone. Merge it now,
+                # mirroring the live identity branch: move (or share) the version,
+                # fold the abandoned standalone document into the survivor, and
+                # requeue the origin's knowledge stages so its metadata/chunks are
+                # re-derived under the surviving document.
+                origin_document, origin_version = origin_entity
+                target_document, target_version = target_entity
+                if origin_document.id == target_document.id:
+                    item.status = "applied"
+                    item.applied_at = datetime.now(UTC)
+                    applied += 1
+                    continue
+                origin_source = session.get(SourceObject, item.source_object_id)
+                if origin_source is None:
+                    continue
+                ghost_document_id, ghost_version_id = origin_document.id, origin_version.id
+                if payload.get("identity") == "duplicate":
+                    _relink_version_source(
+                        session, target_version.id, item.source_object_id
+                    )
+                    survivor_version = target_version
+                else:  # new_version
+                    if (
+                        origin_version.id == target_version.id
+                        or _version_source_count(session, origin_version.id) > 1
+                    ):
+                        origin_version = self._create_version(
+                            session, target_document, origin_source, provenance
+                        )
+                        _relink_version_source(
+                            session, origin_version.id, item.source_object_id
+                        )
+                    else:
+                        origin_version.document_id = target_document.id
+                    survivor_version = origin_version
+                    self._order_file_version(
+                        session,
+                        target_document,
+                        origin_version,
+                        target_version,
+                        payload.get("relative_order") or "unknown",
+                        provenance,
+                    )
+                session.flush()
+                self._absorb_abandoned_entity(
+                    session,
+                    ghost_document_id=ghost_document_id,
+                    ghost_version_id=ghost_version_id,
+                    survivor_document_id=target_document.id,
+                    survivor_version_id=survivor_version.id,
+                )
+                _refresh_latest_final(session, target_document)
+                self._requeue_knowledge_stages(session, item.source_object_id)
             item.status = "applied"
             item.applied_at = datetime.now(UTC)
             applied += 1
         return applied
+
+    def _requeue_knowledge_stages(self, session: Session, source_object_id: str) -> None:
+        """Re-derive a file's knowledge stages after a replayed identity merge.
+
+        The origin file was fully or partly processed as a standalone document that
+        the merge just deleted: its metadata was written onto the dead document and
+        its chunks are indexed under the dead document's id. Requeue the first
+        already-DONE stage from extract_metadata onward (the shared invalidation
+        helper parks everything downstream behind it), so the pipeline re-derives
+        them under the surviving document. Stages that are still pending/running are
+        left alone — they will run against the survivor anyway, and a running claim
+        must never be reset underneath its worker.
+        """
+        stage_names = [stage.value for stage in PIPELINE_STAGE_ORDER]
+        rows = {
+            row.stage: row
+            for row in session.scalars(
+                select(ProcessingState).where(
+                    ProcessingState.source_object_id == source_object_id
+                )
+            ).all()
+        }
+        start = stage_names.index(PipelineStage.EXTRACT_METADATA.value)
+        for index in range(start, len(stage_names)):
+            row = rows.get(stage_names[index])
+            if row is not None and row.status == ProcessingStatus.DONE.value:
+                self._requeue_stage_and_downstream(rows, stage_names, index)
+                return
 
     def ensure_source_object_ready(self, source_object_id: str) -> dict:
         """Bring a neighbour file to 'converted' through the normal pipeline machinery.
@@ -1771,6 +1943,7 @@ class PipelineRunner:
         trace_id, trace_tags = _stage_trace(source_object.id, "extract_metadata")
         visited: set[str] = set()
         clause_visited: set[str] = set()
+        seen_ids: set[str] = set()
 
         def validate_metadata(candidate: DocumentMetadata) -> str | None:
             if candidate.type_node is not None:
@@ -1794,11 +1967,21 @@ class PipelineRunner:
                     )
                 if node not in clause_scope.visible:
                     return f"clause_type_node {node!r} is not part of the active clause facet"
+            # A linked party must be one the agent actually saw via search_entities —
+            # the "a matching name is not enough" guard against merging two entities.
+            for party in candidate.parties:
+                if party.existing_id and party.existing_id not in seen_ids:
+                    return (
+                        f"party {party.name!r} has existing_id {party.existing_id!r} that did "
+                        "not appear in any search_entities result; search first and reuse only "
+                        "an id you have seen, or set existing_id to null to create a new party"
+                    )
             return None
 
         tools = ontology_navigation_tools(scope, visited)
         if clause_scope is not None:
             tools.append(clause_search_tool(clause_scope, clause_visited))
+        tools.extend(party_resolution_tools(session, self.config, seen_ids))
         metadata = chat_agent(
             model,
             self.config,
@@ -1842,9 +2025,27 @@ class PipelineRunner:
         document.ontology_fingerprint = scope.fingerprint
         document.language = metadata.language
         content_date = _parse_iso_date(metadata.doc_date)
-        document.doc_date = content_date or source_object.mtime
+        # mtime is a fact about how we handled the file, not about the document.
+        # For managed imports (local_fs copies files into appdata) mtime is the
+        # copy time — i.e. the ingestion day — so stamping it as doc_date is wrong
+        # data that misleads every date_from/date_to filter and the doc_date-sorted
+        # metadata search. Trust mtime only when the connector marks it a real
+        # document date (Source.config.trust_mtime); otherwise leave doc_date null,
+        # which is honest ("undated") rather than confidently wrong.
+        source_config = getattr(source_object.source, "config", None) or {}
+        trust_mtime = bool(source_config.get("trust_mtime", False))
+        fallback_date = source_object.mtime if trust_mtime else None
+        document.doc_date = content_date or fallback_date
+        if content_date:
+            doc_date_source = "document_content"
+        elif fallback_date is not None:
+            doc_date_source = "file_mtime"
+        else:
+            doc_date_source = "none"
         document.title = metadata.title or document.title
-        document.parties = [{"name": name} for name in metadata.parties]
+        document.parties = _resolve_document_parties(
+            session, document, metadata.parties, model=model, evidence=source_object.id
+        )
         document.identifiers = sorted(
             {value.strip() for value in metadata.identifiers if value.strip()}
         )
@@ -1853,11 +2054,16 @@ class PipelineRunner:
             "prompt_version": prompt_version,
             "confidence": metadata.confidence,
             "evidence": [source_object.id],
-            "doc_date_source": "document_content" if content_date else "file_mtime",
+            "doc_date_source": doc_date_source,
             "ontology_fingerprint": scope.fingerprint,
             "type_path": scope.path_labels(type_node) if type_node else None,
             "trace_id": trace_id,
         }
+        # a document date landed (or changed): re-derive the matter's activity span
+        _refresh_matter_time_range(
+            session,
+            session.get(Matter, document.matter_id) if document.matter_id else None,
+        )
         # persist the model-identified clauses for the clause-embedding index rows
         if _artifact(session, source_object.content_hash, "notable_clauses") is None:
             session.add(
@@ -2088,6 +2294,17 @@ class PipelineRunner:
             chunk.language = document.language
             chunk.doc_date = document.doc_date
             chunk.identifiers = document.identifiers or []
+            # F4 party filter: index each party's resolved id AND canonical name as
+            # keyword terms, so a caller can filter by either. Deduped/sorted for a
+            # stable OpenSearch body (unchanged re-index → no-op write).
+            chunk.parties = sorted(
+                {
+                    term
+                    for party in (document.parties or [])
+                    for term in (party.get("party_id"), party.get("name"))
+                    if term
+                }
+            )
             chunk.allowed_principals = allowed_principals
             chunk.denied_principals = denied_principals
             chunk.access_version = 1
@@ -2183,6 +2400,86 @@ def connector_from_source(source: Source, session: Session | None = None) -> Syn
     has_acl = bool(acl_map) or "default_acl" in config
     return LocalFilesystemSource(config["root"], acl_resolver=acl_resolver if has_acl else None)
 
+
+def _resolve_document_parties(
+    session: Session,
+    document: Document,
+    parties: list[ExtractedParty],
+    *,
+    model: str,
+    evidence: str,
+) -> list[dict]:
+    """Materialize the agent's resolved parties into the firm-wide entity layer.
+
+    Resolution is the AGENT's: it either LINKED to an existing entity (set existing_id,
+    which the stage validator confirmed it saw via search_entities) or decided CREATE.
+    There is no deterministic name matching here — deduplication is the job of the
+    semantic search_entities tool + the agent's judgment, so nothing is tuned to one
+    corpus's naming. The firm's client (role=client) lands in ``clients`` +
+    ``matter_clients``; every other party lands in ``parties`` + ``matter_parties``.
+    Typed identifiers are promoted to ``entity_identifiers``. Link writes are
+    idempotent via the composite PKs. Returns the ``document.parties`` payload with
+    each mention's resolved entity id.
+    """
+    matter_id = document.matter_id
+    provenance = {"method": "inferred", "model": model, "evidence": [evidence]}
+    resolved: list[dict] = []
+    for party in parties:
+        role = party.role.value if isinstance(party.role, PartyRole) else str(party.role)
+        is_client = role == PartyRole.CLIENT.value
+        entity_type = "client" if is_client else "party"
+        model_cls = Client if is_client else Party
+
+        entity = session.get(model_cls, party.existing_id) if party.existing_id else None
+        if entity is None:
+            entity = model_cls(
+                name=party.name,
+                kind=party.kind,
+                aliases=[],
+                identifiers={ident.scheme: ident.value for ident in party.identifiers},
+                provenance=provenance,
+            )
+            session.add(entity)
+            session.flush()
+
+        if matter_id:
+            if is_client:
+                if session.get(MatterClient, (matter_id, entity.id)) is None:
+                    session.add(MatterClient(matter_id=matter_id, client_id=entity.id))
+            elif session.get(MatterParty, (matter_id, entity.id, role)) is None:
+                session.add(
+                    MatterParty(
+                        matter_id=matter_id,
+                        party_id=entity.id,
+                        role=role,
+                        provenance=provenance,
+                    )
+                )
+        for ident in party.identifiers:
+            _ensure_entity_identifier(session, entity_type, entity.id, ident.scheme, ident.value)
+        resolved.append(
+            {"name": party.name, "role": role, "entity_type": entity_type, "party_id": entity.id}
+        )
+    return resolved
+
+
+def _ensure_entity_identifier(
+    session: Session, entity_type: str, entity_id: str, scheme: str, value: str
+) -> None:
+    exists = session.scalar(
+        select(EntityIdentifier).where(
+            EntityIdentifier.entity_type == entity_type,
+            EntityIdentifier.entity_id == entity_id,
+            EntityIdentifier.scheme == scheme,
+            EntityIdentifier.value == value,
+        )
+    )
+    if exists is None:
+        session.add(
+            EntityIdentifier(
+                entity_type=entity_type, entity_id=entity_id, scheme=scheme, value=value
+            )
+        )
 
 def _close_connectors(connectors: dict) -> None:
     for connector in connectors.values():
@@ -2306,6 +2603,32 @@ def _document_is_exclusive_to_source(
     return bool(refs) and set(refs) == {source_object_id}
 
 
+def _version_is_chain_anchor(
+    session: Session, document_id: str, version_id: str
+) -> bool:
+    """Whether this version is the base of its document's version chain.
+
+    The anchor is the first version by declared order (lowest ordinal; NULL —
+    unknown order — ranks last; created_at then id break ties). Version ordering
+    anchors every later arrival relative to an existing version, so the chain's base
+    keeps the lowest ordinal no matter what order the files arrived in."""
+    versions = session.scalars(
+        select(DocumentVersion).where(DocumentVersion.document_id == document_id)
+    ).all()
+    if not versions:
+        return False
+    anchor = min(
+        versions,
+        key=lambda version: (
+            version.ordinal is None,
+            version.ordinal if version.ordinal is not None else 0,
+            version.created_at or datetime.min.replace(tzinfo=UTC),
+            version.id,
+        ),
+    )
+    return anchor.id == version_id
+
+
 def _refresh_latest_final(session: Session, document: Document) -> None:
     versions = session.scalars(
         select(DocumentVersion).where(DocumentVersion.document_id == document.id)
@@ -2378,16 +2701,25 @@ def _parse_message_ids(*headers: str | None) -> set[str]:
     return ids
 
 
-def _email_thread_context(session: Session, source_object: SourceObject) -> dict | None:
-    """Header-derived threading evidence for an email file; None for non-email."""
+def _is_email_file(session: Session, source_object: SourceObject) -> bool:
+    """Deterministic email detection: the converter that parsed it, or the file type.
+
+    The one signal both the threading and the email-is-final status rule trust —
+    never a model judgment."""
     artifact = _artifact(session, source_object.content_hash, "structured_json")
     metadata = ((artifact.payload if artifact else None) or {}).get("metadata") or {}
-    is_email = (
+    return (
         metadata.get("converter") == "stdlib-email"
         or source_object.name.casefold().endswith(".eml")
     )
-    if not is_email:
+
+
+def _email_thread_context(session: Session, source_object: SourceObject) -> dict | None:
+    """Header-derived threading evidence for an email file; None for non-email."""
+    if not _is_email_file(session, source_object):
         return None
+    artifact = _artifact(session, source_object.content_hash, "structured_json")
+    metadata = ((artifact.payload if artifact else None) or {}).get("metadata") or {}
     participants = []
     for header in ("from", "to", "cc"):
         for part in (metadata.get(header) or "").split(","):
@@ -2410,6 +2742,33 @@ def _email_thread_context(session: Session, source_object: SourceObject) -> dict
         "participants": participants,
         "date": date,
     }
+
+
+def _refresh_matter_time_range(session: Session, matter: Matter | None) -> None:
+    """Re-derive a matter's activity span from its documents' content dates.
+
+    Deterministic aggregation (spec O6): min/max over member documents' ``doc_date``
+    where the date was read from the document's CONTENT. Mtime-derived dates are
+    excluded even when the connector is trusted — a file's storage timestamp says
+    when it was touched, not when the matter was active. Recomputed from scratch on
+    every touch (date extracted, document landing in a matter) so corrected dates
+    and moved documents self-heal instead of accreting a stale span. Imported
+    matters are left alone: practice management is authoritative for them. A matter
+    with no content-dated documents keeps an honest NULL span.
+    """
+    if matter is None or matter.imported:
+        return
+    dates = [
+        document.doc_date
+        for document in session.scalars(
+            select(Document).where(Document.matter_id == matter.id)
+        )
+        if document.doc_date is not None
+        and (document.provenance or {}).get("doc_date_source") == "document_content"
+    ]
+    matter.time_range = (
+        {"from": min(dates).isoformat(), "to": max(dates).isoformat()} if dates else None
+    )
 
 
 def _merge_time_range(existing: dict | None, moment: datetime | None) -> dict | None:

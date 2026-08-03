@@ -58,7 +58,8 @@ def _parse_verdict(payload: dict) -> bool:
 
 
 def judge_answer(
-    question: str, candidate: str, reference: str, config: AppConfig, model: str
+    question: str, candidate: str, reference: str, config: AppConfig, model: str,
+    *, usage_sink: dict | None = None,
 ) -> bool:
     from knowledge_index.benchmark import gateway
 
@@ -70,7 +71,9 @@ def judge_answer(
         {"role": "user", "content": user},
     ]
     try:
-        message = gateway.complete(config, model, messages, max_tokens=50)
+        # 50 was too small for reasoning models: reasoning tokens consumed the whole
+        # budget, leaving the verdict JSON empty -> every answer scored "incorrect".
+        message = gateway.complete(config, model, messages, max_tokens=2000, usage_sink=usage_sink)
         return _parse_verdict(gateway.extract_json(message.get("content") or ""))
     except Exception:
         return False
@@ -99,6 +102,8 @@ def evaluate_qa(
     limit: int | None = None,
     max_steps: int = 12,
 ) -> dict:
+    import time
+
     from knowledge_index.benchmark.agent import ProducedWork, Task, run_agentic
     from knowledge_index.benchmark.measure import read_litellm_spend, spend_delta
     from knowledge_index.benchmark.task_eval import context_recall
@@ -118,23 +123,46 @@ def evaluate_qa(
             principal=item["principals"][0],
             matter_ref=item.get("matter_ref", ""),
         )
+        started = time.monotonic()
         with session_factory() as session:
             service = RetrievalService(session, config)
             produced: ProducedWork = run_agentic(
                 task, service, config, agent_model, max_steps=max_steps, system=QA_SYSTEM
             )
         reference = item["meta"]["answer"]
-        correct = judge_answer(item["query"], produced.work_product, reference, config, judge_model)
+        judge_usage: dict = {}
+        correct = judge_answer(
+            item["query"], produced.work_product, reference, config, judge_model,
+            usage_sink=judge_usage,
+        )
+        agent_tok = produced.usage.get("total_tokens", 0)
+        judge_tok = judge_usage.get("total_tokens", 0)
+        # collect EVERYTHING per run: verdict, retrieval, full trajectory, tokens, timing, I/O
         runs.append(
             {
                 "id": item["id"],
+                "matter_ref": item.get("matter_ref", ""),
+                "leg": (item.get("meta") or {}).get("leg"),
                 "question": item["query"],
                 "reference": reference,
-                "answer": produced.work_product[:500],
+                "answer": produced.work_product,
                 "correct": correct,
                 "context_recall": context_recall(produced.retrieved_paths, item["gold_paths"]),
+                "gold_paths": item["gold_paths"],
+                "retrieved_paths": sorted(produced.retrieved_paths),
                 "tool_calls": produced.tool_calls,
                 "llm_calls": produced.llm_calls,
+                "trajectory": produced.trajectory,
+                "usage": {
+                    "agent": produced.usage,
+                    "judge": judge_usage,
+                    "total_tokens": agent_tok + judge_tok,
+                },
+                "wall_seconds": round(time.monotonic() - started, 2),
+                "principal": item["principals"][0],
+                "agent_model": agent_model,
+                "judge_model": judge_model,
+                "messages": produced.messages,
             }
         )
     cost = spend_delta(spend_before, read_litellm_spend(config))
@@ -145,4 +173,9 @@ def evaluate_qa(
         if cost.get("total") is not None and summary.get("questions")
         else None
     )
+    # token totals from the per-run usage (exact, model-agnostic cost signal)
+    total_tokens = sum(r["usage"]["total_tokens"] for r in runs)
+    summary["total_tokens"] = total_tokens
+    summary["avg_tokens_per_question"] = round(total_tokens / len(runs)) if runs else 0
+    summary["avg_wall_seconds"] = round(sum(r["wall_seconds"] for r in runs) / len(runs), 2) if runs else 0
     return {"gold_path": str(gold_path), "summary": summary, "cost": cost, "runs": runs}

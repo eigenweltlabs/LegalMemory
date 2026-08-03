@@ -20,11 +20,13 @@ def complete(
     *,
     tools: list[dict] | None = None,
     max_tokens: int = 4000,
+    usage_sink: dict | None = None,
 ) -> dict:
     """One chat completion through the gateway; returns the raw message dict.
 
     Retries on 429 with exponential backoff so a rate-limit blip does not turn into a
-    silent FAIL verdict (the judge fans out many concurrent calls).
+    silent FAIL verdict (the judge fans out many concurrent calls). When ``usage_sink``
+    is given, the response's token usage is accumulated into it (for per-run cost).
     """
     import os
     import time
@@ -43,15 +45,24 @@ def complete(
         payload["tools"] = tools
         payload["tool_choice"] = "auto"
     headers = {"authorization": f"Bearer {key}"} if key else {}
-    for attempt in range(5):
+    for attempt in range(8):
         response = httpx.post(
             f"{base}/v1/chat/completions", headers=headers, json=payload, timeout=240
         )
-        if response.status_code == 429 and attempt < 4:
-            time.sleep(2**attempt)  # 1s, 2s, 4s, 8s
+        if response.status_code == 429 and attempt < 7:
+            # honor the server's Retry-After when present; otherwise capped exp backoff.
+            retry_after = response.headers.get("retry-after")
+            delay = float(retry_after) if retry_after else min(2**attempt, 30)
+            time.sleep(delay)
             continue
         response.raise_for_status()
-        return response.json()["choices"][0]["message"]
+        body = response.json()
+        if usage_sink is not None:
+            u = body.get("usage") or {}
+            for key_name in ("prompt_tokens", "completion_tokens", "total_tokens"):
+                usage_sink[key_name] = usage_sink.get(key_name, 0) + int(u.get(key_name) or 0)
+            usage_sink["calls"] = usage_sink.get("calls", 0) + 1
+        return body["choices"][0]["message"]
     raise RuntimeError("unreachable")
 
 

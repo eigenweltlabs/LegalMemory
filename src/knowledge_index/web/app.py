@@ -191,6 +191,10 @@ class SearchRequest(BaseModel):
     doc_type: str | None = None
     version_status: str | None = None
     language: str | None = None
+    only_final: bool = False
+    identifier: str | None = None
+    party: str | None = None
+    chunk_kind: str | None = None
     limit: int = Field(default=20, ge=1, le=100)
 
 
@@ -297,6 +301,10 @@ class PlanFilters(BaseModel):
     doc_type: str | None = None
     version_status: str | None = None
     language: str | None = None
+    only_final: bool = False
+    identifier: str | None = None
+    party: str | None = None
+    chunk_kind: str | None = None
 
 
 class PlanStep(BaseModel):
@@ -1367,6 +1375,10 @@ def create_app(
                 doc_type=payload.doc_type,
                 version_status=payload.version_status,
                 language=payload.language,
+                only_final=payload.only_final,
+                identifier=payload.identifier,
+                party=payload.party,
+                chunk_kind=payload.chunk_kind,
             )
             if payload.query.strip():
                 hits = service.search_semantic(
@@ -3903,7 +3915,9 @@ _ASK_PLANNER_SYSTEM = (
     "- traverse(entity_type, entity_id): follow ontology relations from a known "
     "entity (document, matter, thread). Only use when the question already names a "
     "concrete entity id.\n"
-    "Filters may set project_id, matter_id, doc_type, version_status, language. "
+    "Filters may set project_id, matter_id, doc_type, version_status, language, "
+    "only_final, identifier (exact legal identifier), party (a party_id or exact "
+    "canonical name), and chunk_kind (chunk|profile|clause). "
     "Prefer one or two focused steps. Do not invent entity ids."
 )
 

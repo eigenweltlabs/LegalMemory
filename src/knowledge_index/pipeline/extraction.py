@@ -13,6 +13,8 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field, model_validator
 
+from knowledge_index.taxonomies import PartyRole
+
 from knowledge_index.taxonomies import RationaleCategory, TaskType
 
 
@@ -37,7 +39,8 @@ class MatterClassification(BaseModel):
         "(e.g. the contract's own title instead of 'contract_final_v3(2)'). Drafts, "
         "redlines and finals of the same document MUST share one logical title. If the "
         "document is a version of an already-known document, copy that title EXACTLY "
-        "from the known-document-titles list. Keep the document's language."
+        "as it appeared in a tool result you saw (peek_matter lists a matter's "
+        "document titles). Keep the document's language."
     )
     is_new_matter: bool = Field(
         default=False,
@@ -74,6 +77,44 @@ class NotableClause(BaseModel):
     )
 
 
+class TypedIdentifier(BaseModel):
+    scheme: str = Field(
+        description="Identifier scheme id, e.g. de_hrb (Handelsregister), lei, ust_id, "
+        "tax_id, or another well-known register scheme."
+    )
+    value: str = Field(description="The identifier value, verbatim from the document.")
+
+
+class ExtractedParty(BaseModel):
+    """One party named on the document, resolved to a firm-wide entity by the agent.
+
+    The agent decides link-vs-create with the search_entities tool: it searches the
+    firm's known parties/clients and, only when a candidate is genuinely the SAME
+    real-world entity, reuses its id — a matching name alone is never enough.
+    """
+
+    name: str = Field(
+        description="The party's canonical legal name only — not its address/seat, register "
+        "number, or defined-term label. Register numbers/LEI belong in identifiers. Write the "
+        "same entity identically everywhere so mentions across documents match."
+    )
+    role: PartyRole = Field(description="This party's role on THIS document.")
+    existing_id: str | None = Field(
+        default=None,
+        description="The id of an existing entity returned by search_entities, when this "
+        "party IS that already-known entity. null to create a new one. Reuse an id ONLY "
+        "when identifiers or the matter context confirm it — never on name similarity alone.",
+    )
+    kind: str = Field(
+        default="legal_entity",
+        description="legal_entity for a company/authority/court, natural_person for a person.",
+    )
+    identifiers: list[TypedIdentifier] = Field(
+        default_factory=list,
+        description="Register numbers/LEI/tax ids printed for THIS party, if any.",
+    )
+
+
 class DocumentMetadata(BaseModel):
     type_node: str | None = Field(
         default=None,
@@ -89,15 +130,20 @@ class DocumentMetadata(BaseModel):
         "taken from the content — not the file date. null if not determinable."
     )
     title: str = Field(description="Normalized document title in the document's language.")
-    parties: list[str] = Field(
+    parties: list[ExtractedParty] = Field(
         default_factory=list,
-        description="Parties to the document (names as written in the document).",
+        description="Every party named on the face of the document, each resolved to a "
+        "firm-wide entity via search_entities (see the party-resolution protocol).",
     )
     identifiers: list[str] = Field(
         default_factory=list,
-        description="Exact legal identifiers found in the document: matter reference "
-        "numbers, court case numbers (e.g. 'VIII ZR 1/25'), statute references "
-        "(e.g. '§ 433 BGB'), register numbers (e.g. 'HRB 12345'). Verbatim, deduplicated.",
+        description="Formal reference codes the document carries, assigned by a court, a "
+        "public register, a statute, or the firm's matter system — for example a case or "
+        "docket number, a company- or commercial-register number, a statute or regulation "
+        "citation, or a matter/file reference. Copy them verbatim and deduplicate. NOT "
+        "monetary amounts, dates, percentages or rates, party or company names, or document "
+        "titles. Most documents carry few or none; an empty list is normal — never invent an "
+        "identifier from an amount, a date, or a name.",
     )
     notable_clauses: list[NotableClause] = Field(
         default_factory=list,
@@ -428,15 +474,33 @@ METADATA_SYSTEM = (
     "Metadata rules: use only evidence from the document itself. "
     "(1) A document keeps its own identity: an annex, exhibit, or attachment gets its "
     "own type, never the type of the document it belongs to or travels with. "
-    "(2) identifiers must be verbatim strings from the document (case numbers, statute "
-    "references, register numbers, matter references). "
+    "(2) identifiers are formal reference codes the document carries — assigned by a court, "
+    "a public register, a statute, or a matter system (a case or docket number, a register "
+    "number, a statute or regulation citation, a matter/file reference), copied verbatim. "
+    "They are NEVER monetary amounts, dates, percentages or rates, party or company names, "
+    "or document titles; those belong to other fields or nowhere. Most documents carry few "
+    "or none, so an empty list is the normal, correct outcome — never invent one from an "
+    "amount, a date, or a name. "
     "(3) notable_clauses ONLY when the supplied version_status is final or executed AND "
     "the document has clause structure; otherwise return an empty list. "
     "(4) For each notable clause, look up its type with clause_search using the "
     "clause's single conventional English name (e.g. 'governing law', 'force "
     "majeure'); set clause_type_node to an id from the results only when its label "
     "truly names what the clause IS, else null — the clause vocabulary is "
-    "incomplete and an untyped clause is an honest outcome."
+    "incomplete and an untyped clause is an honest outcome.\n\n"
+    "Party resolution — for every party named on the face of the document (the client "
+    "the firm acts for, the contracting parties and counterparties, guarantors and "
+    "agents, the court or authority, notaries, and any advising law firms):\n"
+    "(a) Give its role on THIS document, and its CANONICAL legal name only — strip the "
+    "address/seat, register text, and defined-term labels so the same entity reads "
+    "identically everywhere.\n"
+    "(b) Call search_entities with the party's name (and any register number/LEI) to see "
+    "whether the firm already knows it. If a returned candidate is the SAME real-world "
+    "entity, put its id in existing_id; a matching NAME ALONE is never enough — different "
+    "companies share names, so reuse an id only when identifiers or the matter context "
+    "agree. Otherwise leave existing_id null to create a new entity.\n"
+    "(c) Any non-null existing_id MUST be an id returned by search_entities in this "
+    "conversation."
 )
 
 DECISION_SYSTEM = (

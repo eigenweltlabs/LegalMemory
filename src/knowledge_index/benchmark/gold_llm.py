@@ -126,6 +126,63 @@ def _ground_proposal(
     )
 
 
+def _longest_prefix_in(answer: str, doc_texts: dict[str, str]) -> tuple[int, str | None]:
+    """Largest ``k`` such that ``answer[:k]`` is a substring of some document, and which one.
+
+    A long prefix that matches with a diverging tail means the model reformatted or
+    truncated a real value; a near-zero prefix means the answer is genuinely absent.
+    """
+    best_k, best_doc = 0, None
+    for name, text in doc_texts.items():
+        low, high = 0, len(answer)
+        while low < high:
+            mid = (low + high + 1) // 2
+            if answer[:mid] in text:
+                low = mid
+            else:
+                high = mid - 1
+        if low > best_k:
+            best_k, best_doc = low, name
+    return best_k, best_doc
+
+
+def _diagnose_rejection(
+    proposal: _Proposal, doc_texts: dict[str, str], unparseable: set[str]
+) -> dict:
+    """Explain why a proposal failed the verbatim check, for the ``rejected.jsonl`` log."""
+    answer = _normalize(proposal.answer)
+    if not proposal.query.strip():
+        base = {"reason": "empty_query"}
+    elif len(answer) < 4:
+        base = {"reason": "answer_too_short"}
+    else:
+        prefix, near_doc = _longest_prefix_in(answer, doc_texts)
+        src = proposal.source_document
+        src_unreadable = src.rsplit("/", 1)[-1] in unparseable or src.endswith(
+            (".xlsx", ".pptx", ".pdf")
+        )
+        if src_unreadable and prefix < len(answer):
+            reason = "answer_in_unreadable_file"  # .xlsx/.pptx/.pdf the grounder can't read
+        elif prefix >= 12:
+            reason = "reformatted_or_truncated"  # a long prefix matched; the tail diverged
+        else:
+            reason = "not_in_any_readable_doc"  # essentially absent / composed / hallucinated
+        base = {
+            "reason": reason,
+            "source_hint": src,
+            "source_unreadable": src_unreadable,
+            "matched_prefix_chars": prefix,
+            "answer_chars": len(answer),
+            "nearest_doc": near_doc.rsplit("/", 1)[-1] if near_doc else None,
+        }
+        if prefix >= 8 and near_doc:
+            idx = doc_texts[near_doc].find(answer[:prefix])
+            base["model_answer_tail"] = answer[prefix : prefix + 40]
+            base["doc_actual_text"] = doc_texts[near_doc][idx : idx + prefix + 40]
+    return {"kind": proposal.kind, "leg": proposal.leg, "query": proposal.query,
+            "answer": proposal.answer, **base}
+
+
 def generate_llm_gold(
     corpus_dir: str | Path,
     config: AppConfig,
@@ -162,6 +219,7 @@ def generate_llm_gold(
     seen = {(item["kind"], _normalize(item["query"])) for item in existing}
 
     accepted: list[GoldQuery] = []
+    rejected: list[dict] = []
     stats = {"scenarios": len(scenarios), "proposed": 0, "grounded": 0, "duplicate": 0, "errors": 0}
     for scenario in scenarios:
         doc_texts = {
@@ -172,6 +230,11 @@ def generate_llm_gold(
         }
         if not doc_texts:
             continue
+        unparseable = {
+            path.rsplit("/", 1)[-1]
+            for path in scenario["document_paths"]
+            if path not in doc_texts
+        }
         try:
             result = chat_json(
                 model,
@@ -179,7 +242,9 @@ def generate_llm_gold(
                 system=_SYSTEM,
                 user=_build_user_prompt(scenario, doc_texts, per_scenario),
                 schema=_Proposals,
-                max_output_tokens=1500,
+                # Reasoning models spend part of this budget on hidden reasoning tokens;
+                # 1500 left no room for the JSON payload. Give reasoning + output ample space.
+                max_output_tokens=16000,
             )
         except Exception:  # gateway/schema failure on one scenario must not abort the run
             stats["errors"] += 1
@@ -190,6 +255,11 @@ def generate_llm_gold(
                 proposal, scenario["document_paths"], doc_texts, scenario, model
             )
             if grounded is None:
+                # capture WHY, so no rejected proposal is silently discarded
+                record = _diagnose_rejection(proposal, doc_texts, unparseable)
+                record["scenario_id"] = scenario["scenario_id"]
+                record["matter_ref"] = scenario["matter_ref"]
+                rejected.append(record)
                 continue
             key = (grounded.kind, _normalize(grounded.query))
             if key in seen:
@@ -200,11 +270,23 @@ def generate_llm_gold(
             accepted.append(grounded)
             stats["grounded"] += 1
 
+    from collections import Counter
     from dataclasses import asdict
 
     with gold_path.open("a", encoding="utf-8") as handle:
         for item in accepted:
             handle.write(json.dumps(asdict(item), ensure_ascii=False) + "\n")
+
+    rejected_path = corpus_dir / "rejected.jsonl"
+    if rejected:
+        with rejected_path.open("a", encoding="utf-8") as handle:
+            for record in rejected:
+                handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+
     stats["gold_path"] = str(gold_path)
     stats["appended"] = len(accepted)
+    stats["rejected"] = len(rejected)
+    stats["reject_reasons"] = dict(Counter(record["reason"] for record in rejected))
+    if rejected:
+        stats["rejected_path"] = str(rejected_path)
     return stats

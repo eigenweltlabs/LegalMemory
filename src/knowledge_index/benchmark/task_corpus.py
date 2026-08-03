@@ -3,20 +3,23 @@
 The source dataset (github.com/harveyai/harvey-labs, MIT) ships one folder per task with a
 ``task.json`` (title, instructions, PASS/FAIL criteria) and a ``documents/`` bundle
 of real ``.docx/.xlsx/.eml`` files. This module reads a local checkout and packs
-those bundles into a German-firm ``mock_dms/`` tree with the same shape the existing
-fixture generator produces — ``mock_dms/`` + ``acl-by-path.json`` + a manifest +
+those bundles into a ``mock_dms/`` tree with the same envelope the existing fixture
+generator produces — ``mock_dms/`` + ``acl-by-path.json`` + a manifest +
 ``scenario.json`` — so the standard ``local_fs`` connector ingests it unchanged.
 
-Mapping to the ontology:
-- **matter** = one *instrument* (e.g. "Account Control Agreement"), aggregating all
-  of its task-type folders and scenarios. The draft / redline / subsequent-redline
+Two layouts (``build_task_corpus(..., layout=...)``):
+- **flat** — ``matter = instrument`` (e.g. "Account Control Agreement") with a subfolder
+  per scenario, one ACL group per practice area. The draft / redline / subsequent-turn
   task types on one instrument are its version-chain material.
-- **ACL group** = one per practice area, so cross-area retrieval exercises the
-  ethical walls; documents from other matters are the retrieval distractors.
-- each scenario's ``task.json`` is preserved (title, instructions, criteria) in
-  ``scenarios.jsonl`` for gold-label derivation and the phase-2 rubric harness.
+- **firm** — a realistic ``Clients/<client>/<matter>/<workstream>/`` tree: one scenario =
+  one matter (named by counterparty), clustered by the represented client with a
+  per-client ACL. Client/counterparty naming is a pluggable :data:`PartyResolver`
+  (deterministic filenames by default; an LLM resolver for canonical legal names).
 
-Pure filesystem work: no database, no models, deterministic given ``seed``.
+Each scenario's ``task.json`` is preserved (title, instructions, criteria) in
+``scenarios.jsonl`` for gold-label derivation and the rubric harness. The deterministic
+paths are pure filesystem work (no database, no models, reproducible given ``seed``);
+only an injected LLM resolver touches the gateway.
 """
 
 from __future__ import annotations
@@ -24,9 +27,18 @@ from __future__ import annotations
 import hashlib
 import json
 import random
+import re
 import shutil
+from collections import Counter
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
+
+from knowledge_index.benchmark import noise
+
+#: Resolve each selected scenario's ``(client, counterparty)`` display names. The
+#: default is the deterministic filename guess; an LLM resolver can be injected instead.
+PartyResolver = Callable[[list["_Scenario"]], list[tuple[str, str]]]
 
 # Task-type suffixes, longest first so the greedy strip is unambiguous.
 _TASK_TYPE_SUFFIXES: tuple[str, ...] = (
@@ -57,6 +69,8 @@ class ScenarioRecord:
     instructions: str
     criteria: list[dict]
     document_paths: list[str]  # relative to mock_dms, posix
+    client: str = ""  # firm layout: the party the firm represents
+    counterparty: str = ""  # firm layout: the other side
 
 
 @dataclass
@@ -66,6 +80,7 @@ class _Scenario:
     area: str  # posix path under tasks/, e.g. "contracts/banking"
     instrument: str
     task_type: str
+    key: str = ""  # stable id = task path under tasks/, joins a structure manifest
 
 
 def _strip_task_type(name: str) -> tuple[str, str]:
@@ -118,6 +133,7 @@ def _discover_scenarios(source: Path, areas: list[str]) -> list[_Scenario]:
                     area=area,
                     instrument=f"{area}/{instrument}",
                     task_type=task_type,
+                    key=task_json.parent.relative_to(tasks_root).as_posix(),
                 )
             )
     return scenarios
@@ -125,6 +141,337 @@ def _discover_scenarios(source: Path, areas: list[str]) -> list[_Scenario]:
 
 def _grant(principal: str) -> dict:
     return {"principal": principal, "principal_kind": "group", "access": "allow"}
+
+
+# --- firm layout: realistic Client / Matter / Workstream tree (deterministic v1) ------
+
+# leading filename tokens that are document-type words, not party names
+_GENERIC_TOKENS = {
+    "isda",
+    "csa",
+    "aca",
+    "repo",
+    "credit",
+    "relationship",
+    "counterparty",
+    "instruction",
+    "client",
+    "dodd",
+    "frank",
+    "standard",
+    "form",
+    "draft",
+    "cover",
+    "closing",
+    "account",
+    "financial",
+    "deal",
+    "master",
+    "schedule",
+    "confirmation",
+    "term",
+    "sheet",
+    "email",
+    "memo",
+    "documentation",
+    "ibor",
+    "precedent",
+    "outside",
+    "2002",
+    "2020",
+    "2024",
+    "2025",
+}
+
+_WORKSTREAM_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("Drafts", ("draft", "markup", "turn", "redline")),
+    ("Precedents", ("template", "-form", "precedent", "standard-form")),
+    (
+        "Reference",
+        (
+            "playbook",
+            "term-sheet",
+            "memo",
+            "requirement",
+            "parameter",
+            "overview",
+            "summary",
+            "checklist",
+            "ratings",
+            "statement",
+            "financials",
+            "structure",
+        ),
+    ),
+    ("Executed", ("executed", "signed", "-final")),
+)
+
+
+def _classify_workstream(name: str) -> str:
+    n = name.lower()
+    if n.endswith(".eml"):
+        return "Correspondence"
+    for folder, keywords in _WORKSTREAM_RULES:
+        if any(k in n for k in keywords):
+            return folder
+    if n.endswith((".xlsx", ".csv")) or "schedule" in n or "account" in n:
+        return "Schedules"
+    return "Documents"
+
+
+def _party_stem(filename: str) -> str | None:
+    token = filename.rsplit(".", 1)[0].split("-")[0].lower()
+    if token in _GENERIC_TOKENS or not token.isalpha() or len(token) < 3:
+        return None
+    return token
+
+
+def _slug(name: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "unassigned"
+
+
+def _firm_parties(filenames: list[str]) -> tuple[str, str]:
+    """Deterministically guess (client, counterparty) from document filenames.
+
+    Client = owner of the *playbook* (a firm keeps its client's playbook), else the party
+    prefixing the most documents. Counterparty = owner of a *draft* (they circulated it),
+    else the next most common party. Names are the filename stem, title-cased — good enough
+    for a first cut; an LLM pass can resolve full legal names + merge variants later.
+    """
+    stems = [s for s in (_party_stem(n) for n in filenames) if s]
+    if not stems:
+        return ("Unassigned", "")
+    counts = Counter(stems)
+    playbook = next((_party_stem(n) for n in filenames if "playbook" in n.lower()), None)
+    client = playbook if playbook in counts else counts.most_common(1)[0][0]
+    draft = next(
+        (
+            _party_stem(n)
+            for n in filenames
+            if any(w in n.lower() for w in ("draft", "markup", "turn"))
+            and _party_stem(n) not in (None, client)
+        ),
+        None,
+    )
+    counterparty = draft or next((s for s, _ in counts.most_common() if s != client), "")
+    return (_title_case(client), _title_case(counterparty) if counterparty else "")
+
+
+def _deterministic_parties(scenarios: list[_Scenario]) -> list[tuple[str, str]]:
+    """The free default :data:`PartyResolver`: a filename-stem guess per scenario."""
+    return [_firm_parties([d.name for d in s.documents]) for s in scenarios]
+
+
+def _norm_client(name: str) -> str:
+    return (name or "Unassigned").replace("/", "-").strip() or "Unassigned"
+
+
+def _norm_title(title: str) -> str:
+    # matter titles become folder names; a '/' would spawn a spurious subfolder
+    return (title or "").replace("/", "-").strip()
+
+
+def _auto_matter_no(client: str, seq: dict[str, int]) -> str:
+    slug = _slug(client)
+    seq[slug] = seq.get(slug, 0) + 1
+    return f"{slug[:3].upper()}-{seq[slug]:03d}"
+
+
+def _auto_matter_title(scenario: _Scenario, counterparty: str) -> str:
+    instrument = _title_case(scenario.instrument.split("/")[-1])
+    return f"{instrument} — {counterparty}" if counterparty else instrument
+
+
+def _plan_matters(
+    selected: list[_Scenario], resolve_parties: PartyResolver, structure: dict | None
+) -> list[dict]:
+    """One ``{client, matter_no, counterparty, matter_title}`` per selected scenario.
+
+    A ``structure`` manifest (keyed by ``scenario.key``) is authoritative — its curated
+    client / matter number / counterparty / title are used verbatim, so the firm is a
+    committed artifact, not build-time inference. Scenarios missing from the manifest, or
+    the no-manifest path, fall back to ``resolve_parties`` + auto numbering/titles.
+    """
+    seq: dict[str, int] = {}
+    if structure is not None:
+        by_key = structure.get("matters", {})
+        plans: list[dict] = []
+        for scenario in selected:
+            record = by_key.get(scenario.key)
+            if record:
+                client = _norm_client(record.get("client"))
+                counterparty = _norm_title(record.get("counterparty"))
+                plans.append(
+                    {
+                        "client": client,
+                        "matter_no": record.get("matter_no") or _auto_matter_no(client, seq),
+                        "counterparty": counterparty,
+                        "matter_title": _norm_title(record.get("matter_title"))
+                        or _auto_matter_title(scenario, counterparty),
+                    }
+                )
+            else:
+                client, counterparty = _firm_parties([d.name for d in scenario.documents])
+                client = _norm_client(client)
+                counterparty = _norm_title(counterparty)
+                plans.append(
+                    {
+                        "client": client,
+                        "matter_no": _auto_matter_no(client, seq),
+                        "counterparty": counterparty,
+                        "matter_title": _auto_matter_title(scenario, counterparty),
+                    }
+                )
+        return plans
+
+    parties = resolve_parties(selected)
+    if len(parties) != len(selected):
+        raise ValueError(
+            f"party resolver returned {len(parties)} names for {len(selected)} scenarios"
+        )
+    plans = []
+    for scenario, (client, counterparty) in zip(selected, parties, strict=True):
+        client = _norm_client(client)
+        counterparty = _norm_title(counterparty)
+        plans.append(
+            {
+                "client": client,
+                "matter_no": _auto_matter_no(client, seq),
+                "counterparty": counterparty,
+                "matter_title": _auto_matter_title(scenario, counterparty),
+            }
+        )
+    return plans
+
+
+def _build_firm_corpus(
+    output: Path,
+    source: Path,
+    scenarios: list[_Scenario],
+    *,
+    matters: int,
+    docs_target: int,
+    seed: int,
+    areas: list[str],
+    resolve_parties: PartyResolver = _deterministic_parties,
+    structure: dict | None = None,
+    noise_config: noise.NoiseConfig | None = None,
+) -> dict:
+    """Pack scenarios as a realistic firm DMS: Clients / Matter / Workstream (one
+    scenario = one matter), clustered by the represented client with a per-client ACL.
+
+    Runs in three stages so matter identity is a single pluggable step: **select** the
+    scenarios that fit under the matter cap / document target, **plan** each one's
+    ``{client, matter_no, counterparty, matter_title}`` (a curated ``structure`` manifest
+    if given, else ``resolve_parties`` + auto numbering), then **pack** the tree.
+
+    ``noise_config`` opts into realistic DMS mess (flat/renamed folders, extra document
+    versions, junk); it is deterministic per matter and never moves a gold path across a
+    wall (see :mod:`~knowledge_index.benchmark.noise`).
+    """
+    source_root = output / "mock_dms"
+    source_root.mkdir(parents=True)
+    ordered = sorted(scenarios, key=lambda s: (s.instrument, s.task_type, str(s.task_json)))
+    random.Random(seed).shuffle(ordered)
+
+    # 1) select — scenarios stay atomic (a whole working set) up to the caps
+    selected: list[_Scenario] = []
+    doc_budget = 0
+    for scenario in ordered:
+        if len(selected) >= matters or doc_budget >= docs_target:
+            break
+        selected.append(scenario)
+        doc_budget += len(scenario.documents)
+
+    # 2) plan each matter's identity (curated manifest, or resolver + auto numbering)
+    plans = _plan_matters(selected, resolve_parties, structure)
+
+    # 3) pack the tree
+    records: list[ScenarioRecord] = []
+    acl_by_path: dict[str, list[dict]] = {}
+    doc_count = 0
+    noise_stats = {"flat": 0, "alt": 0, "junk": 0}
+
+    for scenario, plan in zip(selected, plans, strict=True):
+        task = json.loads(scenario.task_json.read_text(encoding="utf-8"))
+        client = plan["client"]
+        counterparty = plan["counterparty"]
+        matter_no = plan["matter_no"]
+        matter_title = plan["matter_title"]
+        principal = f"group:{_slug(client)}"
+        matter_dir = source_root / "Clients" / client / f"{matter_no}  {matter_title}"
+
+        style = noise.matter_style(noise_config, seed, matter_no) if noise_config else "standard"
+        if noise_config and style in ("flat", "alt"):
+            noise_stats[style] += 1
+
+        document_paths: list[str] = []
+        for document in scenario.documents:
+            workstream = _classify_workstream(document.name)
+            subfolder = noise.place(workstream, style) if noise_config else workstream
+            target_dir = matter_dir / subfolder if subfolder else matter_dir
+            destination = target_dir / document.name
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(document, destination)
+            relative = destination.relative_to(source_root).as_posix()
+            document_paths.append(relative)
+            acl_by_path[relative] = [_grant(principal)]
+            doc_count += 1
+
+        # junk: walled (no wall leak) but not a document — quarantined at extraction
+        if noise_config and noise.wants(noise_config.junk_rate, seed, matter_no, "junk"):
+            for junk in noise.scatter_junk(matter_dir, seed, matter_no):
+                acl_by_path[junk.relative_to(source_root).as_posix()] = [_grant(principal)]
+                noise_stats["junk"] += 1
+
+        records.append(
+            ScenarioRecord(
+                scenario_id=f"{matter_no}/{scenario.task_type}-{scenario.task_json.parent.name}",
+                matter_ref=matter_no,
+                matter_title=matter_title,
+                practice_area=scenario.area,
+                principal=principal,
+                instrument=scenario.instrument,
+                task_type=scenario.task_type,
+                title=task.get("title", ""),
+                instructions=task.get("instructions", ""),
+                criteria=task.get("criteria", []),
+                document_paths=document_paths,
+                client=client,
+                counterparty=counterparty,
+            )
+        )
+
+    (output / "scenarios.jsonl").write_text(
+        "".join(json.dumps(asdict(r), ensure_ascii=False) + "\n" for r in records),
+        encoding="utf-8",
+    )
+    (output / "acl-by-path.json").write_text(
+        json.dumps(acl_by_path, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    clients = sorted({r.client for r in records})
+    summary = {
+        "seed": seed,
+        "source": str(source),
+        "areas": areas or ["<all>"],
+        "layout": "firm",
+        "source_root": str(source_root),
+        "scenarios_manifest": str(output / "scenarios.jsonl"),
+        "acl_by_path": str(output / "acl-by-path.json"),
+        "clients": len(clients),
+        "matters": len(records),
+        "scenarios": len(records),
+        "documents": doc_count,
+        "client_names": clients,
+        "principals": sorted({r.principal for r in records}),
+        "content_hash": _corpus_hash(records),
+    }
+    if noise_config is not None:
+        summary["noise"] = noise_stats
+    (output / "scenario.json").write_text(
+        json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    return summary
 
 
 def build_task_corpus(
@@ -135,21 +482,58 @@ def build_task_corpus(
     matters: int = 50,
     docs_target: int = 1000,
     seed: int = 42,
+    layout: str = "flat",
+    resolve_parties: PartyResolver | None = None,
+    structure: str | Path | dict | None = None,
+    noise_level: str | None = None,
 ) -> dict:
     """Pack a task-set checkout into ``output/mock_dms`` and its manifests.
 
-    Selection stops when either the matter cap or the document target is reached,
-    whichever comes first; the actual counts are reported in ``scenario.json``.
+    ``layout``: ``"flat"`` (matter = instrument, scenario subfolders) or ``"firm"`` (a
+    realistic Client / Matter / Workstream tree, one scenario = one matter, per-client
+    ACL). Selection stops at the matter cap or the document target, whichever comes first.
+
+    Firm layout, matter identity (choose one):
+    - ``structure`` — a curated manifest (path or dict) mapping ``scenario.key`` to
+      ``{client, matter_no, counterparty, matter_title}``; applied verbatim so the firm is
+      a committed, reproducible artifact. This is the recommended path.
+    - ``resolve_parties`` — name ``(client, counterparty)`` per matter at build time
+      (deterministic filename guess by default, or an LLM resolver). Used only where a
+      manifest is absent.
+
+    ``noise_level`` (firm layout, ``"light"``/``"heavy"``) opts into realistic DMS mess —
+    flat/renamed folders, extra document versions, junk — deterministically and gold-safe.
     """
     output = Path(output).resolve()
     source = Path(source).expanduser().resolve(strict=True)
     if output.exists() and any(output.iterdir()):
         raise ValueError(f"benchmark output must be empty: {output}")
     areas = [a.strip() for a in (areas or []) if a.strip()]
+    if isinstance(structure, (str, Path)):
+        structure = json.loads(Path(structure).expanduser().read_text(encoding="utf-8"))
+    noise_config = noise.resolve(noise_level)
 
     scenarios = _discover_scenarios(source, areas)
     if not scenarios:
         raise ValueError("no scenarios found for the requested areas")
+
+    if layout == "firm":
+        return _build_firm_corpus(
+            output,
+            source,
+            scenarios,
+            matters=matters,
+            docs_target=docs_target,
+            seed=seed,
+            areas=areas,
+            resolve_parties=resolve_parties or _deterministic_parties,
+            structure=structure,
+            noise_config=noise_config,
+        )
+    if layout != "flat":
+        raise ValueError(f"unknown layout {layout!r}; use 'flat' or 'firm'")
+    if resolve_parties is not None or structure is not None or noise_config is not None:
+        raise ValueError("resolve_parties/structure/noise apply only to the firm layout")
 
     # group scenarios into matters by instrument; deterministic order, seeded spread
     by_instrument: dict[str, list[_Scenario]] = {}

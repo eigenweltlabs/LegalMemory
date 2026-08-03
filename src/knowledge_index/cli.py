@@ -27,6 +27,22 @@ def _model_flag(value: str) -> str:
     return value or os.environ.get(DEFAULT_LLM_ENV, "")
 
 
+def _resolve_structure(value: str) -> str:
+    """A firm-structure manifest: an explicit file path, or a committed set by name."""
+    path = Path(value).expanduser()
+    if path.is_file():
+        return str(path)
+    from knowledge_index.benchmark.store import DATA_DIR
+
+    committed = DATA_DIR / f"firm-structure-{value}.json"
+    if committed.is_file():
+        return str(committed)
+    raise SystemExit(
+        f"structure not found: {value!r} (no such file, and no committed "
+        f"firm-structure-{value}.json in the benchmark package)"
+    )
+
+
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(prog="ki", description="Knowledge Index operator CLI")
     root.add_argument(
@@ -164,6 +180,37 @@ def parser() -> argparse.ArgumentParser:
     benchmark.add_argument("--docs-target", type=int, default=1000)
     benchmark.add_argument("--seed", type=int, default=42)
     benchmark.add_argument(
+        "--layout",
+        default="flat",
+        choices=["flat", "firm"],
+        help="flat (matter=instrument) or firm (realistic Client/Matter/Workstream)",
+    )
+    benchmark.add_argument(
+        "--firm-naming",
+        default="deterministic",
+        choices=["deterministic", "llm"],
+        help="firm layout: client/counterparty from filenames (free) or an LLM "
+        "(canonical legal names; needs the gateway)",
+    )
+    benchmark.add_argument(
+        "--firm-naming-model",
+        default="",
+        help="firm-naming llm: gateway model (default: KI_LLM_MODEL)",
+    )
+    benchmark.add_argument(
+        "--structure",
+        help="firm layout: a curated structure manifest (JSON) mapping scenarios to "
+        "client/matter/counterparty. Applied verbatim; supersedes --firm-naming. "
+        "Use the committed firm structure via its name (e.g. contracts-banking).",
+    )
+    benchmark.add_argument(
+        "--noise",
+        default="none",
+        choices=["none", "light", "heavy"],
+        help="firm layout: inject realistic DMS mess (flat matters, renamed folders, "
+        "junk). Deterministic and gold-safe. Default: none (clean).",
+    )
+    benchmark.add_argument(
         "--gold",
         default="",
         help="comma-separated gold kinds to generate: working_set, factoid, qa "
@@ -266,6 +313,20 @@ def main() -> None:
         # packs the corpus (no database); gold is opt-in via --gold
         from knowledge_index.benchmark import build_task_corpus
 
+        if (args.firm_naming == "llm" or args.structure or args.noise != "none") and (
+            args.layout != "firm"
+        ):
+            raise SystemExit("--firm-naming llm / --structure / --noise require --layout firm")
+        structure = _resolve_structure(args.structure) if args.structure else None
+        resolve_parties = None
+        if args.layout == "firm" and args.firm_naming == "llm" and not structure:
+            # LLM client/counterparty resolution — needs the model gateway
+            from knowledge_index.benchmark.firm_parties_llm import make_llm_party_resolver
+
+            config = ConfigStore(args.config).get()
+            resolve_parties = make_llm_party_resolver(
+                config, model=_model_flag(args.firm_naming_model)
+            )
         summary = build_task_corpus(
             args.output,
             args.source,
@@ -273,6 +334,10 @@ def main() -> None:
             matters=args.matters,
             docs_target=args.docs_target,
             seed=args.seed,
+            layout=args.layout,
+            resolve_parties=resolve_parties,
+            structure=structure,
+            noise_level=args.noise,
         )
         requested = [k.strip() for k in args.gold.split(",") if k.strip()]
         unknown = [k for k in requested if k not in ("working_set", "factoid", "qa")]

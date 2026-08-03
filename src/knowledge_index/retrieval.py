@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import mimetypes
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from pydantic import BaseModel
@@ -809,6 +809,38 @@ class RetrievalService:
             "citations": [citation],
         }
 
+    def _resolve_practice_area(self, filters: SearchFilters) -> SearchFilters:
+        """Translate a practice_area filter into the matter-id set it covers.
+
+        practice_area lives on Matter, not on the chunk, so it cannot be a term on the
+        index. We resolve it here with the same SUBTREE semantics as list_matters (a
+        parent area matches its children) and hand the backend a matter-id filter. The
+        backend's ACL scope still applies on top, so this set only narrows results — it is
+        not an authorization boundary. An empty match is preserved, not dropped: a
+        practice_area that covers no matter yields no hits rather than silently widening to
+        every matter.
+        """
+        if not filters.practice_area:
+            return filters
+        try:
+            area_scope = self.config.ontology_facet("area_of_law")
+        except ValueError:
+            area_scope = None
+        matched: list[str] = []
+        if area_scope is not None:
+            rows = self.session.execute(
+                select(Matter.id, Matter.practice_area).where(Matter.practice_area.isnot(None))
+            ).all()
+            matched = [
+                matter_id
+                for matter_id, area in rows
+                if filters.practice_area in area_scope.ancestors(area)
+            ]
+        if filters.matter_ids is not None:
+            allowed = set(filters.matter_ids)
+            matched = [matter_id for matter_id in matched if matter_id in allowed]
+        return replace(filters, practice_area=None, matter_ids=matched)
+
     def _search_opensearch(
         self,
         *,
@@ -824,6 +856,10 @@ class RetrievalService:
         decays by version status (supersession), not by age."""
 
         from knowledge_index.search_backend import OpenSearchIndex
+
+        # practice_area is a Matter attribute, not a chunk field; translate it into a
+        # matter-id set the backend can filter on (SUBTREE semantics, same as list_matters).
+        filters = self._resolve_practice_area(filters)
 
         retrieval = self.config.retrieval
         scope = AccessService(self.session).compile_scope(

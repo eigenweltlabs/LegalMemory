@@ -225,6 +225,14 @@ def test_create_matter_tool_is_get_or_create_and_commits(
     fallback = json.loads(build_tools(set())["create_matter"].handler({"title": "Neu"}))
     assert fallback["created"] is True
     assert fallback["reference_numbers"] == ["UNASSIGNED-FALKE"]
+    # a placeholder-ref creation is a triage pile, not a real case file
+    with factory() as session:
+        placeholder = next(
+            matter
+            for matter in session.scalars(select(Matter))
+            if matter.reference_numbers == ["UNASSIGNED-FALKE"]
+        )
+        assert placeholder.status == "unassigned"
 
 
 def test_classify_matter_reuses_agent_created_matter(
@@ -353,3 +361,84 @@ def test_unprojected_source_does_not_create_project_per_matter(
         matter = session.scalar(select(Matter))
         assert matter is not None
         assert matter.project_id is None
+
+
+def test_null_ref_fallback_is_per_folder_honestly_titled_and_flagged(
+    factory: sessionmaker[Session], monkeypatch
+) -> None:
+    """When the agent finds NO reference anywhere, the holding matter is keyed to
+    the file's OWN folder (strays of different folders never converge), names
+    itself after the folder instead of a member document, and carries status
+    "unassigned" so the UI can surface it as a triage pile (audit §4.3)."""
+
+    def classify(path: str) -> None:
+        with factory() as session:
+            source = session.scalars(select(Source)).first()
+            if source is None:
+                source = Source(kind="local_fs", display_name="fx", config={"root": "/x"})
+                session.add(source)
+                session.flush()
+            content_hash = f"{abs(hash(path)):064x}"[:64]
+            session.add(Blob(content_hash=content_hash, size_bytes=4))
+            session.flush()
+            source_object = SourceObject(
+                source_id=source.id,
+                external_id=path,
+                path=path,
+                name=path.rsplit("/", 1)[-1],
+                content_hash=content_hash,
+            )
+            session.add(source_object)
+            session.add(
+                Artifact(
+                    content_hash=content_hash,
+                    producer="test",
+                    producer_version="1",
+                    kind="structured_json",
+                    payload={"text": "no reference anywhere"},
+                )
+            )
+            session.flush()
+            state = ProcessingState(
+                source_object_id=source_object.id,
+                stage="classify_matter",
+                status="running",
+            )
+            session.add(state)
+            session.flush()
+            monkeypatch.setattr(
+                runner_module,
+                "chat_agent",
+                lambda *a, **k: MatterClassification(
+                    matter_id=None,
+                    matter_ref=None,
+                    matter_title="Should never become the bucket title",
+                    logical_title="Scan",
+                    confidence=0.2,
+                    reasoning="No reference found.",
+                ),
+            )
+            PipelineRunner(factory, AppConfig())._classify_matter(session, state)
+            session.commit()
+
+    classify("Clients/Ridgewell/old-scans/scan-1.pdf")
+    classify("Clients/Kensington/inbox/fax.pdf")
+    classify("Clients/Ridgewell/old-scans/scan-2.pdf")
+
+    with factory() as session:
+        matters = session.scalars(select(Matter)).all()
+        # different folders -> different holding matters; same folder converges
+        assert len(matters) == 2
+        by_ref = {matter.reference_numbers[0]: matter for matter in matters}
+        ridgewell = by_ref["UNASSIGNED-CLIENTS-RIDGEWELL-OLD-SCANS"]
+        kensington = by_ref["UNASSIGNED-CLIENTS-KENSINGTON-INBOX"]
+        # honest, folder-derived titles — never a member document's title
+        assert ridgewell.title == "Unassigned — Clients/Ridgewell/old-scans"
+        assert kensington.title == "Unassigned — Clients/Kensington/inbox"
+        # flagged for triage instead of passing as a normal matter
+        assert ridgewell.status == "unassigned"
+        assert kensington.status == "unassigned"
+        assignments = session.scalars(select(runner_module.MatterAssignment)).all()
+        assert {
+            assignment.matter_id for assignment in assignments
+        } == {ridgewell.id, kensington.id}

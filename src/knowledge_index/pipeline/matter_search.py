@@ -21,11 +21,14 @@ from sqlalchemy.orm import Session, sessionmaker
 from knowledge_index.config import AppConfig
 from knowledge_index.db.models import (
     Artifact,
+    Client,
     Document,
     DocumentVersion,
     DocumentVersionSource,
+    EntityIdentifier,
     Matter,
     MatterAssignment,
+    Party,
     Project,
     SourceObject,
 )
@@ -396,6 +399,7 @@ def get_or_create_matter(
     reference_number: str,
     title: str,
     provenance: dict | None = None,
+    status: str = "unknown",
 ) -> dict:
     """Get-or-create a matter by (project, reference number), committed immediately.
 
@@ -431,7 +435,7 @@ def get_or_create_matter(
             project_id=project_id,
             reference_numbers=[reference],
             title=title.strip(),
-            status="unknown",
+            status=status,
             imported=False,
             provenance=provenance,
         )
@@ -475,13 +479,16 @@ def classification_tools(
 
     def run_create(args: dict) -> str:
         assert session_factory is not None
+        requested_reference = str(args.get("reference_number") or "").strip()
         result = get_or_create_matter(
             session_factory,
             project_id=project_id,
-            reference_number=str(args.get("reference_number") or "").strip()
-            or (fallback_reference or ""),
+            reference_number=requested_reference or (fallback_reference or ""),
             title=str(args.get("title", "")),
             provenance=provenance,
+            # a matter created under the folder-derived placeholder is a triage
+            # pile, not a real case file — mark it so the UI can surface it
+            status="unknown" if requested_reference else "unassigned",
         )
         if "id" in result:
             seen.add(result["id"])
@@ -564,3 +571,114 @@ def classification_tools(
             )
         )
     return tools
+
+
+def search_entities(session: Session, config: AppConfig, query: str, *, limit: int = 8) -> list[dict]:
+    """Rank the firm's known parties/clients against a free-text name — the entity
+    analogue of search_matters, and semantic-first for the same reason.
+
+    Primary signal is SEMANTIC: embed the query, take the nearest already-indexed
+    chunks, and surface the entities already resolved on those documents. A party is
+    found by the meaning of where it appears, not by string overlap — so 'Nordwind
+    Energie GmbH' and 'Nordwind Energie GmbH, Hamburg, HRB 45678' reach the same
+    documents and therefore the same candidate, in any language, with no
+    normalization rules. Lexical name and identifier matches are boosts, not the whole
+    search. Skips the semantic leg cleanly on a cold index."""
+    query = (query or "").strip()
+    if not query:
+        return []
+    scored: dict[tuple[str, str], float] = {}  # (entity_type, id) -> score
+
+    # Semantic: nearest already-indexed chunks -> their documents -> the entities
+    # already resolved on those documents.
+    try:
+        from knowledge_index.search_backend import OpenSearchIndex
+
+        vector = embed_text(query, config)
+        for rank, hit in enumerate(OpenSearchIndex(config).matter_hits_by_vector(vector, size=40)):
+            document_id = (hit.get("_source") or {}).get("document_id")
+            document = session.get(Document, document_id) if document_id else None
+            for mention in (document.parties or []) if document else []:
+                entity_id = mention.get("party_id")
+                entity_type = mention.get("entity_type")
+                if entity_id and entity_type:
+                    key = (entity_type, entity_id)
+                    scored[key] = max(scored.get(key, 0.0), 1.0 / (10 + rank))
+    except Exception:
+        pass
+
+    # Lexical: entity name contains the query (a boost).
+    for party in session.scalars(select(Party).where(Party.name.ilike(f"%{query}%")).limit(30)):
+        scored[("party", party.id)] = scored.get(("party", party.id), 0.0) + 0.5
+    for client in session.scalars(select(Client).where(Client.name.ilike(f"%{query}%")).limit(30)):
+        scored[("client", client.id)] = scored.get(("client", client.id), 0.0) + 0.5
+
+    # Identifier: shared-identifier match (the entity analogue of the matter ref leg).
+    for ident in session.scalars(
+        select(EntityIdentifier).where(EntityIdentifier.value.ilike(f"%{query}%")).limit(30)
+    ):
+        key = (ident.entity_type, ident.entity_id)
+        scored[key] = scored.get(key, 0.0) + 1.0
+
+    ranked = sorted(scored.items(), key=lambda item: item[1], reverse=True)[:limit]
+    results: list[dict] = []
+    for (entity_type, entity_id), score in ranked:
+        entity = session.get(Client if entity_type == "client" else Party, entity_id)
+        if entity is None:
+            continue
+        results.append(
+            {
+                "id": entity.id,
+                "entity_type": entity_type,
+                "name": entity.name,
+                "kind": entity.kind,
+                "identifiers": entity.identifiers or {},
+                "match_score": round(score, 4),
+            }
+        )
+    return results
+
+
+def party_resolution_tools(
+    session: Session, config: AppConfig, seen_ids: set[str]
+) -> list[AgentTool]:
+    """The tool the extraction agent uses to resolve a party to a firm-wide entity:
+    search the firm's known parties/clients (semantic-first, exactly like
+    search_matters), then the agent links (reuses an id) or creates a new one.
+
+    ``seen_ids`` accumulates every id the agent is shown, so the stage can reject an
+    existing_id the agent never actually saw (the "name alone is not enough" guard).
+    """
+
+    def _search(args: dict) -> str:
+        needle = str(args.get("query", "")).strip()
+        results = search_entities(session, config, needle) if needle else []
+        for row in results:
+            seen_ids.add(row["id"])
+        return json.dumps(results, ensure_ascii=False)
+
+    return [
+        AgentTool(
+            name="search_entities",
+            description=(
+                "Search the firm's already-known parties and clients. Ranks by semantic "
+                "similarity of where entities appear, plus name and identifier matches. "
+                "Returns candidates with id, entity_type (party|client), name, kind and "
+                "identifiers. Call it before deciding a party is new: reuse a candidate's "
+                "id (as existing_id) ONLY when it is genuinely the same real-world entity "
+                "— a matching name alone is not enough, because different companies share "
+                "names."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Party name or identifier to search for.",
+                    }
+                },
+                "required": ["query"],
+            },
+            handler=_search,
+        )
+    ]

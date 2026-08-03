@@ -345,6 +345,9 @@ class Matter(TimestampMixin, Base):
     practice_area: Mapped[str | None] = mapped_column(String(50))
     matter_kind: Mapped[str | None] = mapped_column(String(50))  # ontology node id
     status: Mapped[str] = mapped_column(String(20), default="unknown")
+    # DEFERRED by design (spec O6): filled by practice-management import (or a future
+    # email-author aggregation), never model-guessed from document content — naming
+    # the wrong lawyer as responsible is worse than an empty field.
     responsible: Mapped[list] = mapped_column(JSONVariant, default=list)
     time_range: Mapped[dict | None] = mapped_column(JSONVariant)  # {"from": iso, "to": iso}
     imported: Mapped[bool] = mapped_column(
@@ -844,6 +847,17 @@ class Chunk(Base):
     version_status: Mapped[str | None] = mapped_column(String(20))
     language: Mapped[str | None] = mapped_column(String(10))
     doc_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # denormalized from Document.identifiers; feeds the OpenSearch
+    # identifiers/identifiers_text fields (exact + fuzzy identifier legs). A real
+    # column so it survives a resync built from DB rows — previously this was a
+    # transient Python attribute the index stage set that only reached OpenSearch
+    # via getattr and was never persisted.
+    identifiers: Mapped[list] = mapped_column(JSONVariant, default=list)
+    # denormalized from Document.parties; feeds the OpenSearch `parties` keyword
+    # field (F4 party filter). Holds both each party's resolved party_id and its
+    # canonical name, so a caller may filter by either. A real column for the same
+    # resync-survival reason as identifiers above.
+    parties: Mapped[list] = mapped_column(JSONVariant, default=list)
     allowed_principals: Mapped[list] = mapped_column(JSONVariant, default=list)
     denied_principals: Mapped[list] = mapped_column(JSONVariant, default=list)
     access_version: Mapped[int] = mapped_column(Integer, default=1)

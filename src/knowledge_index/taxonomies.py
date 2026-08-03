@@ -9,136 +9,6 @@ tables with a firm namespace prefix).
 from enum import StrEnum
 
 
-class PracticeArea(StrEnum):
-    CORPORATE_MA = "corporate_ma"
-    COMMERCIAL = "commercial"
-    LABOR = "labor"
-    REAL_ESTATE = "real_estate"
-    LITIGATION = "litigation"
-    IP_IT = "ip_it"
-    TAX = "tax"
-    BANKING_FINANCE = "banking_finance"
-    INSOLVENCY = "insolvency"
-    PUBLIC = "public"
-    CRIMINAL = "criminal"
-    FAMILY_INHERITANCE = "family_inheritance"
-    OTHER = "other"
-
-
-class DocType(StrEnum):
-    # contract
-    PURCHASE_AGREEMENT = "purchase_agreement"
-    SHARE_PURCHASE_AGREEMENT = "share_purchase_agreement"
-    LEASE_AGREEMENT = "lease_agreement"
-    EMPLOYMENT_AGREEMENT = "employment_agreement"
-    MANAGING_DIRECTOR_AGREEMENT = "managing_director_agreement"
-    NDA = "nda"
-    ARTICLES_OF_ASSOCIATION = "articles_of_association"
-    LOAN_AGREEMENT = "loan_agreement"
-    LICENSE_AGREEMENT = "license_agreement"
-    DATA_PROCESSING_AGREEMENT = "data_processing_agreement"
-    AMENDMENT_AGREEMENT = "amendment_agreement"
-    OTHER_CONTRACT = "other_contract"
-    # pleading
-    STATEMENT_OF_CLAIM = "statement_of_claim"
-    STATEMENT_OF_DEFENSE = "statement_of_defense"
-    APPEAL_BRIEF = "appeal_brief"
-    OTHER_PLEADING = "other_pleading"
-    MOTION = "motion"
-    # court
-    JUDGMENT = "judgment"
-    COURT_ORDER = "court_order"
-    COURT_DIRECTIVE = "court_directive"
-    HEARING_MINUTES = "hearing_minutes"
-    # correspondence
-    EMAIL = "email"
-    LETTER = "letter"
-    SECURE_MAILBOX_MESSAGE = "secure_mailbox_message"
-    CLIENT_MEMO = "client_memo"
-    # internal
-    INTERNAL_NOTE = "internal_note"
-    LEGAL_OPINION = "legal_opinion"
-    RESEARCH_MEMO = "research_memo"
-    DUE_DILIGENCE_REPORT = "due_diligence_report"
-    CHECKLIST = "checklist"
-    NOTE = "note"
-    # evidence
-    COMMERCIAL_REGISTER_EXTRACT = "commercial_register_extract"
-    LAND_REGISTER_EXTRACT = "land_register_extract"
-    POWER_OF_ATTORNEY = "power_of_attorney"
-    INVOICE = "invoice"
-    EXTERNAL_EXPERT_REPORT = "external_expert_report"
-    OTHER_ANNEX = "other_annex"
-    # administration
-    FEE_AGREEMENT = "fee_agreement"
-    ENGAGEMENT_AGREEMENT = "engagement_agreement"
-    DEADLINE_NOTE = "deadline_note"
-    OTHER_ADMIN = "other_admin"
-
-
-DOC_TYPE_GROUPS: dict[str, list[DocType]] = {
-    "contract": [
-        DocType.PURCHASE_AGREEMENT,
-        DocType.SHARE_PURCHASE_AGREEMENT,
-        DocType.LEASE_AGREEMENT,
-        DocType.EMPLOYMENT_AGREEMENT,
-        DocType.MANAGING_DIRECTOR_AGREEMENT,
-        DocType.NDA,
-        DocType.ARTICLES_OF_ASSOCIATION,
-        DocType.LOAN_AGREEMENT,
-        DocType.LICENSE_AGREEMENT,
-        DocType.DATA_PROCESSING_AGREEMENT,
-        DocType.AMENDMENT_AGREEMENT,
-        DocType.OTHER_CONTRACT,
-    ],
-    "pleading": [
-        DocType.STATEMENT_OF_CLAIM,
-        DocType.STATEMENT_OF_DEFENSE,
-        DocType.APPEAL_BRIEF,
-        DocType.OTHER_PLEADING,
-        DocType.MOTION,
-    ],
-    "court": [
-        DocType.JUDGMENT,
-        DocType.COURT_ORDER,
-        DocType.COURT_DIRECTIVE,
-        DocType.HEARING_MINUTES,
-    ],
-    "correspondence": [
-        DocType.EMAIL,
-        DocType.LETTER,
-        DocType.SECURE_MAILBOX_MESSAGE,
-        DocType.CLIENT_MEMO,
-    ],
-    "internal": [
-        DocType.INTERNAL_NOTE,
-        DocType.LEGAL_OPINION,
-        DocType.RESEARCH_MEMO,
-        DocType.DUE_DILIGENCE_REPORT,
-        DocType.CHECKLIST,
-        DocType.NOTE,
-    ],
-    "evidence": [
-        DocType.COMMERCIAL_REGISTER_EXTRACT,
-        DocType.LAND_REGISTER_EXTRACT,
-        DocType.POWER_OF_ATTORNEY,
-        DocType.INVOICE,
-        DocType.EXTERNAL_EXPERT_REPORT,
-        DocType.OTHER_ANNEX,
-    ],
-    "administration": [
-        DocType.FEE_AGREEMENT,
-        DocType.ENGAGEMENT_AGREEMENT,
-        DocType.DEADLINE_NOTE,
-        DocType.OTHER_ADMIN,
-    ],
-}
-
-DOC_TYPE_GROUP_OF: dict[DocType, str] = {
-    dt: group for group, members in DOC_TYPE_GROUPS.items() for dt in members
-}
-
-
 class TaskType(StrEnum):
     CONTRACT_DRAFTING = "contract_drafting"
     CONTRACT_REVIEW = "contract_review"
@@ -152,14 +22,6 @@ class TaskType(StrEnum):
     LEGAL_TRANSLATION = "legal_translation"
     COMPLIANCE_REVIEW = "compliance_review"
     OTHER = "other"
-
-
-class MatterKind(StrEnum):
-    TRANSACTION = "transaction"
-    LITIGATION = "litigation"
-    ADVISORY = "advisory"
-    REGULATORY = "regulatory"
-    INTERNAL = "internal"
 
 
 class PartyRole(StrEnum):
@@ -181,15 +43,15 @@ class VersionStatus(StrEnum):
 
 
 class RelationKind(StrEnum):
+    # Only kinds the pipeline actually emits. Duplicates are handled by merging into a
+    # shared version, not by an edge; near-duplicate detection and work_product_of edges
+    # are not implemented (see docs/ontology.md).
     ANNEX_OF = "annex_of"
     REFERENCES = "references"
     AMENDS = "amends"
     SUPERSEDES = "supersedes"
     RESPONDS_TO = "responds_to"
-    DUPLICATE_OF = "duplicate_of"
-    NEAR_DUPLICATE_OF = "near_duplicate_of"
     BELONGS_TO_THREAD = "belongs_to_thread"
-    WORK_PRODUCT_OF = "work_product_of"
 
 
 class RationaleCategory(StrEnum):

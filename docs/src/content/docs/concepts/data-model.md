@@ -159,9 +159,14 @@ evidence}`:
 | `amends` | amendment agreement → amended contract |
 | `supersedes` | replacement relationships |
 | `responds_to` | email → email, pleading → pleading |
-| `duplicate_of` / `near_duplicate_of` | exact (hash) / fuzzy (MinHash/simhash) |
 | `belongs_to_thread` | email → CommunicationThread |
-| `work_product_of` | final document → EvalRecord input set |
+
+Duplicates are not drawn as edges: exact/semantic duplicates merge into a shared
+version (see MatterAssignment below), so there is no separate node for a `duplicate_of`
+edge to point at. Near-duplicate detection is intentionally out of scope —
+template/precedent reuse is captured by `doc_type` classification. `work_product_of`
+(final document → EvalRecord input set) is planned but not yet emitted; it will land
+when the EvalRecord builder runs.
 
 ### CommunicationThread
 Reconstructed email/message threads: `{id, matter_id, participants[], subject_norm,

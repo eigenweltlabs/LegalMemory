@@ -19,8 +19,9 @@ frontend/node_modules/
 frontend/*.tsbuildinfo
 ui/dist/
 
-# runtime data
-data/
+# runtime data — root only, so it never matches the benchmark package's committed
+# data/ dir (frozen gold + firm-structure manifests, loaded at runtime by store.py)
+/data/
 .ki/
 # Root-anchored: this is the appliance's runtime data directory. Unanchored it would
 # also match src/knowledge_index/connectors/runtime/, which is source.
@@ -47,3 +48,8 @@ retrieval-report.json
 
 # Local-only self-signed TLS for the dev Keycloak (regenerate with scripts/…; never ship)
 deploy/keycloak/tls/
+
+# Scale-test output. The tooling that produced these was removed; the artifacts are
+# regenerated locally and have been committed by accident more than once.
+/scale-report.json
+/testdata/scale/

@@ -1,0 +1,296 @@
+{
+  "area": "contracts/banking",
+  "source": "harveyai/harvey-labs (contracts/banking); curated once, reviewed",
+  "clients": 25,
+  "matters_count": 48,
+  "matters": {
+    "contracts/banking/account-control-agreement-counterparty-paper-review/scenario-01": {
+      "client": "Ridgeline National Trust Company",
+      "matter_no": "RNT-001",
+      "counterparty": "Verdano",
+      "matter_title": "Account Control Agreement — Verdano"
+    },
+    "contracts/banking/account-control-agreement-counterparty-paper-review/scenario-02": {
+      "client": "Clarendon National Capital",
+      "matter_no": "CNC-001",
+      "counterparty": "Terraverde",
+      "matter_title": "Account Control Agreement — Terraverde"
+    },
+    "contracts/banking/account-control-agreement-first-draft/scenario-01": {
+      "client": "Pinnacle Capital Partners",
+      "matter_no": "PCP-001",
+      "counterparty": "Cornerstone National Bank",
+      "matter_title": "Account Control Agreement — Cornerstone National Bank"
+    },
+    "contracts/banking/account-control-agreement-first-draft/scenario-02": {
+      "client": "Clarendon National Capital",
+      "matter_no": "CNC-002",
+      "counterparty": "Ridgewell Industrial Solutions",
+      "matter_title": "Account Control Agreement — Ridgewell Industrial Solutions"
+    },
+    "contracts/banking/account-control-agreement-first-turn-redline/scenario-01": {
+      "client": "Pinnacle Capital Partners",
+      "matter_no": "PCP-002",
+      "counterparty": "Graycliff",
+      "matter_title": "Account Control Agreement — Graycliff"
+    },
+    "contracts/banking/account-control-agreement-first-turn-redline/scenario-02": {
+      "client": "Tidewater",
+      "matter_no": "TID-001",
+      "counterparty": "Orion Capital",
+      "matter_title": "Account Control Agreement — Orion Capital"
+    },
+    "contracts/banking/account-control-agreement-playbook-escalation/scenario-01": {
+      "client": "Thornfield National Bank",
+      "matter_no": "TNB-001",
+      "counterparty": "Graycliff Industrial Holdings",
+      "matter_title": "Account Control Agreement — Graycliff Industrial Holdings"
+    },
+    "contracts/banking/account-control-agreement-playbook-escalation/scenario-02": {
+      "client": "Thornfield National Bank",
+      "matter_no": "TNB-002",
+      "counterparty": "Caswell",
+      "matter_title": "Account Control Agreement — Caswell"
+    },
+    "contracts/banking/account-control-agreement-term-negotiation": {
+      "client": "Monarch Capital",
+      "matter_no": "MC-001",
+      "counterparty": "Atlantic Fidelity",
+      "matter_title": "Credit Facility — Atlantic Fidelity"
+    },
+    "contracts/banking/credit-support-annex-counterparty-paper-review": {
+      "client": "Thurston National Bank",
+      "matter_no": "TNB2-001",
+      "counterparty": "Meridian Capital Partners",
+      "matter_title": "Credit Support Annex — Meridian Capital Partners"
+    },
+    "contracts/banking/credit-support-annex-first-draft": {
+      "client": "Pemberton",
+      "matter_no": "PEM-001",
+      "counterparty": "Verdantis",
+      "matter_title": "Credit Support Annex — Verdantis"
+    },
+    "contracts/banking/credit-support-annex-first-turn-redline": {
+      "client": "Velden Capital",
+      "matter_no": "VC-001",
+      "counterparty": "Stonehill Global Markets",
+      "matter_title": "Credit Support Annex — Stonehill Global Markets"
+    },
+    "contracts/banking/credit-support-annex-playbook-escalation": {
+      "client": "Meridian National Bank",
+      "matter_no": "MNB-001",
+      "counterparty": "Volantis",
+      "matter_title": "Credit Support Annex — Volantis"
+    },
+    "contracts/banking/credit-support-annex-subsequent-turn-redline": {
+      "client": "Stonebridge",
+      "matter_no": "STO-001",
+      "counterparty": "Meridian Capital Partners",
+      "matter_title": "Credit Support Annex — Meridian Capital Partners"
+    },
+    "contracts/banking/credit-support-annex-term-negotiation": {
+      "client": "Thornfield Capital Partners LP",
+      "matter_no": "TCP-001",
+      "counterparty": "Meridian",
+      "matter_title": "Credit Support Annex — Meridian"
+    },
+    "contracts/banking/intercreditor-agreement-counterparty-paper-review": {
+      "client": "Meridian Capital Partners LP",
+      "matter_no": "MCP-001",
+      "counterparty": "Ashfield",
+      "matter_title": "Intercreditor Agreement — Ashfield"
+    },
+    "contracts/banking/intercreditor-agreement-first-draft": {
+      "client": "Verdantis",
+      "matter_no": "VER-001",
+      "counterparty": "Atlas",
+      "matter_title": "Intercreditor Agreement — Atlas"
+    },
+    "contracts/banking/intercreditor-agreement-first-turn-redline": {
+      "client": "Fidelity Western Trust",
+      "matter_no": "FWT-001",
+      "counterparty": "Meridian Agency Services",
+      "matter_title": "Intercreditor Agreement — Meridian Agency Services"
+    },
+    "contracts/banking/intercreditor-agreement-playbook-escalation": {
+      "client": "Meridian National Bank",
+      "matter_no": "MNB-002",
+      "counterparty": "Castlepoint",
+      "matter_title": "Intercreditor Agreement — Castlepoint"
+    },
+    "contracts/banking/intercreditor-agreement-subsequent-turn-redline": {
+      "client": "Crestmark",
+      "matter_no": "CRE-001",
+      "counterparty": "Arbor Creek",
+      "matter_title": "Intercreditor Agreement — Arbor Creek"
+    },
+    "contracts/banking/intercreditor-agreement-term-negotiation": {
+      "client": "Cartwright",
+      "matter_no": "CAR-001",
+      "counterparty": "Ridgeline",
+      "matter_title": "Intercreditor Agreement — Ridgeline"
+    },
+    "contracts/banking/isda-confirmation-counterparty-paper-review": {
+      "client": "Meridian Capital Partners LP",
+      "matter_no": "MCP-002",
+      "counterparty": "Voss Bank",
+      "matter_title": "Credit Support Annex — Voss Bank"
+    },
+    "contracts/banking/isda-confirmation-first-draft": {
+      "client": "Meridian National Bank",
+      "matter_no": "MNB-003",
+      "counterparty": "Thornfield",
+      "matter_title": "ISDA Confirmation — Thornfield"
+    },
+    "contracts/banking/isda-confirmation-term-negotiation": {
+      "client": "Greenleaf",
+      "matter_no": "GRE-001",
+      "counterparty": "Tidemark",
+      "matter_title": "ISDA Confirmation — Tidemark"
+    },
+    "contracts/banking/isda-master-pack-counterparty-paper-review/scenario-01": {
+      "client": "Meridian Capital Partners LP",
+      "matter_no": "MCP-003",
+      "counterparty": "Trellis Bank",
+      "matter_title": "ISDA / Credit Support Annex — Trellis Bank"
+    },
+    "contracts/banking/isda-master-pack-counterparty-paper-review/scenario-02": {
+      "client": "Meridian Capital Partners LP",
+      "matter_no": "MCP-004",
+      "counterparty": "Counterparty",
+      "matter_title": "ISDA Master Agreement — Counterparty"
+    },
+    "contracts/banking/isda-master-pack-first-draft/scenario-01": {
+      "client": "Greystone",
+      "matter_no": "GRE2-001",
+      "counterparty": "Meridian",
+      "matter_title": "ISDA Master Agreement — Meridian"
+    },
+    "contracts/banking/isda-master-pack-first-draft/scenario-02": {
+      "client": "Ridgeline National Bank",
+      "matter_no": "RNB-001",
+      "counterparty": "Coronado Energy",
+      "matter_title": "ISDA / Credit Support Annex — Coronado Energy"
+    },
+    "contracts/banking/isda-master-pack-first-turn-redline/scenario-01": {
+      "client": "Meridian Capital Partners LP",
+      "matter_no": "MCP-005",
+      "counterparty": "Thornfield",
+      "matter_title": "ISDA / Credit Support Annex — Thornfield"
+    },
+    "contracts/banking/isda-master-pack-first-turn-redline/scenario-02": {
+      "client": "Meridian Capital Partners LP",
+      "matter_no": "MCP-006",
+      "counterparty": "Greystone",
+      "matter_title": "ISDA Master Agreement — Greystone"
+    },
+    "contracts/banking/isda-master-pack-playbook-escalation/scenario-01": {
+      "client": "Meridian National Bank",
+      "matter_no": "MNB-004",
+      "counterparty": "Pinehurst",
+      "matter_title": "ISDA / Credit Support Annex — Pinehurst"
+    },
+    "contracts/banking/isda-master-pack-playbook-escalation/scenario-02": {
+      "client": "Terraverde Energy",
+      "matter_no": "TE-001",
+      "counterparty": "Greystone",
+      "matter_title": "ISDA / Credit Support Annex — Greystone"
+    },
+    "contracts/banking/isda-master-pack-subsequent-turn-redline/scenario-01": {
+      "client": "Ridgeline National Bank",
+      "matter_no": "RNB-002",
+      "counterparty": "Greenleaf",
+      "matter_title": "ISDA Master Agreement — Greenleaf"
+    },
+    "contracts/banking/isda-master-pack-subsequent-turn-redline/scenario-02": {
+      "client": "Kensington",
+      "matter_no": "KEN-001",
+      "counterparty": "Meridian",
+      "matter_title": "ISDA Master Agreement — Meridian"
+    },
+    "contracts/banking/isda-master-pack-term-negotiation/scenario-01": {
+      "client": "Ridgeline National Bank",
+      "matter_no": "RNB-003",
+      "counterparty": "Greenleaf",
+      "matter_title": "ISDA / Credit Support Annex — Greenleaf"
+    },
+    "contracts/banking/isda-master-pack-term-negotiation/scenario-02": {
+      "client": "Meridian Capital Partners LP",
+      "matter_no": "MCP-007",
+      "counterparty": "Wolverton",
+      "matter_title": "ISDA Master Agreement — Wolverton"
+    },
+    "contracts/banking/repo-securities-lending-counterparty-paper-review/scenario-01": {
+      "client": "Meridian Capital Partners LP",
+      "matter_no": "MCP-008",
+      "counterparty": "Vanguard Ridge Bank",
+      "matter_title": "GMRA (Repo) — Vanguard Ridge Bank"
+    },
+    "contracts/banking/repo-securities-lending-counterparty-paper-review/scenario-02": {
+      "client": "Meridian Capital Markets",
+      "matter_no": "MCM-001",
+      "counterparty": "Vantage Asset Management",
+      "matter_title": "GMSLA (Securities Lending) — Vantage Asset Management"
+    },
+    "contracts/banking/repo-securities-lending-first-draft/scenario-01": {
+      "client": "Meridian Capital Markets",
+      "matter_no": "MCM-002",
+      "counterparty": "Vantage Sovereign",
+      "matter_title": "GMRA (Repo) — Vantage Sovereign"
+    },
+    "contracts/banking/repo-securities-lending-first-draft/scenario-02": {
+      "client": "Meridian Capital Partners LP",
+      "matter_no": "MCP-009",
+      "counterparty": "Osterholm",
+      "matter_title": "GMSLA (Securities Lending) — Osterholm"
+    },
+    "contracts/banking/repo-securities-lending-first-turn-redline/scenario-01": {
+      "client": "Meridian Capital Partners LP",
+      "matter_no": "MCP-010",
+      "counterparty": "Vantage Prime",
+      "matter_title": "GMRA (Repo) — Vantage Prime"
+    },
+    "contracts/banking/repo-securities-lending-first-turn-redline/scenario-02": {
+      "client": "Meridian Capital Partners LP",
+      "matter_no": "MCP-011",
+      "counterparty": "Ashworth",
+      "matter_title": "GMSLA (Securities Lending) — Ashworth"
+    },
+    "contracts/banking/repo-securities-lending-playbook-escalation/scenario-01": {
+      "client": "Thornfield National Bank",
+      "matter_no": "TNB-003",
+      "counterparty": "Ledgerstone",
+      "matter_title": "GMRA (Repo) — Ledgerstone"
+    },
+    "contracts/banking/repo-securities-lending-playbook-escalation/scenario-02": {
+      "client": "Meridian Stahl Bank AG",
+      "matter_no": "MSB-001",
+      "counterparty": "Khalifa Sovereign",
+      "matter_title": "GMSLA (Securities Lending) — Khalifa Sovereign"
+    },
+    "contracts/banking/repo-securities-lending-subsequent-turn-redline/scenario-01": {
+      "client": "Meridian Capital Markets",
+      "matter_no": "MCM-003",
+      "counterparty": "Voss Bank",
+      "matter_title": "GMRA (Repo) — Voss Bank"
+    },
+    "contracts/banking/repo-securities-lending-subsequent-turn-redline/scenario-02": {
+      "client": "Vantage Trust",
+      "matter_no": "VT-001",
+      "counterparty": "Meridian Capital Partners",
+      "matter_title": "GMSLA (Securities Lending) — Meridian Capital Partners"
+    },
+    "contracts/banking/repo-securities-lending-term-negotiation/scenario-01": {
+      "client": "Meridian Capital Partners LP",
+      "matter_no": "MCP-012",
+      "counterparty": "Ironclad National Bank",
+      "matter_title": "GMRA (Repo) — Ironclad National Bank"
+    },
+    "contracts/banking/repo-securities-lending-term-negotiation/scenario-02": {
+      "client": "Meridian Capital Partners LP",
+      "matter_no": "MCP-013",
+      "counterparty": "Arcturus Bank International",
+      "matter_title": "GMSLA (Securities Lending) — Arcturus Bank International"
+    }
+  }
+}

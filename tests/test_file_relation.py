@@ -9,7 +9,10 @@ from knowledge_index.config import AppConfig, PipelineConfig
 from knowledge_index.db.models import (
     Artifact,
     Blob,
+    Chunk,
     CommunicationThread,
+    Document,
+    DocumentVersion,
     DocumentVersionSource,
     Matter,
     MatterAssignment,
@@ -1271,3 +1274,356 @@ def test_title_belongs_to_the_newest_version_not_the_last_arrival(
         session.commit()
         document = linked_document(session, newest.id)
         assert document.title == "Agreement (renamed in v3)"
+
+
+def _classified_pair(
+    session: Session, *, classify_target: bool = False
+) -> tuple[Matter, SourceObject, SourceObject]:
+    """A matter, a classified current file, and a target that may still be unclassified."""
+    source = Source(kind="local_fs", display_name="fx", config={"root": "/x"})
+    matter = Matter(title="M-1", reference_numbers=["M-1"], imported=False)
+    session.add_all([source, matter])
+    session.flush()
+    current = _converted_object(
+        session, source, "M-1/Drafts/agreement-draft-2.txt", "1" * 64, "Draft 2 text"
+    )
+    target = _converted_object(
+        session, source, "M-1/Drafts/agreement-draft-1.txt", "2" * 64, "Draft 1 text"
+    )
+    session.add(
+        MatterAssignment(
+            source_object_id=current.id,
+            matter_id=matter.id,
+            confidence=1,
+            producer_version="test",
+        )
+    )
+    if classify_target:
+        session.add(
+            MatterAssignment(
+                source_object_id=target.id,
+                matter_id=matter.id,
+                confidence=1,
+                producer_version="test",
+            )
+        )
+    session.flush()
+    return matter, current, target
+
+
+def test_identity_against_unclassified_target_is_parked_and_replayed_as_version(
+    factory: sessionmaker[Session],
+) -> None:
+    """Draft 2 arrives first and says 'I am a later version of draft 1' while draft 1
+    is still unclassified. The decision must be parked, and the moment draft 1
+    classifies, the two standalone documents must merge into one ordered chain."""
+    with factory() as session:
+        matter, current, target = _classified_pair(session)
+        result = FileRelationResult.model_validate(
+            {
+                "logical_title": "Agreement",
+                "status": "draft",
+                "identity": "new_version",
+                "same_document_ref": target.id,
+                "relative_order": "after",
+                "confidence": 0.9,
+            }
+        )
+        runner = PipelineRunner(factory, AppConfig())
+        runner._materialize_file_relation(session, matter, current, result, "mvp-6")
+        session.commit()
+
+        # parked, and the file stays an honest standalone document for now
+        intent = session.scalar(
+            select(RelationIntent).where(RelationIntent.intent == "identity")
+        )
+        assert intent is not None and intent.status == "pending"
+        assert intent.target_source_object_id == target.id
+        assert (intent.payload or {}).get("identity") == "new_version"
+        assert (intent.payload or {}).get("relative_order") == "after"
+        assert session.scalar(select(func.count()).select_from(Document)) == 1
+
+        # draft 1 classifies -> replay merges the chain
+        session.add(
+            MatterAssignment(
+                source_object_id=target.id,
+                matter_id=matter.id,
+                confidence=1,
+                producer_version="test",
+            )
+        )
+        session.flush()
+        assert runner._apply_relation_intents(session, target.id) == 1
+        session.commit()
+
+        current_version = linked_version(session, current.id)
+        target_version = linked_version(session, target.id)
+        assert current_version.document_id == target_version.document_id
+        assert session.scalar(select(func.count()).select_from(Document)) == 1
+        assert (current_version.ordinal or 0) > (target_version.ordinal or 0)
+        # no zero-version husk documents survive the merge
+        for document in session.scalars(select(Document)):
+            assert session.scalar(
+                select(func.count())
+                .select_from(DocumentVersion)
+                .where(DocumentVersion.document_id == document.id)
+            )
+        # replay is idempotent
+        assert runner._apply_relation_intents(session, target.id) == 0
+
+
+def test_duplicate_against_unclassified_target_is_parked_and_replayed(
+    factory: sessionmaker[Session],
+) -> None:
+    """A copy of a still-unclassified file merges into one shared version on replay,
+    and the copy's already-indexed chunks are dropped with the ghost version."""
+    with factory() as session:
+        matter, current, target = _classified_pair(session)
+        result = FileRelationResult.model_validate(
+            {
+                "logical_title": "Agreement",
+                "status": "final",
+                "identity": "duplicate",
+                "duplicate_of": target.id,
+                "confidence": 0.9,
+            }
+        )
+        runner = PipelineRunner(factory, AppConfig())
+        runner._materialize_file_relation(session, matter, current, result, "mvp-6")
+        session.commit()
+        assert (
+            session.scalar(
+                select(RelationIntent).where(RelationIntent.intent == "identity")
+            )
+            is not None
+        )
+
+        # the standalone copy got indexed before the target classified
+        ghost_version = linked_version(session, current.id)
+        session.add(
+            Chunk(document_version_id=ghost_version.id, ordinal=0, text="stale chunk")
+        )
+        session.flush()
+
+        session.add(
+            MatterAssignment(
+                source_object_id=target.id,
+                matter_id=matter.id,
+                confidence=1,
+                producer_version="test",
+            )
+        )
+        session.flush()
+        assert runner._apply_relation_intents(session, target.id) == 1
+        session.commit()
+
+        current_version = linked_version(session, current.id)
+        target_version = linked_version(session, target.id)
+        assert current_version.id == target_version.id  # one shared version
+        assert session.scalar(select(func.count()).select_from(Document)) == 1
+        assert session.scalar(select(func.count()).select_from(DocumentVersion)) == 1
+        assert (
+            session.scalar(
+                select(func.count())
+                .select_from(DocumentVersionSource)
+                .where(DocumentVersionSource.version_id == target_version.id)
+            )
+            == 2
+        )
+        assert (
+            session.scalar(
+                select(func.count())
+                .select_from(Chunk)
+                .where(Chunk.document_version_id == ghost_version.id)
+            )
+            == 0
+        )
+
+
+def test_replayed_identity_requeues_the_origins_knowledge_stages(
+    factory: sessionmaker[Session],
+) -> None:
+    """The origin file was fully processed as a standalone document; after the merge
+    its metadata/chunks describe a deleted document, so its knowledge stages must go
+    back to pending (and downstream park behind them) to re-derive under the survivor."""
+    with factory() as session:
+        matter, current, target = _classified_pair(session)
+        for stage in ("extract_metadata", "extract_decisions", "index"):
+            session.add(
+                ProcessingState(
+                    source_object_id=current.id,
+                    stage=stage,
+                    status="done",
+                    producer_version="v1",
+                )
+            )
+        session.flush()
+        result = FileRelationResult.model_validate(
+            {
+                "logical_title": "Agreement",
+                "status": "draft",
+                "identity": "new_version",
+                "same_document_ref": target.id,
+                "relative_order": "after",
+                "confidence": 0.9,
+            }
+        )
+        runner = PipelineRunner(factory, AppConfig())
+        runner._materialize_file_relation(session, matter, current, result, "mvp-6")
+        session.add(
+            MatterAssignment(
+                source_object_id=target.id,
+                matter_id=matter.id,
+                confidence=1,
+                producer_version="test",
+            )
+        )
+        session.flush()
+        assert runner._apply_relation_intents(session, target.id) == 1
+        session.commit()
+
+        states = {
+            state.stage: state
+            for state in session.scalars(
+                select(ProcessingState).where(
+                    ProcessingState.source_object_id == current.id
+                )
+            )
+        }
+        assert states["extract_metadata"].status == "pending"
+        assert states["extract_decisions"].status == "skipped"
+        assert states["index"].status == "skipped"
+
+
+def test_anchors_own_relate_does_not_split_a_replayed_merge(
+    factory: sessionmaker[Session],
+) -> None:
+    """After the replay merged draft-2 into draft-1's chain, draft-1's own relate
+    honestly answers "I am a new document" (it IS the base). That answer must not
+    tear the chain apart — only a non-anchor version may move out on new_document."""
+    with factory() as session:
+        matter, current, target = _classified_pair(session)
+        runner = PipelineRunner(factory, AppConfig())
+        runner._materialize_file_relation(
+            session,
+            matter,
+            current,
+            FileRelationResult.model_validate(
+                {
+                    "logical_title": "Agreement",
+                    "status": "draft",
+                    "identity": "new_version",
+                    "same_document_ref": target.id,
+                    "relative_order": "after",
+                    "confidence": 0.9,
+                }
+            ),
+            "mvp-6",
+        )
+        session.add(
+            MatterAssignment(
+                source_object_id=target.id,
+                matter_id=matter.id,
+                confidence=1,
+                producer_version="test",
+            )
+        )
+        session.flush()
+        assert runner._apply_relation_intents(session, target.id) == 1
+        session.commit()
+
+        # the base draft's own relate now runs and declares itself a new document
+        runner._materialize_file_relation(
+            session,
+            matter,
+            target,
+            FileRelationResult.model_validate(
+                {
+                    "logical_title": "Agreement",
+                    "status": "draft",
+                    "identity": "new_document",
+                    "confidence": 0.9,
+                }
+            ),
+            "mvp-6",
+        )
+        session.commit()
+
+        current_version = linked_version(session, current.id)
+        target_version = linked_version(session, target.id)
+        assert current_version.document_id == target_version.document_id
+        assert session.scalar(select(func.count()).select_from(Document)) == 1
+        # and a NON-anchor identity flip can still leave: draft-2 changes its mind
+        runner._materialize_file_relation(
+            session,
+            matter,
+            current,
+            FileRelationResult.model_validate(
+                {
+                    "logical_title": "Something Else",
+                    "status": "draft",
+                    "identity": "new_document",
+                    "confidence": 0.9,
+                }
+            ),
+            "mvp-6",
+        )
+        session.commit()
+        current_version = linked_version(session, current.id)
+        target_version = linked_version(session, target.id)
+        assert current_version.document_id != target_version.document_id
+
+
+def test_email_status_is_forced_final_in_code(
+    factory: sessionmaker[Session],
+) -> None:
+    """A sent email IS its final record. The prompt says so, but the audit saw a
+    model leave 78 emails 'unknown' — so the code decides for emails (detected
+    deterministically), while every other file keeps the model's judgment."""
+    with factory() as session:
+        source = Source(kind="local_fs", display_name="fx", config={"root": "/x"})
+        matter = Matter(title="M-1", reference_numbers=["M-1"], imported=False)
+        session.add_all([source, matter])
+        session.flush()
+        email = _converted_object(
+            session, source, "M-1/cover-note.eml", "a1" * 32, "Please find attached"
+        )
+        docx = _converted_object(
+            session, source, "M-1/agreement.docx", "b2" * 32, "Draft agreement text"
+        )
+        for source_object in (email, docx):
+            session.add(
+                MatterAssignment(
+                    source_object_id=source_object.id,
+                    matter_id=matter.id,
+                    confidence=1,
+                    producer_version="test",
+                )
+            )
+        session.flush()
+
+        runner = PipelineRunner(factory, AppConfig())
+        for source_object, declared in ((email, "draft"), (docx, "draft")):
+            runner._materialize_file_relation(
+                session,
+                matter,
+                source_object,
+                FileRelationResult.model_validate(
+                    {
+                        "logical_title": source_object.name,
+                        "status": declared,
+                        "identity": "new_document",
+                        "confidence": 0.9,
+                    }
+                ),
+                "mvp-6",
+            )
+        session.commit()
+
+        email_version = linked_version(session, email.id)
+        docx_version = linked_version(session, docx.id)
+        # the model said draft; the code overrules it for the email only
+        assert email_version.status == "final"
+        assert email_version.status_evidence.get("rule") == "email_is_final"
+        assert docx_version.status == "draft"
+        assert "rule" not in (docx_version.status_evidence or {})
