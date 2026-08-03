@@ -188,18 +188,49 @@ jobs:
 
       # A deploy that reports success without checking is a deploy that reports
       # success while the site is down.
-      - name: Verify
+      # Checked from inside the instance first. The stack being up and the name
+      # resolving are different failures with different fixes, and a single
+      # public curl reports them identically — which sends you to read container
+      # logs when the actual problem is a DNS record nobody created.
+      - name: Verify the stack
         run: |
-          set -euo pipefail
+          gcloud compute ssh "${GCE_INSTANCE}" --zone "${GCE_ZONE}" --tunnel-through-iap --quiet --command '
+            set -euo pipefail
+            probe() { curl -s -o /dev/null -w "%{http_code}" "$@" || echo 000; }
+            for i in $(seq 1 40); do
+              [ "$(probe http://127.0.0.1:3200/healthz)" = "200" ] && break
+              sleep 5
+            done
+            echo "demo /healthz : $(probe http://127.0.0.1:3200/healthz)"
+            echo "appliance     : $(probe http://127.0.0.1:8200/healthz)"
+            echo "mcp tools     : $(curl -s -X POST http://127.0.0.1:3200/mcp \
+                 -H "Content-Type: application/json" \
+                 -H "Accept: application/json, text/event-stream" \
+                 -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}" \
+                 | grep -o "\"name\"" | wc -l | tr -d " ") advertised"
+            test "$(probe http://127.0.0.1:3200/healthz)" = "200"
+          '
+
+      # The public name, separately. Absent DNS is reported as absent DNS rather
+      # than as a broken deployment, because that is the difference between
+      # editing a zone file and debugging a container.
+      - name: Verify the public origin
+        run: |
+          set -uo pipefail
           DOMAIN="${{ vars.DEMO_DOMAIN }}"
+          if [ -z "$(dig +short A "$DOMAIN")" ]; then
+            echo "::warning::${DOMAIN} does not resolve — the stack is up, but TLS cannot be issued until an A record points at the instance."
+            exit 0
+          fi
           for i in $(seq 1 30); do
             code=$(curl -s -o /dev/null -w '%{http_code}' "https://${DOMAIN}/" || echo 000)
-            [ "$code" = "200" ] || [ "$code" = "307" ] && break
+            case "$code" in 200|307) break ;; esac
             sleep 10
           done
           echo "root:  $(curl -s -o /dev/null -w '%{http_code}' https://${DOMAIN}/)"
           echo "docs:  $(curl -s -o /dev/null -w '%{http_code}' https://${DOMAIN}/docs/)"
-          echo "mcp:   $(curl -s -o /dev/null -w '%{http_code}' -X POST https://${DOMAIN}/mcp/ \
+          echo "mcp:   $(curl -s -o /dev/null -w '%{http_code}' -X POST https://${DOMAIN}/mcp \
                           -H 'Content-Type: application/json' \
+                          -H 'Accept: application/json, text/event-stream' \
                           -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}')"
           curl -sf "https://${DOMAIN}/docs/" > /dev/null
