@@ -52,9 +52,7 @@ services:
     command:
       - postgres
       - -c
-      - config_file=/etc/postgresql/postgresql.conf
-      - -c
-      - include=/etc/postgresql/tuning.conf
+      - config_file=/etc/postgresql/tuning.conf
     volumes:
       - demo_pgdata:/var/lib/postgresql/data
       - ./deploy/postgres/init:/docker-entrypoint-initdb.d:ro

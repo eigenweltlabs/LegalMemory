@@ -157,18 +157,26 @@ jobs:
             TOKEN=\$(curl -sf -H 'Metadata-Flavor: Google' \
               'http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token' \
               | python3 -c 'import json,sys;print(json.load(sys.stdin)[\"access_token\"])')
-            echo \"\$TOKEN\" | docker login -u oauth2accesstoken --password-stdin 'https://${GCP_REGION}-docker.pkg.dev'
+            echo \"\$TOKEN\" | sudo docker login -u oauth2accesstoken --password-stdin 'https://${GCP_REGION}-docker.pkg.dev'
 
-            # The revision being deployed, written where a later compose
-            # invocation on the box can still see it. No backticks anywhere in
-            # this block: it is a double-quoted string, so they would be command
-            # substitution evaluated on the runner, comment or not.
-            grep -v '^APP_IMAGE=\|^DEMO_IMAGE=' ~/.env.demo > ~/.env.run
-            echo 'APP_IMAGE=${REGISTRY}/app:${{ github.sha }}'   >> ~/.env.run
-            echo 'DEMO_IMAGE=${REGISTRY}/demo:${{ github.sha }}' >> ~/.env.run
-            chmod 600 ~/.env.run
+            # The revision being deployed, written into the compose directory
+            # so a later invocation on the box sees the same thing this deploy
+            # did. Paths here are relative on purpose: '~' inside the quoted
+            # COMPOSE string is never expanded, and Compose resolves it against
+            # the project directory and reports a file that does not exist.
+            #
+            # No backticks anywhere in this block either: it is a double-quoted
+            # string, so they would be command substitution on the runner,
+            # comment or not.
+            grep -v '^APP_IMAGE=\|^DEMO_IMAGE=' ~/.env.demo > .env.run
+            echo 'APP_IMAGE=${REGISTRY}/app:${{ github.sha }}'   >> .env.run
+            echo 'DEMO_IMAGE=${REGISTRY}/demo:${{ github.sha }}' >> .env.run
+            chmod 600 .env.run
 
-            COMPOSE='docker compose -f docker-compose.demo.yml -f docker-compose.deploy.yml --env-file ~/.env.run'
+            # sudo, not group membership: adding the login user to 'docker'
+            # only takes effect on the next session, which a one-shot CI ssh
+            # never gets. Every GCE login has passwordless sudo.
+            COMPOSE='sudo docker compose -f docker-compose.demo.yml -f docker-compose.deploy.yml --env-file .env.run'
             \$COMPOSE pull --quiet app demo
             \$COMPOSE up -d --no-build postgres opensearch litellm
             \$COMPOSE up -d --no-build app demo
@@ -176,10 +184,10 @@ jobs:
             # The docs are files on a volume, not a service: unpack into the
             # volume Caddy already mounts, then reload rather than restart so
             # no in-flight request is dropped.
-            docker run --rm -v legalmemory-demo_docs_dist:/srv/docs -v ~/docs-dist.tgz:/in.tgz:ro \
+            sudo docker run --rm -v legalmemory-demo_docs_dist:/srv/docs -v ~/docs-dist.tgz:/in.tgz:ro \
               alpine:3 sh -c 'rm -rf /srv/docs/* && tar xzf /in.tgz -C /srv/docs'
             \$COMPOSE up -d --no-build caddy
-            docker exec \$(docker ps -qf name=caddy) caddy reload --config /etc/caddy/Caddyfile || true
+            sudo docker exec \$(sudo docker ps -qf name=caddy) caddy reload --config /etc/caddy/Caddyfile || true
           "
 
       - name: Apply migrations
@@ -188,8 +196,8 @@ jobs:
           gcloud compute ssh "${GCE_INSTANCE}" --zone "${GCE_ZONE}" --tunnel-through-iap --quiet --command '
             set -euo pipefail
             cd ~/legalmemory
-            docker compose -f docker-compose.demo.yml -f docker-compose.deploy.yml \
-              --env-file ~/.env.run exec -T app alembic upgrade head
+            sudo docker compose -f docker-compose.demo.yml -f docker-compose.deploy.yml \
+              --env-file .env.run exec -T app alembic upgrade head
           '
 
       # A deploy that reports success without checking is a deploy that reports
