@@ -196,8 +196,8 @@ def chat_json(
                 {
                     "role": "system",
                     "content": (
-                        f"{system}\n\nAntworte ausschließlich mit einem einzelnen JSON-Objekt, "
-                        f"das exakt diesem JSON-Schema entspricht:\n{schema_json}"
+                        f"{system}\n\nRespond with a single JSON object only, "
+                        f"matching this JSON schema exactly:\n{schema_json}"
                     ),
                 },
                 {"role": "user", "content": user},

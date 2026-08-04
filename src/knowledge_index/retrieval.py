@@ -1297,11 +1297,11 @@ class RetrievalService:
             self.config.retrieval.rerank_model,
             self.config,
             system=(
-                "Du bist ein juristischer Relevanz-Bewerter. Bewerte jedes Dokument "
-                "nach Relevanz zur Anfrage auf einer Skala von 0 (irrelevant) bis 10 "
-                "(perfekt passend). Gib für jede id genau eine Bewertung zurück."
+                "You are a legal relevance rater. Rate each document "
+                "by its relevance to the query on a scale from 0 (irrelevant) to 10 "
+                "(perfect match). Return exactly one rating for each id."
             ),
-            user=f"Anfrage: {query}\n\nDokumente:\n{listing}",
+            user=f"Query: {query}\n\nDocuments:\n{listing}",
             schema=RerankResult,
             # A reasoning model spends part of its budget on hidden reasoning tokens
             # before emitting anything. On the default budget it produced EMPTY

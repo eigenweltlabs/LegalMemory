@@ -197,7 +197,7 @@ class OpenSearchIndex:
         filters: SearchFilters,
         limit: int,
     ) -> list[dict]:
-        """BM25 leg over the German-analyzed text field, ACL-scoped like kNN."""
+        """BM25 leg over the English-analyzed text field, ACL-scoped like kNN."""
         self.ensure_index()
         strict_filter = _combined_filter(scope, filters)
         if "match_none" in strict_filter:
@@ -334,7 +334,7 @@ class OpenSearchIndex:
 
     def _mapping_properties(self) -> dict:
         return {
-            "text": {"type": "text", "analyzer": "legal_german"},
+            "text": {"type": "text", "analyzer": "legal_english"},
             "project_id": {"type": "keyword"},
             "document_id": {"type": "keyword"},
             "document_version_id": {"type": "keyword"},
@@ -469,7 +469,7 @@ class OpenSearchIndex:
                 "settings": {
                     "index.knn": True,
                     "number_of_replicas": 0,
-                    "analysis": {"analyzer": {"legal_german": {"type": "german"}}},
+                    "analysis": {"analyzer": {"legal_english": {"type": "english"}}},
                 },
                 "mappings": {
                     "dynamic": False,
