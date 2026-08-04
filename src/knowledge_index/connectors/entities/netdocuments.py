@@ -13,7 +13,7 @@ them and losing it makes an id unusable against the API.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, ClassVar, Dict, List, Optional
 
 from pydantic import computed_field
 
@@ -23,6 +23,11 @@ from knowledge_index.connectors.entities._field import IndexField
 
 class NetDocumentsCabinetEntity(BaseEntity):
     """A cabinet: the top-level security and organizational boundary in a repository."""
+
+    # Declared, not inferred: every class in this module carries the substring
+    # "document" because that is the vendor's name, so the name heuristic would index
+    # cabinets as content.
+    is_container_entity: ClassVar[bool] = True
 
     cabinet_id: str = IndexField(..., description="NetDocuments cabinet ID (NG-…)", is_entity_id=True)
     name: str = IndexField(..., description="Cabinet name", is_name=True, embeddable=True)
@@ -64,6 +69,8 @@ class NetDocumentsFolderEntity(BaseEntity):
     they are one entity type distinguished by ``container_type`` rather than three
     near-identical classes.
     """
+
+    is_container_entity: ClassVar[bool] = True
 
     folder_id: str = IndexField(..., description="NetDocuments container ID", is_entity_id=True)
     name: str = IndexField(..., description="Container name", is_name=True, embeddable=True)

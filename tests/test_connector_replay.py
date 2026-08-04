@@ -2139,24 +2139,51 @@ def _nd_routes(**overrides) -> dict[str, Recorded]:
 
 
 def test_netdocuments_two_cabinets_keep_the_different_access_they_have_at_the_source(tmp_path):
-    """Step one and two of the matrix: connect two containers, confirm they differ."""
-    connector, _client = build("netdocuments", _nd_routes(), staging=tmp_path)
+    """Step one and two of the matrix: connect two containers, confirm they differ.
+
+    Read through the documents, because that is what the index actually holds — the
+    cabinets themselves are walked for context and never indexed.
+    """
+    connector, _client = build(
+        "netdocuments",
+        _nd_routes(),
+        staging=tmp_path,
+        config={"inherit_container_access_for_documents": True},
+    )
     try:
         observations = list(connector.full_scan())
     finally:
         connector.close()
 
     by_name = {item.name: item for item in observations}
-    assert {"Klageschrift.txt", "Vertrag.txt"} <= set(by_name)
+    assert set(by_name) == {"Klageschrift.txt", "Vertrag.txt"}
 
-    walled = [grant["principal"] for grant in by_name["Litigation (walled)"].acl]
-    open_cabinet = [grant["principal"] for grant in by_name["Corporate (firm-wide)"].acl]
+    walled = [grant["principal"] for grant in by_name["Klageschrift.txt"].acl]
+    open_cabinet = [grant["principal"] for grant in by_name["Vertrag.txt"].acl]
     assert walled == ["group:netdocuments:ug-lit"]
     assert open_cabinet == ["group:netdocuments:ug-corp"]
     # The two cabinets did not collapse into one audience.
     assert walled != open_cabinet
     # An explicit no-access row is a wall, never a grant.
     assert "group:netdocuments:ug-intern" not in walled
+
+
+def test_netdocuments_containers_are_walked_for_context_but_never_indexed(tmp_path):
+    """Every class here carries "document" in its name; only one is a document.
+
+    The shared classifier reads a class name for content tokens, and this vendor is
+    called NetDocuments, so without an explicit declaration every cabinet and folder
+    would be indexed as a stub that matches every query weakly.
+    """
+    connector, _client = build("netdocuments", _nd_routes(), staging=tmp_path)
+    try:
+        names = {item.name for item in connector.full_scan()}
+    finally:
+        connector.close()
+
+    assert names == {"Klageschrift.txt", "Vertrag.txt"}
+    assert "Litigation (walled)" not in names
+    assert "Corporate (firm-wide)" not in names
 
 
 def test_netdocuments_documents_without_their_own_acl_stay_fail_closed(tmp_path):
@@ -2245,14 +2272,21 @@ def test_netdocuments_an_unreadable_membership_leaves_the_cabinet_unknown(tmp_pa
     routes = _nd_routes(
         **{f"GET {ND}/v1/cabinet/NG-WALL01/membership": Recorded({}, status=403)}
     )
-    connector, _client = build("netdocuments", routes, staging=tmp_path)
+    connector, _client = build(
+        "netdocuments",
+        routes,
+        staging=tmp_path,
+        config={"inherit_container_access_for_documents": True},
+    )
     try:
         observations = list(connector.full_scan())
     finally:
         connector.close()
 
-    walled = next(item for item in observations if item.name == "Litigation (walled)")
-    assert walled.acl is None
+    # The documents under the unreadable cabinet stay unknown rather than becoming
+    # visible to whoever the cabinet used to be readable by.
+    claim = next(item for item in observations if item.name == "Klageschrift.txt")
+    assert claim.acl is None
 
 
 def test_netdocuments_permission_mirroring_can_be_turned_off(tmp_path):
@@ -2350,13 +2384,15 @@ def test_netdocuments_a_cycle_in_the_container_graph_does_not_hang_the_sync(tmp_
             ),
         }
     )
-    connector, _client = build("netdocuments", routes, staging=tmp_path)
+    connector, client = build("netdocuments", routes, staging=tmp_path)
     try:
-        names = [item.name for item in connector.full_scan()]
+        list(connector.full_scan())
     finally:
         connector.close()
 
-    assert names.count("Schleife") == 1
+    # It terminated, and the self-referencing folder was listed once rather than
+    # walked round the loop until the sync timed out.
+    assert client.call_count("/v2/container/4711-0300-0001") == 1
 
 
 def test_netdocuments_scoped_to_one_cabinet_never_reads_the_other(tmp_path):
@@ -2466,7 +2502,7 @@ def test_netdocuments_incremental_re_emits_a_cabinet_whose_access_changed(tmp_pa
 
     by_name = {item.name: item for item in batch.observations}
     # The whole cabinet came back so every document carries the new audience.
-    assert {"Litigation (walled)", "Klageschrift.txt"} <= set(by_name)
+    assert "Klageschrift.txt" in by_name
     assert [grant["principal"] for grant in by_name["Klageschrift.txt"].acl] == [
         "group:netdocuments:ug-partners"
     ]

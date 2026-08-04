@@ -99,6 +99,12 @@ def is_container(entity: Any) -> bool:
     """Whether this entity is a container walked through, not a document to index."""
     if getattr(entity, "local_path", None):
         return False
+    # An explicit declaration beats the name heuristic. The heuristic reads a vendor's
+    # name as if it described the entity, so a connector for a company called
+    # NetDocuments has every one of its classes matching the "document" content token.
+    declared = getattr(type(entity), "is_container_entity", None)
+    if declared is not None:
+        return bool(declared)
     name = type(entity).__name__.casefold()
     if any(token in name for token in CONTENT_TOKENS):
         return False
