@@ -452,3 +452,48 @@ providers:
       note: >-
         A bot token reads history only in channels the bot has joined. Invite it with
         /invite @<app name> in every public or private channel that should be indexed.
+
+  imanage:
+    oauth_type: with_refresh
+    # Host-relative: iManage Cloud tenants live at cloudimanage.com, a firm on its own
+    # infrastructure has its own hostname. Both endpoints follow the host set on the
+    # connection, so a self-hosted firm changes one field rather than needing its own
+    # provider entry.
+    authorize_url: https://cloudimanage.com/auth/oauth2/authorize
+    token_url: https://cloudimanage.com/auth/oauth2/token
+    # iManage issues an X-Auth-Token rather than a bearer, and takes the client
+    # credentials in the form body on the token call.
+    client_credential_location: body
+    # Read is the whole grant. iManage's write scopes would let this appliance change a
+    # firm's documents and their security; a shadow index needs neither.
+    scope: read
+    registration:
+      console: iManage Control Center
+      console_url: https://cloudimanage.com
+      create: >-
+        Control Center → Applications → Add an application manually. The signed-in user
+        must be a member of the NRTADMIN group, or hold a role with Tier 2 Control
+        Center privileges; no other role can register an application.
+      app_type: >-
+        Register it as a third-party application that accesses iManage Work through the
+        API only. It does not extend the iManage user interface, so it needs no UI
+        extension package.
+      redirect_field: >-
+        Enter the appliance's callback exactly as shown in the setup modal.
+      scope_label: Application scopes
+      scope_location: >-
+        Requested in the authorization URL; nothing to type. Keep the registered
+        application read-only — this appliance mirrors security, it must never be able
+        to change it.
+      secret: >-
+        The application's configuration shows the API Key and API Secret. "Auto-Generate"
+        creates the secret if the firm does not supply one; copy it then, it is not
+        shown again.
+      account: >-
+        Authorize with a dedicated account whose workspace access is exactly what the
+        firm wants searchable. Matters that account cannot open are never listed, so
+        they are never indexed.
+      note: >-
+        There is no self-service route to a tenant. Registering this application needs
+        an existing iManage environment — the firm's own, or a sandbox tenant they can
+        grant access to.

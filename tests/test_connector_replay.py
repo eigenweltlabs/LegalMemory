@@ -58,6 +58,14 @@ VALIDATE_ROUTES: dict[str, dict[str, Recorded]] = {
         )
     },
     "box": {"GET https://api.box.com/2.0/users/me": Recorded({"id": "1"})},
+    "imanage": {
+        "GET https://cloudimanage.com/work/api/v2/customers": Recorded(
+            {"data": [{"id": "kanzlei"}]}
+        ),
+        "GET https://cloudimanage.com/work/api/v2/customers/kanzlei/libraries": Recorded(
+            {"data": [{"id": "ACTIVE_DE"}]}
+        ),
+    },
     "notion": {"GET https://api.notion.com/v1/users/me": Recorded({"id": "user-1"})},
     "slack": {"GET https://slack.com/api/auth.test": Recorded({"ok": True, "team": "Kanzlei"})},
     "confluence": {
@@ -1873,8 +1881,17 @@ def test_only_connectors_with_a_folder_tree_declare_scoping():
     scoping = {spec.short_name for spec in CATALOG if spec.supports_scoping}
     # A mailbox, a calendar or a chat workspace has no folder tree worth scoping, and
     # claiming otherwise would offer the operator a picker that cannot be populated.
-    # Clio's tree is its matter list — flat, but a real unit of selection.
-    assert scoping == {"sharepoint_online", "onedrive", "dropbox", "box", "google_drive", "clio"}
+    # Clio's tree is its matter list and iManage's is library then workspace — both
+    # shallow, both a real unit of selection.
+    assert scoping == {
+        "sharepoint_online",
+        "onedrive",
+        "dropbox",
+        "box",
+        "google_drive",
+        "clio",
+        "imanage",
+    }
 
 
 # ----------------------------------------------------------------- SharePoint scope
@@ -2049,3 +2066,546 @@ def test_sharepoint_browse_lists_the_folder_tree_for_the_picker(tmp_path):
 
     nested = _browse("sharepoint_online", routes, tmp_path, node="folder:drive-1|f-mandate")
     assert [node["title"] for node in nested if node["node_type"] == "folder"] == ["Mandat-Neu"]
+
+
+# ---------------------------------------------------------------------- iManage Work
+#
+# Same manual matrix as NetDocuments: two containers with different security, a sync
+# that keeps them different, a security change at the source landing on the next run,
+# and documents arriving and leaving.
+#
+# iManage differs from NetDocuments in one way that matters: it states on every object
+# whether that object inherits its container's security. Inheritance here is the
+# source's own answer, so it is honoured — and an object that overrides is read on its
+# own rather than assumed.
+
+IM = "https://cloudimanage.com/work/api/v2/customers/kanzlei"
+
+
+def _im_security(default: str, *acl: dict) -> dict:
+    return {"data": {"default_security": default, "acl": list(acl)}}
+
+
+def _im_trustee(identifier: str, kind: str, level: str, **extra) -> dict:
+    return {"id": identifier, "name": identifier, "type": kind, "access_level": level, **extra}
+
+
+def _im_document(identifier: str, name: str, *, security: str = "inherit", **extra) -> dict:
+    return {
+        "id": identifier,
+        "name": name,
+        "extension": "docx",
+        "size": 12,
+        "version": 1,
+        "database": "ACTIVE_DE",
+        "document_number": identifier.partition("!")[2].partition(".")[0],
+        "default_security": security,
+        "workspace_id": "ACTIVE_DE!WS01",
+        "workspace_name": "2026-0011 Mandant GmbH",
+        "author_description": "Anwalt",
+        "class_description": "Schriftsatz",
+        "create_date": "2026-01-01T00:00:00Z",
+        "edit_date": "2026-02-01T00:00:00Z",
+        **extra,
+    }
+
+
+_IM_WALLED = {
+    "id": "ACTIVE_DE!WS01",
+    "name": "2026-0011 Mandant GmbH",
+    "database": "ACTIVE_DE",
+    "description": "Walled matter",
+    "owner_description": "Partner",
+    "custom1_description": "Mandant GmbH",
+    "custom2_description": "2026-0011",
+}
+_IM_OPEN = {
+    "id": "ACTIVE_DE!WS02",
+    "name": "2026-0012 Kunde AG",
+    "database": "ACTIVE_DE",
+    "description": "Open matter",
+    "owner_description": "Partner",
+}
+
+
+def _im_routes(**overrides) -> dict[str, Recorded]:
+    routes: dict[str, Recorded] = {
+        "GET https://cloudimanage.com/work/api/v2/customers": Recorded(
+            {"data": [{"id": "kanzlei"}]}
+        ),
+        f"GET {IM}/libraries": Recorded({"data": [{"id": "ACTIVE_DE"}]}),
+        f"GET {IM}/libraries/ACTIVE_DE/workspaces": Recorded({"data": [_IM_WALLED, _IM_OPEN]}),
+        f"GET {IM}/libraries/ACTIVE_DE/workspaces/ACTIVE_DE!WS01/security": Recorded(
+            _im_security("private", _im_trustee("LITIGATION", "group", "read"))
+        ),
+        f"GET {IM}/libraries/ACTIVE_DE/workspaces/ACTIVE_DE!WS02/security": Recorded(
+            _im_security("public")
+        ),
+        f"GET {IM}/libraries/ACTIVE_DE/folders/ACTIVE_DE!WS01/subfolders": Recorded({"data": []}),
+        f"GET {IM}/libraries/ACTIVE_DE/folders/ACTIVE_DE!WS02/subfolders": Recorded({"data": []}),
+        f"GET {IM}/libraries/ACTIVE_DE/folders/ACTIVE_DE!WS01/documents": Recorded(
+            {"data": [_im_document("ACTIVE_DE!4711.1", "Klageschrift.docx")]}
+        ),
+        f"GET {IM}/libraries/ACTIVE_DE/folders/ACTIVE_DE!WS02/documents": Recorded(
+            {"data": [_im_document("ACTIVE_DE!4712.1", "Vertrag.docx")]}
+        ),
+        f"GET {IM}/libraries/ACTIVE_DE/documents/ACTIVE_DE!4711.1/download": Recorded(
+            content=b"im bytes"
+        ),
+        f"GET {IM}/libraries/ACTIVE_DE/documents/ACTIVE_DE!4712.1/download": Recorded(
+            content=b"im bytes"
+        ),
+        f"GET {IM}/libraries/ACTIVE_DE/groups/LITIGATION/members": Recorded(
+            {"data": [{"email": "Litigator@Kanzlei.de"}]}
+        ),
+    }
+    routes.update(overrides)
+    return routes
+
+
+def test_imanage_two_workspaces_keep_the_different_security_they_have_at_the_source(tmp_path):
+    connector, _client = build("imanage", _im_routes(), staging=tmp_path)
+    try:
+        observations = list(connector.full_scan())
+    finally:
+        connector.close()
+
+    by_name = {item.name: item for item in observations}
+    # Workspaces and folders are walked for context, not indexed — a matter stub would
+    # match every query weakly. The security they carry reaches their documents.
+    assert set(by_name) == {"Klageschrift.docx", "Vertrag.docx"}
+
+    walled = by_name["Klageschrift.docx"]
+    open_matter = by_name["Vertrag.docx"]
+    assert [grant["principal"] for grant in walled.acl] == ["group:imanage:litigation"]
+    # public means library-wide, which on a single-firm appliance is everyone here.
+    assert [grant["principal"] for grant in open_matter.acl] == ["role:authenticated"]
+    assert walled.acl != open_matter.acl
+
+
+def test_imanage_an_inheriting_document_takes_its_workspace_audience(tmp_path):
+    """Inheritance is iManage's own answer, not this connector guessing."""
+    connector, client = build("imanage", _im_routes(), staging=tmp_path)
+    try:
+        observations = list(connector.full_scan())
+    finally:
+        connector.close()
+
+    claim = next(item for item in observations if item.name == "Klageschrift.docx")
+    assert [grant["principal"] for grant in claim.acl] == ["group:imanage:litigation"]
+    # Inheriting costs no extra call: the document's security is not fetched.
+    assert not client.called("/documents/ACTIVE_DE!4711.1/security")
+
+
+def test_imanage_an_overriding_document_is_read_on_its_own(tmp_path):
+    """A restricted memo inside an open matter keeps its own, narrower audience."""
+    routes = _im_routes(
+        **{
+            f"GET {IM}/libraries/ACTIVE_DE/folders/ACTIVE_DE!WS02/documents": Recorded(
+                {"data": [_im_document("ACTIVE_DE!4712.1", "Vertrag.docx", security="private")]}
+            ),
+            f"GET {IM}/libraries/ACTIVE_DE/documents/ACTIVE_DE!4712.1/security": Recorded(
+                _im_security("private", _im_trustee("PARTNERS", "group", "read_write"))
+            ),
+        }
+    )
+    connector, _client = build("imanage", routes, staging=tmp_path)
+    try:
+        observations = list(connector.full_scan())
+    finally:
+        connector.close()
+
+    contract = next(item for item in observations if item.name == "Vertrag.docx")
+    # Not the workspace's firm-wide audience.
+    assert [grant["principal"] for grant in contract.acl] == ["group:imanage:partners"]
+
+
+def test_imanage_no_access_is_a_wall_not_a_grant(tmp_path):
+    routes = _im_routes(
+        **{
+            f"GET {IM}/libraries/ACTIVE_DE/workspaces/ACTIVE_DE!WS01/security": Recorded(
+                _im_security(
+                    "private",
+                    _im_trustee("LITIGATION", "group", "read"),
+                    _im_trustee("INTERNS", "group", "no_access"),
+                    _im_trustee("JSCHMIDT", "user", "no_access"),
+                )
+            )
+        }
+    )
+    connector, _client = build("imanage", routes, staging=tmp_path)
+    try:
+        observations = list(connector.full_scan())
+    finally:
+        connector.close()
+
+    walled = next(item for item in observations if item.name == "Klageschrift.docx")
+    principals = [grant["principal"] for grant in walled.acl]
+    assert principals == ["group:imanage:litigation"]
+    assert not any("intern" in principal for principal in principals)
+    assert not any("jschmidt" in principal for principal in principals)
+
+
+def test_imanage_a_user_trustee_with_an_address_becomes_that_address(tmp_path):
+    """An iManage login id matches no caller here; an address does."""
+    routes = _im_routes(
+        **{
+            f"GET {IM}/libraries/ACTIVE_DE/workspaces/ACTIVE_DE!WS01/security": Recorded(
+                _im_security(
+                    "private",
+                    _im_trustee("JSCHMIDT", "user", "read", email="Jan.Schmidt@Kanzlei.de"),
+                    _im_trustee("MMUELLER", "user", "read"),
+                )
+            )
+        }
+    )
+    connector, _client = build("imanage", routes, staging=tmp_path)
+    try:
+        observations = list(connector.full_scan())
+    finally:
+        connector.close()
+
+    walled = next(item for item in observations if item.name == "Klageschrift.docx")
+    principals = [grant["principal"] for grant in walled.acl]
+    assert "user:jan.schmidt@kanzlei.de" in principals
+    # No address: the id lands in the namespace the identity layer reconciles, rather
+    # than being dropped or guessed at.
+    assert "user:id:mmueller" in principals
+
+
+def test_imanage_a_restricted_subfolder_is_not_flattened_to_its_workspace(tmp_path):
+    routes = _im_routes(
+        **{
+            f"GET {IM}/libraries/ACTIVE_DE/folders/ACTIVE_DE!WS02/subfolders": Recorded(
+                {
+                    "data": [
+                        {
+                            "id": "ACTIVE_DE!F900",
+                            "name": "Vertraulich",
+                            "database": "ACTIVE_DE",
+                            "workspace_id": "ACTIVE_DE!WS02",
+                        }
+                    ]
+                }
+            ),
+            f"GET {IM}/libraries/ACTIVE_DE/folders/ACTIVE_DE!F900/security": Recorded(
+                _im_security("private", _im_trustee("PARTNERS", "group", "read"))
+            ),
+            f"GET {IM}/libraries/ACTIVE_DE/folders/ACTIVE_DE!F900/subfolders": Recorded(
+                {"data": []}
+            ),
+            f"GET {IM}/libraries/ACTIVE_DE/folders/ACTIVE_DE!F900/documents": Recorded(
+                {"data": [_im_document("ACTIVE_DE!4713.1", "Geheim.docx")]}
+            ),
+            f"GET {IM}/libraries/ACTIVE_DE/documents/ACTIVE_DE!4713.1/download": Recorded(
+                content=b"im bytes"
+            ),
+            f"GET {IM}/libraries/ACTIVE_DE/groups/PARTNERS/members": Recorded(
+                {"data": [{"email": "partner@kanzlei.de"}]}
+            ),
+        }
+    )
+    connector, _client = build("imanage", routes, staging=tmp_path)
+    try:
+        observations = list(connector.full_scan())
+    finally:
+        connector.close()
+
+    secret = next(item for item in observations if item.name == "Geheim.docx")
+    # The workspace is firm-wide; the folder is not, and the document inherits the
+    # folder rather than jumping back up to the workspace.
+    assert [grant["principal"] for grant in secret.acl] == ["group:imanage:partners"]
+    assert "Vertraulich" in secret.path
+
+
+def test_imanage_expands_groups_into_memberships(tmp_path):
+    connector, _client = build("imanage", _im_routes(), staging=tmp_path)
+    try:
+        list(connector.full_scan())
+        memberships = connector.memberships()
+    finally:
+        connector.close()
+
+    rows = {(row["group_id"], row["member_id"]) for row in memberships}
+    assert ("imanage:litigation", "litigator@kanzlei.de") in rows
+    assert all(row["member_id"] == row["member_id"].casefold() for row in memberships)
+
+
+def test_imanage_unreadable_security_leaves_the_workspace_unknown(tmp_path):
+    routes = _im_routes(
+        **{
+            f"GET {IM}/libraries/ACTIVE_DE/workspaces/ACTIVE_DE!WS01/security": Recorded(
+                {}, status=403
+            )
+        }
+    )
+    connector, _client = build("imanage", routes, staging=tmp_path)
+    try:
+        observations = list(connector.full_scan())
+    finally:
+        connector.close()
+
+    # The documents that inherit the unreadable workspace stay unknown rather than
+    # becoming public or empty.
+    claim = next(item for item in observations if item.name == "Klageschrift.docx")
+    assert claim.acl is None
+
+
+def test_imanage_an_unreadable_document_override_never_falls_back_to_the_container(tmp_path):
+    """The whole point of an override is usually that it is narrower."""
+    routes = _im_routes(
+        **{
+            f"GET {IM}/libraries/ACTIVE_DE/folders/ACTIVE_DE!WS02/documents": Recorded(
+                {"data": [_im_document("ACTIVE_DE!4712.1", "Vertrag.docx", security="private")]}
+            ),
+            f"GET {IM}/libraries/ACTIVE_DE/documents/ACTIVE_DE!4712.1/security": Recorded(
+                {}, status=403
+            ),
+        }
+    )
+    connector, _client = build("imanage", routes, staging=tmp_path)
+    try:
+        observations = list(connector.full_scan())
+    finally:
+        connector.close()
+
+    contract = next(item for item in observations if item.name == "Vertrag.docx")
+    assert contract.acl is None
+
+
+def test_imanage_permission_mirroring_can_be_turned_off(tmp_path):
+    connector, client = build(
+        "imanage", _im_routes(), staging=tmp_path, config={"mirror_permissions": False}
+    )
+    try:
+        observations = list(connector.full_scan())
+    finally:
+        connector.close()
+
+    assert observations, "turning off the mirror must not empty the sync"
+    assert all(item.acl is None for item in observations)
+    assert not client.called("/security")
+
+
+def test_imanage_scoped_to_one_workspace_never_reads_the_other(tmp_path):
+    routes = _im_routes(
+        **{
+            f"GET {IM}/libraries/ACTIVE_DE/workspaces/ACTIVE_DE!WS01": Recorded(
+                {"data": _IM_WALLED}
+            )
+        }
+    )
+    connector, client = build(
+        "imanage",
+        routes,
+        staging=tmp_path,
+        node_selections=[
+            NodeSelectionData(
+                source_node_id="ACTIVE_DE!WS01",
+                node_type="folder",
+                node_metadata={"workspace_id": "ACTIVE_DE!WS01", "library_id": "ACTIVE_DE"},
+            )
+        ],
+    )
+    try:
+        names = {item.name for item in connector.full_scan()}
+    finally:
+        connector.close()
+
+    assert "Klageschrift.docx" in names
+    assert "Vertrag.docx" not in names
+    assert not client.called("/workspaces/ACTIVE_DE!WS02")
+
+
+def test_imanage_browse_offers_libraries_then_workspaces(tmp_path):
+    connector, _client = build("imanage", _im_routes(), staging=tmp_path)
+    try:
+        libraries = connector.browse_children(None)
+        workspaces = connector.browse_children("library:ACTIVE_DE")
+    finally:
+        connector.close()
+
+    assert [node["source_node_id"] for node in libraries] == ["library:ACTIVE_DE"]
+    assert all(node["has_children"] for node in libraries)
+    assert {node["source_node_id"] for node in workspaces} == {
+        "ACTIVE_DE!WS01",
+        "ACTIVE_DE!WS02",
+    }
+
+
+def _im_cursor(**overrides) -> dict:
+    data = {
+        "edited_since": "2026-02-15T00:00:00+00:00",
+        "full_sync_required": False,
+        "last_full_sync_timestamp": datetime.now(UTC).isoformat(),
+        "workspace_acls": {
+            "ACTIVE_DE!WS01": ["group:imanage:litigation"],
+            "ACTIVE_DE!WS02": ["role:authenticated"],
+        },
+        "workspace_documents": {
+            "ACTIVE_DE!WS01": ["ACTIVE_DE!4711.1"],
+            "ACTIVE_DE!WS02": ["ACTIVE_DE!4712.1"],
+        },
+    }
+    data.update(overrides)
+    return data
+
+
+def test_imanage_incremental_picks_up_documents_edited_since_the_watermark(tmp_path):
+    routes = _im_routes(
+        **{
+            f"GET {IM}/libraries/ACTIVE_DE/documents/search": Recorded(
+                {"data": [_im_document("ACTIVE_DE!4799.1", "Nachtrag.docx")]}
+            ),
+            f"GET {IM}/libraries/ACTIVE_DE/documents/ACTIVE_DE!4799.1/download": Recorded(
+                content=b"im bytes"
+            ),
+        }
+    )
+    connector, client = build("imanage", routes, staging=tmp_path, cursor_data=_im_cursor())
+    try:
+        batch = connector.changes(None)
+    finally:
+        connector.close()
+
+    assert {item.name for item in batch.observations} == {"Nachtrag.docx"}
+    assert client.called("edit_date_from")
+    assert json.loads(batch.next_cursor)["edited_since"] > "2026-02-15"
+
+
+def test_imanage_incremental_re_emits_a_workspace_whose_security_changed(tmp_path):
+    """Re-securing a matter moves no document timestamp; only the diff catches it."""
+    routes = _im_routes(
+        **{
+            f"GET {IM}/libraries/ACTIVE_DE/workspaces/ACTIVE_DE!WS01/security": Recorded(
+                _im_security("private", _im_trustee("PARTNERS", "group", "read"))
+            ),
+            f"GET {IM}/libraries/ACTIVE_DE/documents/search": Recorded({"data": []}),
+            f"GET {IM}/libraries/ACTIVE_DE/groups/PARTNERS/members": Recorded(
+                {"data": [{"email": "partner@kanzlei.de"}]}
+            ),
+        }
+    )
+    connector, _client = build("imanage", routes, staging=tmp_path, cursor_data=_im_cursor())
+    try:
+        batch = connector.changes(None)
+        memberships = connector.memberships()
+    finally:
+        connector.close()
+
+    by_name = {item.name: item for item in batch.observations}
+    assert "Klageschrift.docx" in by_name
+    assert [grant["principal"] for grant in by_name["Klageschrift.docx"].acl] == [
+        "group:imanage:partners"
+    ]
+    # The revoked group is not expanded any more.
+    assert not any("litigation" in row["group_id"] for row in memberships)
+    assert json.loads(batch.next_cursor)["workspace_acls"]["ACTIVE_DE!WS01"] == [
+        "group:imanage:partners"
+    ]
+
+
+def test_imanage_incremental_deletes_documents_of_a_workspace_that_closed(tmp_path):
+    routes = _im_routes(
+        **{
+            f"GET {IM}/libraries/ACTIVE_DE/workspaces": Recorded({"data": [_IM_OPEN]}),
+            f"GET {IM}/libraries/ACTIVE_DE/documents/search": Recorded({"data": []}),
+        }
+    )
+    connector, _client = build("imanage", routes, staging=tmp_path, cursor_data=_im_cursor())
+    try:
+        batch = connector.changes(None)
+    finally:
+        connector.close()
+
+    assert set(batch.deleted_external_ids) == {"ACTIVE_DE!4711.1"}
+
+
+@pytest.mark.parametrize(
+    ("label", "response"),
+    [
+        ("forbidden", Recorded({}, status=403)),
+        ("empty", Recorded({"data": []})),
+    ],
+)
+def test_imanage_an_unreadable_workspace_listing_never_deletes_the_estate(
+    label, response, tmp_path
+):
+    routes = _im_routes(**{f"GET {IM}/libraries/ACTIVE_DE/workspaces": response})
+    connector, _client = build("imanage", routes, staging=tmp_path, cursor_data=_im_cursor())
+    try:
+        batch = connector.changes(None)
+    finally:
+        connector.close()
+
+    assert batch.deleted_external_ids == [], label
+    assert batch.observations == [], label
+    assert json.loads(batch.next_cursor)["full_sync_required"] is True, label
+
+
+def test_imanage_a_public_workspace_does_not_re_sync_itself_on_every_run(tmp_path):
+    """is_public has to be part of the ACL snapshot, or the diff never matches.
+
+    A public workspace mirrors to an empty viewer list plus the public flag. Snapshotting
+    only the viewers made it differ from its own recomputed value every time, so every
+    open matter re-synced its whole contents on every incremental run.
+    """
+    routes = _im_routes(**{f"GET {IM}/libraries/ACTIVE_DE/documents/search": Recorded({"data": []})})
+    connector, _client = build("imanage", routes, staging=tmp_path)
+    try:
+        list(connector.full_scan())
+        first = json.loads(connector.cursor_state())
+    finally:
+        connector.close()
+
+    connector, _client = build(
+        "imanage",
+        routes,
+        staging=tmp_path,
+        cursor_data={**first, "full_sync_required": False},
+    )
+    try:
+        batch = connector.changes(None)
+    finally:
+        connector.close()
+
+    # Nothing was edited and nothing was re-secured, so nothing comes back.
+    assert batch.observations == []
+    assert first["workspace_acls"]["ACTIVE_DE!WS02"] == ["role:authenticated"]
+
+
+def test_imanage_containers_are_walked_for_context_but_never_indexed(tmp_path):
+    """A workspace or folder stub in the corpus matches every query weakly."""
+    routes = _im_routes(
+        **{
+            f"GET {IM}/libraries/ACTIVE_DE/folders/ACTIVE_DE!WS01/subfolders": Recorded(
+                {
+                    "data": [
+                        {
+                            "id": "ACTIVE_DE!F100",
+                            "name": "Schriftsaetze",
+                            "database": "ACTIVE_DE",
+                        }
+                    ]
+                }
+            ),
+            f"GET {IM}/libraries/ACTIVE_DE/folders/ACTIVE_DE!F100/security": Recorded(
+                _im_security("inherit")
+            ),
+            f"GET {IM}/libraries/ACTIVE_DE/folders/ACTIVE_DE!F100/subfolders": Recorded(
+                {"data": []}
+            ),
+            f"GET {IM}/libraries/ACTIVE_DE/folders/ACTIVE_DE!F100/documents": Recorded(
+                {"data": []}
+            ),
+        }
+    )
+    connector, _client = build("imanage", routes, staging=tmp_path)
+    try:
+        names = {item.name for item in connector.full_scan()}
+    finally:
+        connector.close()
+
+    assert names == {"Klageschrift.docx", "Vertrag.docx"}
+    assert "Schriftsaetze" not in names
+    assert "2026-0011 Mandant GmbH" not in names
