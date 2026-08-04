@@ -1,6 +1,6 @@
 ---
 title: "Live events: Microsoft 365"
-description: Near-real-time SharePoint and OneDrive change delivery through Azure Event Hubs — outbound-only, no inbound webhook.
+description: "Near-real-time SharePoint and OneDrive change delivery through Azure Event Hubs: outbound-only, no inbound webhook."
 ---
 
 This is the customer-admin setup for near-real-time SharePoint and OneDrive
@@ -119,14 +119,14 @@ az role assignment create \
 
 If `Microsoft Graph Change Tracking` is missing, a tenant administrator must
 create its service principal using the globally fixed application id
-`0bf30f3b-4a52-48df-9a82-234910c4a086` — Microsoft documents both the lookup
+`0bf30f3b-4a52-48df-9a82-234910c4a086`. Microsoft documents both the lookup
 and the creation request in
 [Receive change notifications through Azure Event Hubs](https://learn.microsoft.com/en-us/graph/change-notifications-delivery-event-hubs#what-if-the-microsoft-graph-change-tracking-application-is-missing).
 
 ## Configure the appliance
 
 Store the receiver secret in the customer's secret manager and provide these
-deployment values **to the `app` container only** — never to the worker or
+deployment values **to the `app` container only**, never to the worker or
 watcher containers:
 
 ```dotenv
@@ -144,7 +144,7 @@ KI_MICROSOFT_EVENTS_CLIENT_SECRET=
 
 The notification URL (the `EventHub:` form Microsoft Graph writes to) is
 deliberately a separate setting from the AMQP coordinates the appliance
-consumes from — keeping them apart prevents a portal value being pasted into
+consumes from; keeping them apart prevents a portal value being pasted into
 the wrong field and producing a subscription that can never be received.
 
 Restart the `app` container. After the first SharePoint sync, the appliance

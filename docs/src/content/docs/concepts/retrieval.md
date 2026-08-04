@@ -1,6 +1,6 @@
 ---
 title: How retrieval works
-description: The retrieval query path in LegalMemory — access-scope compilation, the fused search legs, ranking adjustments, index contents, and configuration.
+description: "The retrieval query path in LegalMemory: access-scope compilation, the fused search legs, ranking adjustments, index contents, and configuration."
 ---
 
 LegalMemory answers search queries from two stores. PostgreSQL holds the structured layer (documents, versions, matters, relations, grants) and is the authority for authorization. OpenSearch holds one chunk index and performs lexical (BM25) and dense (approximate kNN) ranking. The retrieval service (`RetrievalService` in `src/knowledge_index/retrieval.py`) compiles an access scope in SQL, runs the ranked legs inside that scope, fuses and adjusts the results, and re-verifies every returned row against SQL before it leaves the service.
@@ -30,7 +30,7 @@ The scope is built from `version_predicate`, a correlated SQL predicate over `Do
 - If a source object carries a known ACL, the version needs at least one accessible active source observation; a local grant cannot override an external source ACL. Sources of kind `local_fs` with no object ACL delegate to the project boundary. External sources with no mirrored grants fail closed.
 - Administrators (`role:admin`, `system:admin`) bypass grants but still require an active (non-deleted) source observation.
 
-`compile_scope` evaluates this predicate to the concrete sets of visible project ids and document ids (intersected with any requested `project_id` filter) and returns a `CompiledAccessScope`. Its `opensearch_filter()` is a `bool` filter with `terms` clauses on `document_id` and `project_id` — the exact ids the SQL authorization query produced. An empty document set compiles to `match_none`, so an unauthorized caller produces empty queries, not unfiltered ones.
+`compile_scope` evaluates this predicate to the concrete sets of visible project ids and document ids (intersected with any requested `project_id` filter) and returns a `CompiledAccessScope`. Its `opensearch_filter()` is a `bool` filter with `terms` clauses on `document_id` and `project_id`, the exact ids the SQL authorization query produced. An empty document set compiles to `match_none`, so an unauthorized caller produces empty queries, not unfiltered ones.
 
 Metadata filters (`SearchFilters` in `src/knowledge_index/retrieval_types.py`) are appended to the same `bool` filter:
 
@@ -38,7 +38,7 @@ Metadata filters (`SearchFilters` in `src/knowledge_index/retrieval_types.py`) a
 | --- | --- |
 | `project_id` | `term` on `project_id` (also narrows the compiled scope) |
 | `matter_id` | `term` on `matter_id` |
-| `doc_type` | `term` on `doc_type_ancestors` — subtree semantics: filtering by an interior ontology node matches every document typed at or below it |
+| `doc_type` | `term` on `doc_type_ancestors`, with subtree semantics: filtering by an interior ontology node matches every document typed at or below it |
 | `version_status` | `term` on `version_status` |
 | `language` | `term` on `language` |
 | `date_from` / `date_to` | `range` on `doc_date` |
@@ -53,7 +53,7 @@ Three ranked legs run over the chunk index (`OpenSearchIndex.multi_search` in `s
 | --- | --- | --- |
 | `lexical` | `match` on the query text | `text` (BM25, `german` analyzer) |
 | `semantic` | `knn` on the query embedding, with the strict filter passed as the kNN `filter` (pre-filtered approximate kNN) | `embedding` (HNSW) |
-| `identifier` | `match` on the query text | `identifiers_text` — the space-joined identifiers extracted for the document at ingest, so a pasted case number, Aktenzeichen, or statute reference matches the document that carries it. The query is not parsed with regexes |
+| `identifier` | `match` on the query text | `identifiers_text`, the space-joined identifiers extracted for the document at ingest, so a pasted case number, Aktenzeichen, or statute reference matches the document that carries it. The query is not parsed with regexes |
 
 Each leg requests an oversampled window of `min(max(limit * 5, 50), 500)` hits.
 
@@ -98,7 +98,7 @@ With `retrieval.collapse_per_document: true` (default), surviving candidates are
 
 ### Optional reranker
 
-With `retrieval.rerank_enabled: true`, the top 20 collapsed hits are sent in one call to the model assigned as `retrieval.rerank_model`, which returns a relevance score from 0 to 10 per version id. Those scores replace the fused scores and determine the final order; hits the model does not score are dropped. On a gateway error the call raises — there is no silent fallback to the fused order. When the reranker is disabled (the default), the fused, boosted, collapsed order is returned directly and no LLM call happens on the query path; the query embedding is then the only synchronous model call.
+With `retrieval.rerank_enabled: true`, the top 20 collapsed hits are sent in one call to the model assigned as `retrieval.rerank_model`, which returns a relevance score from 0 to 10 per version id. Those scores replace the fused scores and determine the final order; hits the model does not score are dropped. On a gateway error the call raises; there is no silent fallback to the fused order. When the reranker is disabled (the default), the fused, boosted, collapsed order is returned directly and no LLM call happens on the query path; the query embedding is then the only synchronous model call.
 
 ### Metadata-only search
 
@@ -109,10 +109,10 @@ With `retrieval.rerank_enabled: true`, the top 20 collapsed hits are sent in one
 The pipeline's index stage (`_index` in `src/knowledge_index/pipeline/runner.py`) writes one OpenSearch document per chunk row. Three kinds of rows exist per document version:
 
 - **Body chunks** (ordinals 0..n, `meta.kind = "chunk"`): the converted text split into windows of `chunk_chars` characters with `chunk_overlap_chars` overlap, preferring newline boundaries.
-- **One profile row** (ordinal −1, `meta.kind = "profile"`): written only for the document's latest final version when `profile_embeddings` is on. Deterministically assembled (no LLM, no regex) from labeled lines — title, document type, matter, reference numbers, parties, identifiers, date — plus the first 400 characters of the text.
+- **One profile row** (ordinal −1, `meta.kind = "profile"`): written only for the document's latest final version when `profile_embeddings` is on. Deterministically assembled (no LLM, no regex) from labeled lines (title, document type, matter, reference numbers, parties, identifiers, date) plus the first 400 characters of the text.
 - **Clause rows** (ordinals 1000+, `meta.kind = "clause"`): written for final/executed versions when `clause_embeddings` is on. Text and locus come from the model-extracted `notable_clauses` artifact of the metadata stage; each row carries its `clause_type` ontology node.
 
-The stored `text` is always the raw chunk text. When `chunk_contextualize` is on, the *embedded* string is the chunk text prefixed with a one-line context header (`title — doc type label — matter title`), so an isolated paragraph stays findable; the header is not stored or displayed.
+The stored `text` is always the raw chunk text. When `chunk_contextualize` is on, the *embedded* string is the chunk text prefixed with a one-line context header joining the title, the document type label and the matter title, so an isolated paragraph stays findable; the header is not stored or displayed.
 
 Fields per indexed chunk (`OpenSearchIndex._doc_body`):
 
@@ -125,7 +125,7 @@ Fields per indexed chunk (`OpenSearchIndex._doc_body`):
 | `version_status`, `language`, `doc_date` | `keyword` / `date` | Filter and boost inputs |
 | `chunk_kind`, `clause_type` | `keyword` | Row kind (`chunk` / `profile` / `clause`) and clause facet node |
 | `identifiers`, `identifiers_text` | `keyword` / `text` | Model-extracted document identifiers (case numbers, statute references, registry numbers), set on the document during the metadata stage and copied to every chunk; the identifier leg matches `identifiers_text` |
-| `allowed_principals`, `denied_principals`, `access_version` | `keyword` / `integer` | Denormalized projection of the effective grants at index time — for inspection and export only. Query-time authorization uses the compiled scope from SQL, not these fields |
+| `allowed_principals`, `denied_principals`, `access_version` | `keyword` / `integer` | Denormalized projection of the effective grants at index time, for inspection and export only. Query-time authorization uses the compiled scope from SQL, not these fields |
 | `meta` | `object`, not indexed | Chunk payload: `source_object_id`, `kind`, and for clause rows `locus` and `clause_type` |
 
 Index mechanics:

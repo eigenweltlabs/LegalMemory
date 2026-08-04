@@ -1,6 +1,6 @@
 ---
 title: Sign-in
-description: How the console drives the bundled Keycloak realm over its admin REST API — identity providers, the token-claims checklist, the People table, aliases, and local password accounts.
+description: "How the console drives the bundled Keycloak realm over its admin REST API: identity providers, the token-claims checklist, the People table, aliases, and local password accounts."
 ---
 
 **Sign-in** is the console page from which an administrator configures how the
@@ -21,8 +21,8 @@ password grant on the `admin-cli` client (`admin_client_id`), using
 credentials read from the environment at call time
 (`KI_KEYCLOAK_ADMIN_USERNAME` / `KI_KEYCLOAK_ADMIN_PASSWORD`). It then calls
 `/admin/realms/{realm}/…` on the internal address (`identity.admin_base_url`).
-Every write is idempotent: re-running setup — a second administrator, a
-re-pasted rotated secret, a fresh stack against an existing realm — converges
+Every write is idempotent: re-running setup (a second administrator, a
+re-pasted rotated secret, a fresh stack against an existing realm) converges
 on the same realm instead of failing or duplicating.
 
 | Console action | Realm objects created or updated |
@@ -33,7 +33,7 @@ on the same realm instead of failing or duplicating.
 | Reset password | A new temporary password credential; re-asserts `UPDATE_PASSWORD` |
 | Enable / disable | The user's `enabled` flag |
 | Delete person | Deletes the realm user |
-| Link (alias) | Nothing in the realm — writes `security.principal_aliases` in the appliance's own config |
+| Link (alias) | Nothing in the realm; writes `security.principal_aliases` in the appliance's own config |
 
 The identity provider client secret is written to Keycloak and additionally
 stored in the appliance database as AES-256-GCM ciphertext (under the same key
@@ -50,7 +50,7 @@ The temporary password is never included in an audit event.
 Four provider types are offered. All four are written into the realm as the
 same generic Keycloak `oidc` broker, with the endpoints filled from the
 provider's own discovery document rather than from Keycloak's branded social
-providers — so every configured value is traceable to something the
+providers, so every configured value is traceable to something the
 administrator can check.
 
 | Kind | Label | Extra field | Discovery URL |
@@ -86,12 +86,12 @@ of them fails:
    discovery document.
 4. **Ensure two broker mappers** on the instance:
    - `username-from-email` (`oidc-username-idp-mapper`, template
-     `${CLAIM.email}`) — forces the imported Keycloak username to be the email
+     `${CLAIM.email}`), which forces the imported Keycloak username to be the email
      address the provider asserts. This is the join key: connectors normalise
      every person to `user:<email>`, and access is decided by matching that
      string. A broker that imports someone as `ursula` while a source reports
      `ursula@firm.de` produces no error and no documents.
-   - `email` (`oidc-user-attribute-idp-mapper`) — copies the `email` claim to
+   - `email` (`oidc-user-attribute-idp-mapper`) copies the `email` claim to
      the user's email attribute.
 5. **Ensure the token claims** the appliance requires (next section).
 6. **Store the credential row** (client ID, encrypted secret, discovery URL,
@@ -100,7 +100,7 @@ of them fails:
 ### The redirect URI
 
 Each provider card shows the **redirect URI to register**, including for
-providers nobody has configured yet — it is the value a firm must register at
+providers nobody has configured yet; it is the value a firm must register at
 Google, Entra or Okta *before* it has a client ID and secret to paste back.
 It is derived exactly as:
 
@@ -125,10 +125,10 @@ session is created by any probe.
 | Check id | What is actually done | A failure means |
 | --- | --- | --- |
 | `discovery` | GET the stored discovery URL; validate JSON and the four required endpoints | The provider (or the pasted tenant/domain/URL) is unreachable, or the URL does not serve an OIDC discovery document |
-| `credentials` | POST an `authorization_code` grant with a code that cannot exist to the token endpoint, carrying the stored client ID and decrypted secret. Per RFC 6749 §5.2, `invalid_client` / `unauthorized_client` / HTTP 401 means the credentials were rejected; `invalid_grant` or `invalid_request` means the provider authenticated the client and only rejected the fake code — which is the pass | The client ID or secret is wrong (revoked, rotated, mistyped) |
+| `credentials` | POST an `authorization_code` grant with a code that cannot exist to the token endpoint, carrying the stored client ID and decrypted secret. Per RFC 6749 §5.2, `invalid_client` / `unauthorized_client` / HTTP 401 means the credentials were rejected; `invalid_grant` or `invalid_request` means the provider authenticated the client and only rejected the fake code, which is the pass | The client ID or secret is wrong (revoked, rotated, mistyped) |
 | `realm` | Read the broker instance back out of the realm; require it present, enabled, and its configured issuer equal to the freshly fetched one | The broker was deleted or disabled in Keycloak directly, or the realm points at a different issuer than the provider now reports |
 | `client:<id>` (one per `token_client_ids`) and `audience` | The token-claims checklist, re-read (next section) | See next section |
-| `login` | Start the authorization request at the realm's own `…/protocol/openid-connect/auth` with `kc_idp_hint=<alias>`, then follow the redirect chain. Keycloak's hops to its own canonical public URL are rewritten back to `admin_base_url` (the public name is unreachable from inside the compose network); the provider's hops are followed untouched. Success = the chain lands on the provider's authorization-endpoint origin and not on an error page | Keycloak stopped at its own broker page, the client is missing from the realm, or the provider refused — the reason is extracted from `error_description` / `error` in the redirect (Google's opaque `authError` blob is decoded for its readable fragments, e.g. `redirect_uri_mismatch`). If the provider gave no reason, the usual cause is an unregistered redirect URI |
+| `login` | Start the authorization request at the realm's own `…/protocol/openid-connect/auth` with `kc_idp_hint=<alias>`, then follow the redirect chain. Keycloak's hops to its own canonical public URL are rewritten back to `admin_base_url` (the public name is unreachable from inside the compose network); the provider's hops are followed untouched. Success = the chain lands on the provider's authorization-endpoint origin and not on an error page | Keycloak stopped at its own broker page, the client is missing from the realm, or the provider refused; the reason is extracted from `error_description` / `error` in the redirect (Google's opaque `authError` blob is decoded for its readable fragments, e.g. `redirect_uri_mismatch`). If the provider gave no reason, the usual cause is an unregistered redirect URI |
 
 The result is stored on the credential row (`last_tested_at`,
 `last_test_ok`, per-check detail) and shown on the card as
@@ -152,9 +152,9 @@ These checks cover what the appliance's own writes control. The other two
 claims the resolver consumes come from the shipped realm's client scopes and
 are matched against mirrored ACLs:
 
-- **`preferred_username`** (`security.username_claim`) — produced by the
+- **`preferred_username`** (`security.username_claim`): produced by the
   `profile` scope; becomes the `username:<value>` principal.
-- **`groups`** (`security.groups_claim`) — produced by the `groups` client
+- **`groups`** (`security.groups_claim`): produced by the `groups` client
   scope (group-membership mapper, `full.path: false`); each entry becomes a
   `group:<name>` principal, matched against mirrored group ACLs, and
   membership in any of `security.admin_groups` mints `role:admin`.
@@ -172,17 +172,17 @@ validation; no `groups` → no group-based ACL matches and no administrator.
 side:
 
 - **Realm users**, read over the admin API (default cap 200), with their
-  federated-identity links (which broker each person signs in through — an
+  federated-identity links (which broker each person signs in through; an
   empty list means a local password account).
 - **Identities the connectors mirrored**: every user principal from
   `source_group_members` (directory membership) plus `source_object_grants`
   (per-object shares), casefolded and keyed by address. Only sources that
-  report identities at all count as witnesses — a local folder mirrors no
+  report identities at all count as witnesses; a local folder mirrors no
   directory and is never counted against anybody.
 
 Each row shows: username, last seen (recovered from the most recent audit
 events naming that principal), sign-in route (broker aliases, or "password"),
-and **source match** — matched in *n* of *m* witnessing sources. Aliases
+and **source match**, matched in *n* of *m* witnessing sources. Aliases
 already configured in `security.principal_aliases` are applied before
 matching, so a bridged person reads as matched. Rows are sorted with the
 fewest matches first.
@@ -190,7 +190,7 @@ fewest matches first.
 **"Will see nothing" detection**: when at least one source reports identities
 and a person matches none of them, the row is flagged and names the sources
 that do not know the address. This is the failure the table exists to
-surface — such an account works perfectly, raises no error anywhere, and
+surface: such an account works perfectly, raises no error anywhere, and
 opens onto an empty index. The **Add person** form runs the same check while
 the administrator is still typing the address, and the create response
 repeats it.
@@ -198,21 +198,21 @@ repeats it.
 | Action | Endpoint | Behaviour |
 | --- | --- | --- |
 | List people | `GET /api/identity/people` | The join described above; also returns the mirrored-identity index and the alias map |
-| Add person | `POST /api/identity/people` | Validates the email (must be a real address — it is the join key), sets a minimum realm password policy if the realm has none (`length(12) and notUsername`), creates the user with `username` = email and `emailVerified`, generates a 20-character temporary password (four blocks of five, look-alike characters removed), sets it as temporary with `UPDATE_PASSWORD` required. 409 if the address can already sign in |
+| Add person | `POST /api/identity/people` | Validates the email (must be a real address, since it is the join key), sets a minimum realm password policy if the realm has none (`length(12) and notUsername`), creates the user with `username` = email and `emailVerified`, generates a 20-character temporary password (four blocks of five, look-alike characters removed), sets it as temporary with `UPDATE_PASSWORD` required. 409 if the address can already sign in |
 | Reset password | `POST /api/identity/people/{id}/password` | Issues a new temporary password; the old one stops working immediately; the first-sign-in change is re-armed. Offered in the console for password accounts only |
 | Enable / disable | `POST /api/identity/people/{id}/enabled` | Disable stops the account opening but keeps it and its history; refused (400) for the caller's own account |
 | Delete | `DELETE /api/identity/people/{id}` | Removes the realm user permanently; refused for the caller's own account. Disabling is the reversible option |
-| Link alias | `POST /api/identity/aliases` | Body `{principal, alias}` as `user:<address>` pairs; bridges a sign-in identity onto the identity a source reported for the same person. Additive only — an alias adds principals, never denies, so the worst a wrong entry does is fail to match. Stored in `security.principal_aliases`, not in the realm |
+| Link alias | `POST /api/identity/aliases` | Body `{principal, alias}` as `user:<address>` pairs; bridges a sign-in identity onto the identity a source reported for the same person. Additive only: an alias adds principals, never denies, so the worst a wrong entry does is fail to match. Stored in `security.principal_aliases`, not in the realm |
 | Remove alias | `DELETE /api/identity/aliases?principal=…` | Removes the bridge |
 
 Temporary passwords are shown exactly once, in the browser, and are never
-stored, logged, or retrievable — a reset issues a new one. Local password
+stored, logged, or retrievable; a reset issues a new one. Local password
 accounts exist for firms with no directory; when a broker is configured the
 form says so and recommends it instead.
 
 The self-guard (`is_self`) matches the realm account's id, username and email
-against every name the caller holds — the OIDC subject, the username, and the
-`user:` / `username:` principals — because behind an OIDC login the subject
+against every name the caller holds (the OIDC subject, the username, and the
+`user:` / `username:` principals), because behind an OIDC login the subject
 is the Keycloak user ID while behind a trusted proxy it is the asserted
 address. It is enforced by the endpoints, not just hidden in the UI.
 
@@ -224,16 +224,16 @@ Two ways into the appliance, selected by `security.auth_mode`:
   oauth2-proxy performs the OIDC login against the realm's
   `knowledge-index-ui` client and forwards the result upstream as headers. In
   the default `trusted_header` mode the resolver, finding no
-  `x-ki-principals` header, reads oauth2-proxy's headers instead — preferring
+  `x-ki-principals` header, reads oauth2-proxy's headers instead, preferring
   the verified email (`x-auth-request-email`, `x-forwarded-email`) over the
-  opaque OIDC user ID, then `preferred_username`, then the user header — and
+  opaque OIDC user ID, then `preferred_username`, then the user header, and
   turns `x-auth-request-groups` into `group:` principals (Keycloak's leading
   `/` on group paths is stripped). If `security.trusted_header_secret` is
   set, the request must also carry a matching `x-ki-proxy-secret` header;
   this pins header trust to the proxy.
 - **Direct to the app port** (compose port 8000). In `trusted_header` mode a
   caller may name its own principals in `x-ki-principals`
-  (`security.trusted_header_name`) — the development identity gate. The
+  (`security.trusted_header_name`), the development identity gate. The
   console participates: the UI attaches that header from
   `localStorage["ki.devPrincipals"]` or the `VITE_DEV_PRINCIPALS` build
   variable. Anyone who can reach the port becomes anyone, so this mode is for
@@ -241,8 +241,8 @@ Two ways into the appliance, selected by `security.auth_mode`:
   `oidc` mode the API instead requires a bearer token, validated by
   signature (RS256/ES256) against `security.jwks_url`, with issuer
   `security.oidc_issuer` and audience `security.oidc_audience` both enforced
-  — an empty audience is refused outright rather than accepting any client's
-  token.
+  (an empty audience is refused outright rather than accepting any client's
+  token).
 
 **Where `role:admin` comes from**: in both modes, the resolver adds
 `role:authenticated` to every successful login and `role:admin` when the
@@ -255,8 +255,8 @@ admin endpoint, keys on it.
 of the admin UI and no proxy stands in front of an MCP client. The
 development escape hatch `security.mcp_allow_trusted_header` (default
 `false`) can relax this and must never be on for a firm's appliance. The full
-OAuth resource-server flow — the 401 challenge, protected-resource metadata,
-audience binding to the MCP resource — is documented in
+OAuth resource-server flow (the 401 challenge, protected-resource metadata,
+audience binding to the MCP resource) is documented in
 [Deployment & identity](/operations/deployment/#signing-in-from-an-mcp-client).
 
 ## Configuration
@@ -274,8 +274,8 @@ Env vars follow the `KI_<SECTION>__<FIELD>` convention.
 | `identity.admin_client_id` | `KI_IDENTITY__ADMIN_CLIENT_ID` | `admin-cli` | Client used for the admin password grant |
 | `identity.audience_client_id` | `KI_IDENTITY__AUDIENCE_CLIENT_ID` | `knowledge-index-ui` | The client whose tokens the appliance validates; the audience mapper is asserted here, and the test login is started as this client |
 | `identity.token_client_ids` | `KI_IDENTITY__TOKEN_CLIENT_IDS` | `["knowledge-index-ui", "knowledge-index-mcp"]` | Every client that mints a token for a person; each is asserted to issue full access tokens carrying `sub` |
-| `identity.admin_username_env` | — | `KI_KEYCLOAK_ADMIN_USERNAME` | Name of the env var the admin username is read from, at call time |
-| `identity.admin_password_env` | — | `KI_KEYCLOAK_ADMIN_PASSWORD` | Name of the env var the admin password is read from. Neither credential is ever written to `config.json` |
+| `identity.admin_username_env` | n/a | `KI_KEYCLOAK_ADMIN_USERNAME` | Name of the env var the admin username is read from, at call time |
+| `identity.admin_password_env` | n/a | `KI_KEYCLOAK_ADMIN_PASSWORD` | Name of the env var the admin password is read from. Neither credential is ever written to `config.json` |
 
 Both base URLs exist because they name the same server from two networks: the
 appliance talks to Keycloak on the compose network, while the redirect URI a
@@ -297,7 +297,7 @@ callback does not vary by caller.
 | `security.admin_groups` | `KI_SECURITY__ADMIN_GROUPS` | `["knowledge-index-admins"]` | Membership in any of these mints `role:admin` |
 | `security.trusted_header_name` | `KI_SECURITY__TRUSTED_HEADER_NAME` | `x-ki-principals` | Header a caller may use to assert principals in `trusted_header` mode |
 | `security.trusted_header_secret` | `KI_SECURITY__TRUSTED_HEADER_SECRET` | unset | When set, requests must carry it in `x-ki-proxy-secret`; pins header trust to the proxy |
-| `security.principal_aliases` | — (written by the console) | `{}` | The alias bridges managed by the Link action |
+| `security.principal_aliases` | n/a (written by the console) | `{}` | The alias bridges managed by the Link action |
 | `security.mcp_allow_trusted_header` | `KI_SECURITY__MCP_ALLOW_TRUSTED_HEADER` | `false` | Development-only: lets `x-ki-principals` authenticate MCP calls |
 
 ## What the shipped dev realm seeds
@@ -310,19 +310,19 @@ callback does not vary by caller.
 - **Users**: `admin@example.com` (in `knowledge-index-admins`) plus three
   sample users, all with the documented dev password `lm-dev-only`.
 - **Clients**:
-  - `knowledge-index-ui` — confidential client oauth2-proxy signs in with
+  - `knowledge-index-ui`: confidential client oauth2-proxy signs in with
     (dev secret `lm-dev-only`); redirect URIs for the `:8090/oauth2/callback`
     entry; lightweight access tokens disabled; default scopes include
     `groups` and `knowledge-index-api`.
-  - `knowledge-index` — bearer-only client that exists as the API's audience.
-  - `knowledge-index-mcp` — public client with PKCE (S256) for MCP clients
+  - `knowledge-index`: bearer-only client that exists as the API's audience.
+  - `knowledge-index-mcp`: public client with PKCE (S256) for MCP clients
     that do not self-register; redirect URIs for local MCP tooling and
     `claude.ai` / `claude.com` callbacks.
-- **Client scopes**: `basic` (carries `sub` — Keycloak 25 moved it here —
+- **Client scopes**: `basic` (carries `sub`, which Keycloak 25 moved here,
   and `auth_time`), `profile` (`preferred_username`, full name), `email`,
   `groups` (group-membership claim, names without the leading `/`),
   `knowledge-index-api` (stamps `aud: knowledge-index`), and
-  **`knowledge-index-mcp`** — the scope that binds an access token to the MCP
+  **`knowledge-index-mcp`**, the scope that binds an access token to the MCP
   endpoint by stamping the resource URL (`http://localhost:8000/mcp` in dev)
   into `aud`, with a consent-screen entry. It is a realm-default *optional*
   scope, so any dynamically registered MCP client may request it.
@@ -331,8 +331,8 @@ callback does not vary by caller.
   `claude.com`, `opencode.ai`; consent required; full scope disabled; at most
   200 clients.
 
-How MCP clients use this — dynamic registration, the RFC 9728 metadata, the
-audience check — is covered in
+How MCP clients use this (dynamic registration, the RFC 9728 metadata, the
+audience check) is covered in
 [Deployment & identity](/operations/deployment/#signing-in-from-an-mcp-client),
 not here.
 

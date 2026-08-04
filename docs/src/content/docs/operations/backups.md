@@ -1,12 +1,12 @@
 ---
 title: Backup & restore
-description: The full reference — what a backup contains, encryption and verification, destinations, retention, and the staged restore.
+description: "The full reference: what a backup contains, encryption and verification, destinations, retention, and the staged restore."
 ---
 
 This appliance holds a law firm's document estate, the permission model that decides who
 may see which parts of it, an append-only access ledger the firm may have to produce, and
 the OAuth credentials that keep all of it synced. Losing it is not an outage. This page is
-how it gets backed up, and — the part that actually matters — how it comes back.
+how it gets backed up, and (the part that actually matters) how it comes back.
 
 Everything here is configured under **Backup** in the admin UI. There is nothing to edit
 in a config file.
@@ -16,7 +16,7 @@ in a config file.
 A backup is the whole appliance, not a database. That distinction is the design: restoring
 a Postgres dump without the search index, the uploaded files and the connector credential
 key produces something that starts, answers questions, and is quietly missing a third of
-the estate — which is worse than a restore that refuses to run.
+the estate, which is worse than a restore that refuses to run.
 
 | Component | What it holds | If it were missing |
 |---|---|---|
@@ -24,21 +24,21 @@ the estate — which is worse than a restore that refuses to run.
 | `postgres/litellm` | Gateway spend ledger and runtime model registry | Cost history, and any model added from the admin UI |
 | `postgres/langfuse` | Every model-call trace | The audit record of what the models were shown and returned |
 | `postgres/hatchet` | Workflow definitions, run history, the durable queue | In-flight work and the run history behind it |
-| `opensearch/snapshot` | The chunk index, its mappings and analyzers | Rebuildable by re-embedding every chunk — hours, and real money |
+| `opensearch/snapshot` | The chunk index, its mappings and analyzers | Rebuildable by re-embedding every chunk: hours, and real money |
 | `files/artifact-blobs` | Content-addressed originals of every fetched document | Re-fetchable only while each source still exists and still holds the file |
 | `files/uploaded` | Files imported through the admin UI | Outright. There is no upstream copy anywhere |
 | `files/connector-staging` | Mid-sync scratch (off by default) | Nothing a restore can use; a restore starts no scan |
 | `volumes/keycloak` | Users, sessions, client secrets, realm signing keys | Every login, and the keys that make existing tokens valid |
 | `volumes/hatchet-config` | Hatchet's generated server config | The client token stops being valid; re-mint with `scripts/bootstrap-hatchet.sh` |
 | `files/watched` | The folders the watcher was asked to keep an eye on | The watcher sits idle over an estate nobody notices has stopped being indexed |
-| `files/appliance-config` | The top-level files of the data directory — `config.json`, the whole of the appliance's configuration | The estate comes back to an appliance that has forgotten how it was set up |
-| `secrets/environment` | The deployment's `KI_*` secrets, above all `KI_CONNECTOR_CREDENTIAL_KEY` | See below — this is the one that ruins recoveries quietly |
+| `files/appliance-config` | The top-level files of the data directory: `config.json`, the whole of the appliance's configuration | The estate comes back to an appliance that has forgotten how it was set up |
+| `secrets/environment` | The deployment's `KI_*` secrets, above all `KI_CONNECTOR_CREDENTIAL_KEY` | See below; this is the one that ruins recoveries quietly |
 
 ### The connector credential key
 
 Connector OAuth tokens are stored as AES-256-GCM ciphertext under
 `KI_CONNECTOR_CREDENTIAL_KEY`, which lives in the deployment's environment and not in the
-database. Restore the database under a *different* key and everything appears to work —
+database. Restore the database under a *different* key and everything appears to work,
 until the first token refresh, at which point every connector the firm has authorized is
 dead and nothing says why.
 
@@ -48,12 +48,12 @@ holds. That refusal is the feature.
 
 Because the backup therefore contains the keys to the firm's document estate,
 `sources.environment_secrets` cannot be turned on unless `encrypt` is on. The
-configuration will not validate otherwise — it is not a warning you can click past.
+configuration will not validate otherwise; it is not a warning you can click past.
 
 ## Encryption
 
 On by default. AES-256-GCM under a 32-byte key, the same primitive and key-handling
-convention as the connector credential key. The appliance generates the key itself —
+convention as the connector credential key. The appliance generates the key itself;
 there is no shell command to run first.
 
 Set it under Backup → Security in the admin UI: press **Generate** and the appliance makes
@@ -61,7 +61,7 @@ one, shows it once, and stores it encrypted in its own database. **Keep the copy
 you somewhere that is not this appliance.** `ki backup-key --generate` does the same thing
 for a deployment with no browser. There is no environment variable for it: a secret that
 can be set two ways is a secret nobody can say the current value of. **Keep the shown
-copy somewhere that survives this appliance** — a backup whose key exists only on the
+copy somewhere that survives this appliance**. A backup whose key exists only on the
 machine the backup protects is not a backup. The key is deliberately never captured into the
 backups it protects.
 
@@ -82,7 +82,7 @@ Three destinations, chosen under Backup → Destination.
 **`local`** is a directory, which in practice is a mounted NAS or SMB share. Point
 `KI_BACKUP_MOUNT` at it in `.env`; it is mounted into the app and worker at `/backups`.
 The default is `./runtime/backups` on the host, which survives `docker compose down -v`
-but is on the same machine — fine for trying the feature out, not a backup.
+but is on the same machine: fine for trying the feature out, not a backup.
 
 **`s3`** is any S3-compatible endpoint: MinIO on the firm's own hardware, Wasabi, AWS.
 Credentials are typed under Backup → Destination and held encrypted in the database, never
@@ -96,7 +96,7 @@ pip install 'knowledge-index[s3]'
 **`restic`** is a restic repository, and it is the one to choose at any real scale. The
 other two store whole objects: a night's dump lands beside last night's and shares nothing
 with it, so a hundred-thousand-document estate is transferred and stored again every
-night, times whatever retention keeps — nineteen full copies under the default rules.
+night, times whatever retention keeps: nineteen full copies under the default rules.
 restic stores content-defined chunks instead, so a night that changed a few thousand rows
 costs the difference rather than the estate, and a night that changed nothing costs
 nothing. Measured on this appliance's own test suite: a second backup of an unchanged
@@ -108,12 +108,12 @@ Two things follow automatically and are worth knowing rather than discovering:
 * **restic does the encryption**, so `backup.encrypt` stays off and the appliance hands it
   plaintext. That is deliberate, not a gap. Sealing a component first produces a stream
   that shares no chunks with anything, which is exactly the property deduplication needs
-  and encryption destroys — the backups would still be encrypted and the feature paid for
+  and encryption destroys; the backups would still be encrypted and the feature paid for
   would silently stop working. The repository password is the same backup key the other
   destinations use, so there is one backup secret to keep safe rather than two.
 * **archives and dumps are written uncompressed** for the same reason: gzip turns a small
   change into a completely different byte stream. restic compresses what it stores after
-  chunking, so nothing is lost — the compression just happens where it does not defeat the
+  chunking, so nothing is lost; the compression just happens where it does not defeat the
   chunker. This needs restic 0.14 or later, and the destination refuses to run against an
   older one rather than quietly storing everything raw.
 
@@ -122,11 +122,11 @@ the firm can: run the schedule to the NAS and periodically copy to the bucket, o
 second appliance's `ki backup-verify` at the same destination.
 
 The layout at the `local` and `s3` destinations is the same, and is plain enough to work
-with by hand — a restic repository is restic's own format and is read with `restic`:
+with by hand; a restic repository is restic's own format and is read with `restic`:
 
 ```
 <prefix>/ki-backup-20260728T020000Z/
-  manifest.json          what this backup contains — readable without the key
+  manifest.json          what this backup contains, readable without the key
   SHA256SUMS             sha256sum -c compatible, covers the manifest too
   components/…           one file per store
 ```
@@ -153,7 +153,7 @@ default is the one that answers "could we restore from this".
 
 ## Schedule and retention
 
-The schedule is a wall-clock time in the firm's own timezone, not an interval — an
+The schedule is a wall-clock time in the firm's own timezone, not an interval; an
 interval drifts into the working day the first time a run is slow. Set the hour, the
 minute and an IANA timezone under Backup → Schedule; "every night at two" then means two
 o'clock where the firm is, in January and in July, instead of moving an hour against them
@@ -172,17 +172,17 @@ not a silence.
 
 If documents are still mid-pipeline at the scheduled time the run waits, because a backup
 taken then holds a database that knows about files the artifact archive has not finished
-writing. It waits up to `defer_limit_minutes` and then runs anyway — unforced, so it fails
+writing. It waits up to `defer_limit_minutes` and then runs anyway, unforced, so it fails
 with the reason recorded on it. A red backup in the run list is the right outcome; another
 silent night is not.
 
 Retention is grandfather-father-son: the newest of each of the last N days, weeks, months
 and years. On a restic destination, forgetting a backup and reclaiming its space are
-separate steps — a retention pass forgets each backup it is dropping and then prunes once,
+separate steps: a retention pass forgets each backup it is dropping and then prunes once,
 because pruning rewrites pack files and doing that per backup costs many times more. Counting periods that contain a backup rather than calendar
 periods means a stack that sat idle for three months still holds a weekly and a monthly
 copy. Two rules are absolute: `min_keep` newest backups are never pruned, and a directory
-whose name this build cannot parse is never deleted — an unrecognized entry is something a
+whose name this build cannot parse is never deleted; an unrecognized entry is something a
 human put there.
 
 Preview before you enable pruning:
@@ -221,7 +221,7 @@ schedule of its own:
 docker compose exec app ki backup-restore ki-backup-20260728T020000Z --stage-to /tmp/check
 ```
 
-Staging writes the backup back out as plaintext — the database dumps of the whole estate,
+Staging writes the backup back out as plaintext: the database dumps of the whole estate,
 and `environment.json` with `KI_CONNECTOR_CREDENTIAL_KEY` in it. The staged files and the
 directory holding them are created owner-only, but that is the floor and not the whole
 answer: stage somewhere the firm is willing to have those bytes, and delete it afterwards.
@@ -243,20 +243,20 @@ what `scripts/restore-backup.sh` does.
 
 A restore that reports errors exits non-zero and names them. `pg_restore` is deliberately
 not run with `--exit-on-error`, so a store can come back with errors and still be reported;
-the ones that cannot have cost data — a dump written by a newer `pg_dump` than the target
-server opens by setting a parameter the server does not know — are not counted against it.
+the ones that cannot have cost data (a dump written by a newer `pg_dump` than the target
+server opens by setting a parameter the server does not know) are not counted against it.
 Anything else means the appliance now holds part of the backup and part of what was there
 before. Do not start it and call it recovered.
 
-Restoring the file stores means the app, worker and watcher must be stopped first —
+Restoring the file stores means the app, worker and watcher must be stopped first;
 extracting the blob store underneath a running pipeline hands it files it has already
 decided are missing. The search index does not need that: the restore closes the affected
 indices, restores the snapshot, and reopens them.
 
 **For a whole-appliance restore, use the script.** Keycloak's data volume and Hatchet's
 config volume can only be replaced with their containers stopped. A restore started from
-the admin UI can do that too, through the `restore-agent` service — the one container that
-holds the Docker socket — but when the agent is not running, the script is the only path,
+the admin UI can do that too, through the `restore-agent` service (the one container that
+holds the Docker socket), but when the agent is not running, the script is the only path,
 because a process inside the stack cannot stop the stack it is running in:
 
 ```bash
@@ -274,7 +274,7 @@ rotated since the backup, and placing any deployment secrets from
 ### Restoring onto a different appliance
 
 Set `KI_CONNECTOR_CREDENTIAL_KEY` from the backup's `secrets/environment` component
-*before* restoring, or the restore will refuse — which is what you want. A schema revision
+*before* restoring, or the restore will refuse, which is what you want. A schema revision
 older than the current build is fine: restore it and let the app migrate forward on start.
 The reverse never is; do not restore a dump from a newer build into an older one.
 
@@ -295,12 +295,12 @@ the Models page, not a different restore.
 ## Environment reference
 
 Set in `docker-compose.yml`; override in `.env`. These are deployment layout, which is why
-they are variables rather than settings — what is captured, where it is written and when
+they are variables rather than settings; what is captured, where it is written and when
 all live in the admin UI.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `KI_BACKUP_MOUNT` | `./runtime/backups` | Host path mounted at `/backups` — point at the NAS |
+| `KI_BACKUP_MOUNT` | `./runtime/backups` | Host path mounted at `/backups`; point at the NAS |
 | `KI_BACKUP_STAGING_DIR` | `/data/backup-staging` | Needs room for the largest single component |
 | `KI_BACKUP_HATCHET_DATABASE_URL` | compose-provided | Hatchet's database is a different server, so it cannot be derived |
 | `KI_BACKUP_LITELLM_DATABASE_URL` | derived | Override only if it was moved off the primary server |

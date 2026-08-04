@@ -4,7 +4,7 @@ description: Index shared drives and My Drive content with mirrored permissions,
 ---
 
 The Google Drive connector indexes **shared drives and My Drive files**,
-mirroring Drive permissions — including expanding Google Group grants, so a
+mirroring Drive permissions, including expanding Google Group grants, so a
 document shared with a group is visible to exactly its members.
 
 | | |
@@ -12,7 +12,7 @@ document shared with a group is visible to exactly its members.
 | Syncs | Shared drives, files, My Drive files |
 | Incremental | Drive Changes feed |
 | Scoping | Shared drives, folders |
-| Permission mirror | Yes — including Google Group expansion |
+| Permission mirror | Yes, including Google Group expansion |
 | Live events | [Workspace Events → Pub/Sub](/connectors/google-drive-live-events/) |
 | Token type | Refresh token |
 
@@ -25,7 +25,7 @@ in the project that will own the app:
    in the firm's Workspace can use it. Internal apps also skip Google's
    verification review, which the Drive scopes would otherwise require.
 2. **Enable APIs:** APIs & Services → Library → **Google Drive API**,
-   **Admin SDK API** — and, for [live events](/connectors/google-drive-live-events/),
+   **Admin SDK API**. For [live events](/connectors/google-drive-live-events/), also enable
    **Google Workspace Events API** and **Cloud Pub/Sub API** (optional until
    event delivery is configured).
 3. **Create the client:** Credentials → Create credentials → OAuth client ID →
@@ -38,7 +38,7 @@ in the project that will own the app:
    `https://www.googleapis.com/auth/admin.directory.group.readonly`
    `https://www.googleapis.com/auth/admin.directory.group.member.readonly`
 
-   Google marks these "sensitive"/"restricted" — expected for a read-only
+   Google marks these "sensitive"/"restricted", which is expected for a read-only
    document connector.
 5. **Secret:** the client id (ends in `.apps.googleusercontent.com`) and
    secret are on the client's detail page.
@@ -54,7 +54,7 @@ third-party API access, an admin must also mark the client id **Trusted**
 `access_denied`.
 
 That account also needs ordinary read access to the shared drives and folders
-the appliance should index — directory read does not grant Drive content.
+the appliance should index; directory read does not grant Drive content.
 
 ## Connect
 

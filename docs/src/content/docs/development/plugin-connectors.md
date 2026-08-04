@@ -25,11 +25,11 @@ management system (RA-MICRO, AnNoText, Advoware, or an in-house SQL export) into
 the index. An integrator ships a small standalone
 script that reads the DMS and writes a **drop directory** in a versioned schema.
 The `plugin_drop` connector reads that directory. No connector code lands in this
-repo per customer — the script is the customer-specific part, and it copies from
+repo per customer; the script is the customer-specific part, and it copies from
 one reference template.
 
-Plugin scripts emit rows in one shared schema and everything downstream — sync,
-dedup, ACL compilation, extraction, retrieval — works unchanged.
+Plugin scripts emit rows in one shared schema and everything downstream (sync,
+dedup, ACL compilation, extraction, retrieval) works unchanged.
 
 ## Lifecycle
 
@@ -54,7 +54,7 @@ customer DMS  --(plugin script)-->  drop directory  --(plugin_drop connector)-->
   files/                 content bytes, referenced by each row's content_file
 ```
 
-## observation schema — `ki-plugin-observation/v1`
+## observation schema: `ki-plugin-observation/v1`
 
 One JSON object per line in `observations.jsonl`. The first field **must** be the
 schema marker; an unknown or missing marker aborts the sync and tells the integrator to
@@ -83,7 +83,7 @@ Each `acl` element is `{"principal": ..., "principal_kind": ..., "access": ...}`
 | `principal_kind` | `group` \| `user` \| `role`. Defaults to `group`. |
 | `access` | `allow` \| `deny`. |
 
-**ACL semantics — absent means deny-by-default.** If a row omits `acl`, the object's
+**ACL semantics: absent means deny-by-default.** If a row omits `acl`, the object's
 access is *unknown*, and the engine's policy applies: external connectors are
 fail-closed, so an object with no mirrored grant is not readable through any local
 project/document grant (see `permissions.version_predicate`). To make an object
@@ -97,11 +97,11 @@ The drop directory is a full snapshot. On each `full_scan`:
 
 - An object **present** (and not `deleted`) is created or updated.
 - An object **absent** from the snapshot is tombstoned by the engine's diffing.
-- An object emitted with `"deleted": true` is treated exactly as absent — it is not
+- An object emitted with `"deleted": true` is treated exactly as absent; it is not
   yielded, so it tombstones on the next sync. Use it when it is easier for the
   plugin to emit an explicit delete row than to omit the object.
 
-## Failure behavior — fail loudly
+## Failure behavior: fail loudly
 
 A plugin bug must never half-sync a customer's index silently:
 
@@ -127,7 +127,7 @@ python examples/plugins/reference_export.py <input_dir> <out_dir> --group group:
 ```
 
 Run the conformance harness (real Postgres on `localhost:5439`) to prove a plugin's
-output syncs end to end — schema, ACLs, tombstones, path-escape rejection, and the
+output syncs end to end: schema, ACLs, tombstones, path-escape rejection, and the
 reference export itself:
 
 ```bash

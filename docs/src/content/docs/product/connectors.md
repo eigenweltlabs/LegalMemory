@@ -1,10 +1,10 @@
 ---
 title: Connectors
-description: Technical reference for the Connectors console — connection lifecycle, journey states, scoping, sync runs and the scheduler, deletion confirmation, event delivery, credential storage, and configuration.
+description: "Technical reference for the Connectors console: connection lifecycle, journey states, scoping, sync runs and the scheduler, deletion confirmation, event delivery, credential storage, and configuration."
 ---
 
 **Connectors** is the console page that manages every connection between
-LegalMemory and a document source — cloud drives, DMS and practice-management
+LegalMemory and a document source: cloud drives, DMS and practice-management
 systems, mailboxes, chat workspaces, and local folders. This page documents the
 console feature and the sync machinery behind it. Per-provider setup steps
 (OAuth app registration, provider-side scopes, troubleshooting) live in the
@@ -20,7 +20,7 @@ All connector management is admin-only. Non-admins see the connection list
 | --- | --- | --- |
 | `/api/connectors/catalog` | GET | Catalog: native filesystem entries plus every registered connector and roadmap entry. |
 | `/api/connectors/{kind}/fields` | GET | What the connect form must ask: auth fields, config fields from the connector's own schema, and the OAuth registration guide. |
-| `/api/sources` | POST | Create a connection — or, for an OAuth kind, only a pending-authorization intent. |
+| `/api/sources` | POST | Create a connection, or, for an OAuth kind, only a pending-authorization intent. |
 | `/api/sources` | GET | List connections with derived state (scope, counts, pending deletion, event delivery). |
 | `/api/sources/{id}` | DELETE | Disconnect and reclaim storage. |
 | `/api/connectors/{source_id}/authorize` | POST | Re-authorize an existing connection whose grant expired or was revoked. |
@@ -69,8 +69,8 @@ returned `state` in constant time, in this order:
 
 Either way the browser is redirected to `/?connected=<kind>#connectors`. The
 console reads that marker, identifies the freshly connected source (same kind,
-authorized, never synced, not yet scoped), and — for scoping-capable
-connectors — opens the folder picker directly; if two candidates match it asks
+authorized, never synced, not yet scoped), and, for scoping-capable
+connectors, opens the folder picker directly; if two candidates match it asks
 instead of guessing.
 
 `POST /api/connectors/{source_id}/authorize` starts a re-authorization for an
@@ -85,7 +85,7 @@ history; it then reclaims the connector staging tree, a browser-imported folder
 it owns exclusively, and content blobs no other source still references (shared
 blobs are kept and counted). Provider event subscriptions are removed upstream
 best-effort before the local delete. Nothing is ever deleted at the source.
-Documents and chunks derived from the source become unreachable — retrieval
+Documents and chunks derived from the source become unreachable; retrieval
 re-verifies every hit against a live source object, so orphans fail closed.
 
 ## Journey states
@@ -99,14 +99,14 @@ match wins.
 | State | Console label | Condition | Unblocking action |
 | --- | --- | --- | --- |
 | `authorize` | never authorized | `status == "pending_auth"` (created before deferred OAuth creation existed, or grant withdrawn) | Authorize at the provider |
-| `queued` | waiting | Sync run is `queued` with no `started_at` — reserved, no worker picked it up | None; if persistent, check the worker |
-| `syncing` | syncing | Sync run active (`queued`/`running`); headline carries the live `observed` counter | None — in progress |
+| `queued` | waiting | Sync run is `queued` with no `started_at`: reserved, no worker picked it up | None; if persistent, check the worker |
+| `syncing` | syncing | Sync run active (`queued`/`running`); headline carries the live `observed` counter | None, in progress |
 | `sync_failed` | sync failed | `status == "error"` or the latest sync run `failed`; nothing was removed from the index | Sync again; for OAuth kinds also Re-authorize |
 | `scope` | never synced | Scoping-capable, no scope saved, never synced | Choose folders, or sync the whole source |
 | `sync` | never synced | `last_sync_at` is null (scoped, or kind without a folder tree) | Sync now |
 | `empty` | empty | Last sync completed with zero live objects | Sync again; change folders where the kind supports scoping |
-| `access_refresh` | updating access | An active access-refresh run covers this source | None — in progress |
-| `indexing` | indexing | An active insertion run with pending work for this source | None — in progress |
+| `access_refresh` | updating access | An active access-refresh run covers this source | None, in progress |
+| `indexing` | indexing | An active insertion run with pending work for this source | None, in progress |
 | `confirming` | confirming deletion | `pending_deletion.object_count > 0` (see below) | Sync again (each agreeing scan advances confirmation) |
 | `index` | not indexed | Synced > 0, indexed = 0 | Run the insertion pipeline |
 | `index_unknown` | not indexed | Fallback for payloads without the per-source `indexed_count`; per-connection split unknowable | Run the insertion pipeline |
@@ -134,7 +134,7 @@ a node (top level when `node` is omitted) using the connection's own stored
 credentials, so the tree shows exactly what the grant can reach. It answers
 `422` for kinds that sync as a whole, `409` while the connection is still
 `pending_auth`, and `502` with the provider's own message for upstream
-failures — the console shows that message verbatim and leaves the saved
+failures; the console shows that message verbatim and leaves the saved
 selection untouched. The tree is loaded lazily; the console pages each branch
 60 rows at a time and its filter only searches branches already loaded. An
 empty top level is reported as a real answer ("this account can open nothing
@@ -144,7 +144,7 @@ here"), not an error.
 `{id, type, title, metadata}`. `metadata` is the provider's own locator (drive
 id, folder id); the connector's traversal needs it, and a root stored without
 it silently syncs nothing. A separate `scope_decided` flag records that an
-operator made an explicit choice — required because an empty list cannot
+operator made an explicit choice, required because an empty list cannot
 distinguish "whole source, deliberately" from "picker not reached yet", and
 the scheduler must not crawl a freshly authorized estate behind an open folder
 picker.
@@ -165,8 +165,8 @@ Re-scope behaviours:
 
 | Change | Effect |
 | --- | --- |
-| **Narrowing** (roots removed, or a first selection on a source that already has objects) | The next sync is forced full and the tombstone guards are lifted for exactly that run — a re-scope is an instruction, not an observation. Documents outside the new selection are tombstoned on that sync, without deletion confirmation. The console requires an explicit "documents will be removed" confirmation before saving, but only when the source already contributed objects. |
-| **Widening / clearing** (roots added, or emptied back to whole source) | The next sync is forced full — a delta token describes changes within the old selection and would never enumerate newly included folders. Nothing is deleted; previously tombstoned objects that reappear are restored. |
+| **Narrowing** (roots removed, or a first selection on a source that already has objects) | The next sync is forced full and the tombstone guards are lifted for exactly that run: a re-scope is an instruction, not an observation. Documents outside the new selection are tombstoned on that sync, without deletion confirmation. The console requires an explicit "documents will be removed" confirmation before saving, but only when the source already contributed objects. |
+| **Widening / clearing** (roots added, or emptied back to whole source) | The next sync is forced full: a delta token describes changes within the old selection and would never enumerate newly included folders. Nothing is deleted; previously tombstoned objects that reappear are restored. |
 | **A configured root disappears at the provider** | Not a re-scope: the fingerprint is unchanged, so the guards stay on. The next full scan observes nothing beneath the root and the missing objects fall under ordinary deletion confirmation instead of being removed at once. |
 
 ## Sync execution
@@ -174,7 +174,7 @@ Re-scope behaviours:
 **Enqueue.** `POST /api/actions/sync` (optionally `{"source_id": ...}`) never
 scans inline. For each eligible source it writes one `pipeline_runs` row
 (workflow `source-sync`, status `queued`) and hands it to the configured
-orchestrator — a Hatchet worker, or an in-process thread pool (4 workers) on a
+orchestrator: a Hatchet worker, or an in-process thread pool (4 workers) on a
 single-VM deployment. The `202` response lists the started runs and, for every
 source not started, a `skipped` entry with the reason (`source is paused`,
 `awaiting authorization`, `a sync is already in flight for this source`). The
@@ -183,7 +183,7 @@ behind by a dead worker) are swept so they cannot block the source forever.
 
 **One active run per source.** Reservation is serialized by a per-source
 Postgres advisory transaction lock, and backstopped by
-`uq_pipeline_runs_active_sync` — a partial unique index on
+`uq_pipeline_runs_active_sync`, a partial unique index on
 `pipeline_runs.source_id` where the workflow is `source-sync` and the status is
 `queued` or `running`. Two concurrent crawls of one estate could interleave
 tombstones with observations and delete documents that still exist; the
@@ -196,7 +196,7 @@ every 50 observations on a separate DB connection, so progress is visible
 before the scan's own transaction commits), `handoff`, and a final step
 (`complete`, `complete (nothing new to insert)`, `complete (deletions
 applied)`, `complete (insertion not automatic)`, or the failing step).
-`progress` is 0 for the whole scan — a full scan has no denominator — and 1 on
+`progress` is 0 for the whole scan (a full scan has no denominator) and 1 on
 completion. A failed run records `{class, message}` in `last_error` and marks
 the source `error`; the engine never tombstones unless the crawl reaches EOF,
 so a mid-scan crash can only have added or updated rows.
@@ -213,7 +213,7 @@ conversion and embedding.
 **Handoff.** With `pipeline.auto_insert_after_sync` (default on), a run that
 produced `created`/`changed`/`access_changed`/`restored` work launches an
 insertion run and records its id; the console then shows that insertion run on
-the connection's card. A tombstone-only run completes without insertion —
+the connection's card. A tombstone-only run completes without insertion;
 tombstones become unretrievable in the scan transaction itself. With
 auto-insert off, the run completes with a null `insertion_run_id` and the
 journey card offers the pipeline button.
@@ -222,7 +222,7 @@ journey card offers the pipeline button.
 incrementally from the stored cursor except when: the scope fingerprint
 changed, a deletion is pending confirmation (only a full crawl can confirm
 absence), or mirrored ACLs are stale (`security.acl_refresh_hours`, default
-24 — a revocation at the source changes no document, so only a full scan
+24; a revocation at the source changes no document, so only a full scan
 notices it). A completed full crawl also seeds the next delta cursor.
 
 **Scheduler due-ness.** One scheduler thread in the app process ticks every
@@ -231,7 +231,7 @@ notices it). A completed full crawl also seeds the next delta cursor.
 `pending_auth`, no sync already in flight, and the last attempt older than the
 policy interval. The last attempt is read from `pipeline_runs`
 (`coalesce(finished_at, created_at)`, so a long scan spaces the next one from
-its end) with `last_sync_at` as fallback — a failing source therefore retries
+its end) with `last_sync_at` as fallback, so a failing source retries
 on its interval rather than every tick, and recovers on its own once the
 credential is fixed. A never-synced, scoping-capable source is not due until
 `scope_decided` is set, so a new estate is not crawled behind the open folder
@@ -240,7 +240,7 @@ picker. Intervals parse as `30s` / `5m` / `1h`, floor 5 seconds, default 300.
 entirely.
 
 **Triggers.** Every run records what started it: `api` (a click or API call),
-`schedule` (the scheduler's tick), `watch` (the filesystem watcher — local and
+`schedule` (the scheduler's tick), `watch` (the filesystem watcher, local and
 mounted folders only, enqueued within about a second of a write, 500 ms
 debounce), or a provider event waking the connector's delta sync. All four
 paths converge on the same enqueue function and the same ledger, so they
@@ -257,21 +257,21 @@ refused.
 After a full scan, the engine compares live objects against what the crawl
 observed. The missing set is held for confirmation when:
 
-- `observed == 0` while objects exist — the most suspicious shape; always
+- `observed == 0` while objects exist, the most suspicious shape; always
   held, regardless of source size; or
 - the source has at least `MIN_OBJECTS_FOR_FRACTION_GUARD` (20) live objects
   and the missing fraction exceeds `max_tombstone_fraction` (default 0.5,
   `SyncEngine.MAX_TOMBSTONE_FRACTION`).
 
 Never held: connectors with `verifiable_emptiness` (a mounted folder or plugin
-drop directory — the listing *is* the estate), a source whose policy sets
+drop directory, where the listing *is* the estate), a source whose policy sets
 `allow_empty_scan: true`, or a run under a changed scope fingerprint (a
 re-scope is an explicit instruction).
 
 The held state is the **set of missing external ids**, not a count
 (`source_deletion_watch` + `source_deletion_candidates`). Each subsequent full
 scan that reports the *identical set* increments `confirmations`; a different
-set — objects came back, or different ones went missing — resets the claim to
+set (objects came back, or different ones went missing) resets the claim to
 1 and replaces the candidates. Totals are deliberately not compared: a
 connector that loses 340 objects today and a different 340 tomorrow is
 malfunctioning, and counting would average that into a deletion. Once
@@ -280,7 +280,7 @@ malfunctioning, and counting would average that into a deletion. Once
 `sync_policy.deletion_confirmations`, re-read from live policy on every scan),
 the tombstones are applied and the watch cleared. A trustworthy scan (below
 threshold) also clears any stale watch. While a deletion is pending, the
-engine forces full scans — a delta feed cannot confirm continued absence.
+engine forces full scans; a delta feed cannot confirm continued absence.
 
 Meanwhile the documents stay indexed and keep answering searches. The console
 shows a banner and the `confirming` state on the connection: how many
@@ -292,7 +292,7 @@ exactly like this. The same numbers travel on the run
 (`pending_deletion`). Deleting the connection clears its watch.
 
 Setting `deletion_confirmations` to 1 tombstones on the first scan that
-reports the loss — only for deployments that prefer losing index entries to
+reports the loss, only for deployments that prefer losing index entries to
 retaining deleted ones.
 
 ## Event delivery
@@ -306,7 +306,7 @@ reconciliation safety net.
 | --- | --- |
 | `not_supported` | The connector has no event adapter; the policy interval drives sync. |
 | `reconciliation_only` | The adapter cannot cover this scope live (e.g. Google permits no subscription on the whole My Drive root); the delta cursor still makes scheduled reconciliation incremental. |
-| `waiting` | Subscriptions cannot be created yet — scope not decided, or the first sync has not discovered the drives/libraries to subscribe to. |
+| `waiting` | Subscriptions cannot be created yet: scope not decided, or the first sync has not discovered the drives/libraries to subscribe to. |
 | `unconfigured` | The provider supports live events for this scope, but the appliance-side transport (Google Pub/Sub, or Azure Event Hubs) is not configured. |
 | `pending` | Transport configured; not every desired subscription is active yet. |
 | `error` | A subscription create/renew failed; the recorded error is shown as the detail. |
@@ -333,13 +333,13 @@ plaintext fallback.
 - `sources.config` holds non-secret configuration: root path, connector
   settings, scope roots, default ACL.
 - `source_credentials` holds the encrypted blob (client id and secret, access
-  and refresh tokens, and — transiently — the single-use OAuth state and PKCE
+  and refresh tokens, and, transiently, the single-use OAuth state and PKCE
   verifier of an in-flight re-authorization), plus a 4-byte key fingerprint,
   the provider name, and an informational token expiry.
 
 Rotating-refresh providers invalidate the old refresh token the moment a new
 one is issued, so the token provider persists rotations from inside its
-refresh path — a crash mid-sync cannot leave a dead connection.
+  refresh path; a crash mid-sync cannot leave a dead connection.
 
 **Rotation.** Each row records the fingerprint of the key that wrote it. If
 `KI_CONNECTOR_CREDENTIAL_KEY` changes, loading fails with a diagnosis naming
@@ -354,21 +354,21 @@ Credentials are deleted with their connection.
 The "Add a connection" grid has three tiers:
 
 1. **Connectable in the console**: local folders (`local_fs`, via the system
-   dialog import or a mounted server path) plus the launch connectors —
+   dialog import or a mounted server path) plus the launch connectors:
    SharePoint Online, Google Drive, OneDrive, and Clio. These open the connect
    form.
 2. **Registered but not yet offered**: the remaining implemented connectors
    are shown greyed out ("Not available yet") and cannot be connected from the
    console.
 3. **Planned**: inert roadmap cards (legal DMS and practice-management
-   systems). They carry only a name, category and note — no capability rows,
-   because there is no implementation to describe — and are not clickable.
+   systems). They carry only a name, category and note, with no capability rows,
+   because there is no implementation to describe, and are not clickable.
 
 The `plugin_drop` kind (a drop-directory contract for custom DMS integrations
 built by a forward-deployed engineer) is addressable through the API but
 marked internal and hidden from the grid. Cards state each connector's
 capabilities from the registry: incremental mode, whether source permissions
-are mirrored (`mirrors_acls` — a connector without it produces documents
+are mirrored (`mirrors_acls`; a connector without it produces documents
 nobody can retrieve until access is granted in LegalMemory), and whether it
 supports folder scoping.
 
@@ -377,11 +377,11 @@ supports folder scoping.
 Connectors flagged `private_corpus` (mailboxes and personal drives: OneDrive,
 Outlook Mail, Gmail) index one person's corpus. Creating such a connection
 with a `default_acl` naming a `group:` or `role:` principal is refused with
-`422` unless the request carries `confirm_broad_grant: true` — that grant
+`422` unless the request carries `confirm_broad_grant: true`, because that grant
 would publish one person's entire mailbox or drive to everyone in the group.
 The connect form shows the warning next to the grant field and requires an
 explicit confirmation checkbox before it will submit the flag. A `user:`
-principal, or an empty grant (mirrored permissions decide — normally the owner
+principal, or an empty grant (mirrored permissions decide, normally the owner
 alone), needs no confirmation.
 
 ## Configuration
@@ -412,8 +412,8 @@ Related settings referenced above, outside `ConnectorsConfig`:
 
 | Setting | Environment variable | Default | Effect |
 | --- | --- | --- | --- |
-| — | `KI_CONNECTOR_CREDENTIAL_KEY` | required | 32-byte urlsafe-base64 AES-256-GCM key for the credential store; must be identical in app, worker and watcher. |
-| — | `KI_SYNC_SCHEDULE_SECONDS` | `60` | Cap on the scheduler's tick sleep; `0` disables interval scheduling entirely ("continuous" then means nothing). |
+| n/a | `KI_CONNECTOR_CREDENTIAL_KEY` | required | 32-byte urlsafe-base64 AES-256-GCM key for the credential store; must be identical in app, worker and watcher. |
+| n/a | `KI_SYNC_SCHEDULE_SECONDS` | `60` | Cap on the scheduler's tick sleep; `0` disables interval scheduling entirely ("continuous" then means nothing). |
 | `pipeline.auto_insert_after_sync` | `KI_PIPELINE__AUTO_INSERT_AFTER_SYNC` | `true` | Whether a sync with new work launches insertion itself. |
 | `pipeline.deletion_confirmations` | `KI_PIPELINE__DELETION_CONFIRMATIONS` | `3` (1–20) | Consecutive agreeing full scans required before a guarded deletion is applied. |
 | `security.acl_refresh_hours` | `KI_SECURITY__ACL_REFRESH_HOURS` | `24` | Maximum age of mirrored permissions before a full scan is forced on an otherwise-incremental source. |

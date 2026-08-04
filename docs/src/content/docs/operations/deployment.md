@@ -5,7 +5,7 @@ description: The service stack, identity chain, MCP sign-in, user provisioning, 
 
 ## What the stack is
 
-Every capability is a real service — there are no offline substitutes,
+Every capability is a real service; there are no offline substitutes,
 fallbacks, or demo stand-ins anywhere in the pipeline. A stage whose dependency
 is down fails, retries with backoff, and quarantines; it never silently
 degrades.
@@ -15,7 +15,7 @@ degrades.
 | `app` / `worker` | ontology, permission compiler, pipeline stages, MCP, admin UI | port 8000 (app) |
 | `postgres` (pgvector) | knowledge layer, ACLs, pipeline state | host 5439, db `ki` |
 | `opensearch` | ACL-scoped lexical + vector retrieval | host 9200 |
-| `litellm` | model gateway — every LLM/embedding call | host 4000 |
+| `litellm` | model gateway for every LLM/embedding call | host 4000 |
 | `docling` | document conversion + OCR (de/en) | host 5001 |
 | `hatchet` + `hatchet-postgres` | pipeline orchestration (default provider) | UI on 8888 |
 | `keycloak` + `oauth2-proxy` | identity (seeded realm with dev users) | 8083 / 8090 |
@@ -23,7 +23,7 @@ degrades.
 Every model call resolves through the gateway; each pipeline stage carries its
 own model assignment, swappable in the admin UI, including to vLLM/TEI
 endpoints for air-gapped installs. Which models a deployment runs is
-set in `.env` — see the [Quick start](/getting-started/quickstart/).
+set in `.env`; see the [Quick start](/getting-started/quickstart/).
 
 For bring-up and first-source setup, see the
 [Quick start](/getting-started/quickstart/). This page covers what an operator
@@ -39,7 +39,7 @@ membership of the configured admin groups (default `knowledge-index-admins`)
 to `role:admin`.
 
 `trusted_header` mode on the direct port 8000 additionally accepts
-`X-KI-Principals` — a development convenience for the REST API and admin UI:
+`X-KI-Principals`, a development convenience for the REST API and admin UI:
 anyone who can reach 8000 can claim any identity, so never expose 8000 (or
 arbitrary header forwarding) beyond the local machine. The MCP endpoint does
 not honour it (see below).
@@ -57,7 +57,7 @@ password and never issues a token. Three endpoints carry the handshake:
 
 | Endpoint | Purpose |
 | --- | --- |
-| `POST /mcp/` without a token | `401` + `WWW-Authenticate: Bearer resource_metadata="…"` (RFC 6750 §3.1) — what makes a client start a login instead of reporting a connection error. |
+| `POST /mcp/` without a token | `401` + `WWW-Authenticate: Bearer resource_metadata="…"` (RFC 6750 §3.1), which makes a client start a login instead of reporting a connection error. |
 | `GET /.well-known/oauth-protected-resource/mcp` | RFC 9728 metadata: the resource identifier, the authorization server, and the scopes to ask for. Unauthenticated by necessity. |
 | `GET /.well-known/oauth-authorization-server` | `307` to the identity provider's own metadata, for clients that predate RFC 9728. |
 
@@ -66,7 +66,7 @@ registration) or uses a pre-registered client id, runs authorization code +
 PKCE in the browser, and calls `/mcp/` with the resulting bearer token.
 
 **Audience binding.** A token is accepted only if its `aud` contains this
-appliance's resource identifier — by default `KI_CONNECTORS__PUBLIC_BASE_URL`
+appliance's resource identifier, by default `KI_CONNECTORS__PUBLIC_BASE_URL`
 + `/mcp`, overridable with `KI_SECURITY__MCP_RESOURCE`. A token the same
 identity provider minted for a different application in the firm is refused,
 even though the signature and issuer are valid. No identity provider in wide
@@ -91,7 +91,7 @@ Four settings, all `KI_`-prefixed environment variables or fields under
 | Setting | Meaning |
 | --- | --- |
 | `KI_SECURITY__OIDC_ISSUER` | The issuer identifier that must appear in a token's `iss`, and what is advertised as the authorization server. Must be the URL the **lawyer's laptop** can reach. |
-| `KI_SECURITY__OIDC_JWKS_URL` | Where this appliance fetches signing keys. Only needed when the IdP answers on a different name inside the network than outside — exactly the case in the shipped compose file. Empty derives it from the issuer. |
+| `KI_SECURITY__OIDC_JWKS_URL` | Where this appliance fetches signing keys. Only needed when the IdP answers on a different name inside the network than outside, exactly the case in the shipped compose file. Empty derives it from the issuer. |
 | `KI_SECURITY__MCP_RESOURCE` | The resource identifier. Empty derives it from `KI_CONNECTORS__PUBLIC_BASE_URL` + `/mcp`. |
 | `KI_SECURITY__MCP_SCOPES` | What clients are told to request. The entry that carries the audience mapper must be in this list. |
 
@@ -105,7 +105,7 @@ On the identity provider, three things are needed:
    registration; in Okta a custom authorization server whose audience is that
    URL.
 2. **`sub` and `preferred_username` in the access token.** Keycloak 25 moved
-   `sub` into the built-in `basic` client scope — a realm imported without it
+   `sub` into the built-in `basic` client scope; a realm imported without it
    produces tokens the appliance refuses for having no subject.
    `preferred_username` must be the person's work email, because that is what
    the mirrored source ACLs name; the appliance matches a caller against
@@ -116,8 +116,8 @@ On the identity provider, three things are needed:
    addresses and `claude.ai`/`claude.com` only (Keycloak *Client registration
    → Anonymous access policies → Trusted Hosts*), so a client that would
    redirect an authorization code to an attacker's domain is refused. Firms
-   that prefer no anonymous registration can pre-register one public client —
-   the shipped realm's `knowledge-index-mcp` is that client — and have people
+   that prefer no anonymous registration can pre-register one public client
+   (the shipped realm's `knowledge-index-mcp` is that client) and have people
    enter its client id.
 
 ### Verifying it end to end
@@ -161,7 +161,7 @@ and `role:admin` for members of the configured admin groups) and grants are
 made against those exact strings on the [Access control](/product/access-control/)
 page.
 
-**Add a user.** Create the person once in the identity provider — Keycloak
+**Add a user.** Create the person once in the identity provider: Keycloak
 console (`http://localhost:8083/admin`, realm `knowledge-index`) → *Users →
 Add user*, set a password and group membership. Put admins in the
 `knowledge-index-admins` group. On first sign-in their principals appear in
@@ -176,11 +176,11 @@ instead of maintaining users by hand:
 - **SCIM:** provision from an upstream IdP (Okta/Entra) into Keycloak via a
   SCIM connector; the same `groups` claim reaches the app unchanged.
 - Because the app authorizes on `group:` principals, granting a project to a
-  federated group covers every current and future member — no per-user churn.
+  federated group covers every current and future member, with no per-user churn.
 
 **Why grants use exact principals.** Authorization is a string match: a
 mistyped or wrong-cased principal silently grants nothing (fails closed).
-Prefer principals that already appear on mirrored source ACLs — the Access
+Prefer principals that already appear on mirrored source ACLs; the Access
 control page marks them.
 
 ## Connector credentials
@@ -188,7 +188,7 @@ control page marks them.
 Connectors hold OAuth refresh tokens for the firm's document estate, so they
 are stored encrypted (AES-256-GCM) rather than in plain source config.
 
-`KI_CONNECTOR_CREDENTIAL_KEY` is **required** — a base64 32-byte key, supplied
+`KI_CONNECTOR_CREDENTIAL_KEY` is **required**: a base64 32-byte key, supplied
 to the app, worker and watcher. There is deliberately no fallback: a
 deployment that quietly stored refresh tokens in the clear would be worse than
 one that refuses to start.
@@ -206,7 +206,7 @@ ki rotate-connector-key --new-key "$NEW_KEY"
 ```
 
 Rows are re-encrypted in one transaction. A row that cannot be decrypted is
-reported and skipped rather than silently dropped — re-authorize that
+reported and skipped rather than silently dropped; re-authorize that
 connection from the admin UI.
 
 ## Syncing in operation
@@ -230,7 +230,7 @@ What to expect while it runs:
   `current_step` shows the live observation count. `progress` stays at 0 until
   the run finishes: a scan does not know how many objects an estate holds
   until it reaches the end, and the appliance does not invent a bar.
-- A **second sync while one is in flight is refused**, not queued — the source
+- A **second sync while one is in flight is refused**, not queued; the source
   comes back under `skipped` with the id of the run already working on it. The
   rule is a database constraint, so it holds across the app, the CLI and the
   watcher.
@@ -268,7 +268,7 @@ grant.
 
 Two settings decide how mirrored permissions combine with local grants:
 
-- `security.source_acl_mode` — `sufficient` (default) honours the source's
+- `security.source_acl_mode`: `sufficient` (default) honours the source's
   word on its own; `intersect` additionally requires a local project or
   document grant. Prefer `intersect` where ethical walls are load-bearing.
 - `security.acl_refresh_hours` (default 24) forces the full scan that re-reads
@@ -284,8 +284,8 @@ maps a source group onto a local one:
 ## Production checklist
 
 - TLS + real secrets everywhere (`LITELLM_MASTER_KEY`, `KI_POSTGRES_PASSWORD`,
-  Keycloak admin, cookie secrets — no dev defaults in production; the compose
-  file's defaults are development-only).
+  Keycloak admin, cookie secrets). No dev defaults in production; the compose
+  file's defaults are development-only.
 - OIDC auth mode (`KI_AUTH_MODE=oidc`) with the firm's identity provider;
   never expose port 8000 directly.
 - `KI_CONNECTOR_CREDENTIAL_KEY` and the backup encryption key in the firm's

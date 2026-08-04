@@ -1,6 +1,6 @@
 ---
 title: Connecting a source
-description: What every connector shares — bring-your-own-client OAuth, encrypted credentials, scoping, permission mirroring, and sync behaviour.
+description: "What every connector shares: bring-your-own-client OAuth, encrypted credentials, scoping, permission mirroring, and sync behaviour."
 ---
 
 Every connector reads a source **read-only** and mirrors its permissions into
@@ -23,13 +23,13 @@ customer-specific DMS integrations there is a
 Cloud connectors authenticate with OAuth 2, and every deployment is
 **bring-your-own-client**: the firm registers its own app in the provider's
 console and supplies the client id and secret per connection. There is no
-vendor-hosted OAuth broker and no cloud auth middleman — nothing third-party
+vendor-hosted OAuth broker and no cloud auth middleman. Nothing third-party
 sits on the path to the firm's documents.
 
 Three consequences:
 
 1. **You register an app once per provider.** The setup modal in the admin UI
-   shows the registration steps for the exact provider, including the scopes —
+   shows the registration steps for the exact provider, including the scopes,
    generated from the same data the appliance uses at authorization time, so
    the instructions cannot drift.
 2. **The redirect URI is derived, not typed.** It is
@@ -51,8 +51,8 @@ connection.
 ## Scoping what is synced
 
 Connectors that support scoping (SharePoint, OneDrive, Google Drive, Clio) let
-you pick subtree roots — sites, libraries, folders, or matters —
-in a tree picker that browses the real source after authorization. Scoping is
+you pick subtree roots (sites, libraries, folders, or matters) in a tree picker
+that browses the real source after authorization. Scoping is
 proportionality: index the estate, not the birthday-party photos.
 
 Re-scoping behaves predictably: narrowing tombstones the excluded documents
@@ -83,7 +83,7 @@ confirmation, because it would publish one person's corpus.
   [Google Drive](/connectors/google-drive-live-events/)) lower change latency;
   the interval remains as reconciliation.
 - Large deletions are confirmed across consecutive syncs before anything is
-  tombstoned — see [Connectors in the product guide](/product/connectors/).
+  tombstoned; see [Connectors in the product guide](/product/connectors/).
 
 ## Token lifetimes
 

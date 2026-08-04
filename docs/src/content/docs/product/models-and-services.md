@@ -16,24 +16,24 @@ named model roles. Models live in the LiteLLM gateway; each pipeline stage that
 calls a model carries its own assignment (`pipeline.stages.<stage>.model`), and
 the features outside the pipeline carry theirs in their own configuration.
 Every assignment defaults to `$KI_LLM_MODEL`, except the embedding model,
-which defaults to `$KI_EMBEDDING_MODEL`. An unset assignment is empty — the
+which defaults to `$KI_EMBEDDING_MODEL`. An unset assignment is empty; the
 console shows "Select a model…" and every caller fails loudly rather than
 guessing at a model and billing for it.
 
 | Assignment | Used by (verified call sites) |
 | --- | --- |
 | `pipeline.stages.classify_matter.model` | The **Classify** stage's matter-classification agent (`PipelineRunner._classify_matter`). |
-| `pipeline.stages.relate.model` | The **Relate** stage's file-relation agent — typically the largest spend. |
+| `pipeline.stages.relate.model` | The **Relate** stage's file-relation agent, typically the largest spend. |
 | `pipeline.stages.extract_metadata.model` | The **Extract metadata** stage, and [firm-billing extraction](/product/costs/) (`POST /api/actions/extract-billing`), which is metadata extraction over billing documents. |
 | `pipeline.stages.extract_decisions.model` | The **Extract decisions** stage. |
 | `pipeline.stages.gen_evals.model` | The RL-environment builder (the standalone `gen_evals` flow). |
-| `retrieval.embedding_model` | The **Index** stage (chunk, profile and clause vectors), the query embedding of the semantic search leg, and the corpus-wide matter search that runs during classification. One model for the whole appliance — see the embedding lock below. |
+| `retrieval.embedding_model` | The **Index** stage (chunk, profile and clause vectors), the query embedding of the semantic search leg, and the corpus-wide matter search that runs during classification. One model for the whole appliance; see the embedding lock below. |
 | `retrieval.rerank_model` | Search-time re-ranking, only when `retrieval.rerank_enabled` is on. |
-| `ask_model` | `POST /api/ask` — retrieval planning and answer synthesis. |
+| `ask_model` | `POST /api/ask`: retrieval planning and answer synthesis. |
 
 An assignment is nothing but the model's gateway-served name. Every call goes
 to `components.litellm_url` with the gateway master key
-(`LITELLM_MASTER_KEY`), at temperature `0.0` — pipeline output is
+(`LITELLM_MASTER_KEY`), at temperature `0.0`; pipeline output is
 deterministic by design. The gateway's `drop_params: true` removes parameters
 a concrete model rejects.
 
@@ -45,8 +45,8 @@ route (`os.environ/KI_LLM_UPSTREAM` and friends), a key, and declared
 per-token rates. Several aliases may point at one upstream model.
 
 The console un-aliases through `GET /api/models/catalog`: the app proxies the
-gateway's `/model/info` using the master key — the key never reaches the
-browser — and returns, per model, only an allow-listed projection: `id` (the
+gateway's `/model/info` using the master key (the key never reaches the
+browser) and returns, per model, only an allow-listed projection: `id` (the
 alias), `upstream_model`, `api_base`, `mode` (`chat` / `embedding` /
 `rerank`), and `source` (`config` for models declared in the gateway config
 file, `runtime` for models added from the console). `litellm_params` is
@@ -58,7 +58,7 @@ chat models. Options
 are labelled `upstream_model · via alias`, so what actually runs leads and
 the alias trails it. A saved value the gateway does not currently serve stays
 in the list, labelled either "not served by this gateway" or "gateway
-unreachable" — a temporary outage never rewrites the saved configuration.
+unreachable"; a temporary outage never rewrites the saved configuration.
 
 ## Adding a model
 
@@ -72,7 +72,7 @@ Key handling is the point of the design:
 
 - The gateway config declares **named credentials** (`credential_list` in
   `deploy/litellm/config.yaml`). Each entry references its key with
-  `os.environ/…`, which the gateway resolves only for entries in that file —
+  `os.environ/…`, which the gateway resolves only for entries in that file,
   so the actual secrets live exclusively in the gateway container's
   environment.
 - A runtime model references a credential **by name**
@@ -82,18 +82,18 @@ Key handling is the point of the design:
 - The app validates the credential name against the gateway's `/credentials`
   endpoint before registering (`400` for an unknown name, `502` if the
   gateway is unreachable), because the gateway itself would accept an unknown
-  name and only fail at call time — which would quarantine documents for the
+  name and only fail at call time, which would quarantine documents for the
   wrong reason.
 - `GET /api/models/catalog` returns credential **names and descriptions**
   only; values never cross that boundary.
 
 **Where things are stored.** The alias and its routing parameters are stored
-in the gateway's own database — this requires `store_model_in_db: true` in
+in the gateway's own database; this requires `store_model_in_db: true` in
 the gateway config, matched by `STORE_MODEL_IN_DB: "True"` in
 `docker-compose.yml`. When it is off, LiteLLM refuses the registration and
 that message is passed through verbatim. LegalMemory's database stores only
 an audit event (`models.register`) recording the alias, upstream model,
-mode, and credential *name* — auditable provider wiring, no secret.
+mode, and credential *name*: auditable provider wiring, no secret.
 Config-file models cannot be edited or removed from the console; runtime
 models can.
 
@@ -113,7 +113,7 @@ embedding-model select and the dimension field until a rebuild.
 ### Model-bound index naming
 
 `retrieval.index_name` starts as `knowledge-index-chunks-v1`. The rebuild
-target is derived from the **embedding signature** — the identity of the
+target is derived from the **embedding signature**, the identity of the
 vectors an index may hold:
 
 ```
@@ -132,7 +132,7 @@ Switching model or dimension therefore always targets a fresh, uniform index.
 `POST /api/actions/reindex`, which:
 
 1. Sets `retrieval.index_name` to the derived, model-bound name.
-2. Bumps the Index stage's operator-owned `rerun_token` — deliberately not
+2. Bumps the Index stage's operator-owned `rerun_token`, deliberately not
    `producer_version`, which is recomputed from the code's own version on
    every config load and would discard the bump, requeuing nothing.
 3. Requeues the `index` stage for every object (`requeue_outdated_stages`).
@@ -155,7 +155,7 @@ Guardrails, all in code:
   is bound to the model slug.
 
 **Queries during a rebuild** run against the new model-bound index from the
-moment the config is saved — the name switch is immediate, and the index is
+moment the config is saved; the name switch is immediate, and the index is
 created on first touch. Documents become searchable again as their Index
 stage completes; the old index is left in place but is no longer queried.
 
@@ -174,9 +174,9 @@ Vector search is always approximate (HNSW), never brute-force
 
 ## Fusion & ranking
 
-A query runs three ACL-scoped ranked legs in a single `_msearch` round-trip —
+A query runs three ACL-scoped ranked legs in a single `_msearch` round-trip:
 lexical (BM25 over chunk text), semantic (kNN over the embedding), and
-identifier (query text matched against model-extracted identifiers) — and
+identifier (query text matched against model-extracted identifiers). It
 fuses them with reciprocal-rank fusion, per chunk id:
 
 ```
@@ -191,15 +191,15 @@ re-verifies authorization in SQL, and optionally reranks.
 | `retrieval.fusion_rrf_k` | `60` | RRF constant `k` (1–1000). Lower sharpens the contrast between top ranks. |
 | `retrieval.weight_lexical` | `1.0` | Weight of the BM25 leg in fusion. |
 | `retrieval.weight_semantic` | `1.0` | Weight of the vector leg. |
-| `retrieval.weight_identifier` | `1.5` | Weight of the identifier leg — a pasted case or file number matches its document without any regex parsing of the query. |
+| `retrieval.weight_identifier` | `1.5` | Weight of the identifier leg; a pasted case or file number matches its document without any regex parsing of the query. |
 | `retrieval.weight_decisions` | `0.8` | Declared and editable, but not applied by the current three-leg fusion; drafting-decision search is a separate tool (`search_decisions`), not a fused leg. |
 | `retrieval.version_status_boost` | `executed 1.2 · final 1.0 · unknown 0.8 · draft 0.7` | Multiplier on the fused score by version status: legal authority decays by supersession, not by age. A status not in the map multiplies by 1.0. |
 | `retrieval.collapse_per_document` | `true` | Keep the single strongest chunk per document (ties prefer the latest final version) instead of a chunk flood. Off, up to `max_chunks_per_document` chunks per document survive. |
 | `retrieval.max_chunks_per_document` | `3` | Cap per document when collapse is off (1–20). |
-| `retrieval.rerank_enabled` | `false` | Sends the top-20 fused candidates to `retrieval.rerank_model` for 0–10 relevance scoring and reorders by it. A gateway error raises — there is no silent fallback to the fused order. |
+| `retrieval.rerank_enabled` | `false` | Sends the top-20 fused candidates to `retrieval.rerank_model` for 0–10 relevance scoring and reorders by it. A gateway error raises; there is no silent fallback to the fused order. |
 | `retrieval.graph_rag_enabled` | `false` | Declared; no code path currently reads it. |
 
-Fusion never sees an unauthorized row — every leg runs inside the compiled
+Fusion never sees an unauthorized row: every leg runs inside the compiled
 access scope, and the SQL re-verification is the authoritative backstop.
 
 ## Ingestion signals
@@ -211,7 +211,7 @@ it:
 | --- | --- | --- |
 | `retrieval.chunk_chars` | `1200` | Body chunk size in characters (200–10000). |
 | `retrieval.chunk_overlap_chars` | `120` | Overlap between adjacent body chunks (0–2000). |
-| `retrieval.chunk_contextualize` | `true` | Prefixes each chunk with a context header (title, human-readable document-type label, matter title) **before embedding only** — the stored and displayed chunk text stays raw. |
+| `retrieval.chunk_contextualize` | `true` | Prefixes each chunk with a context header (title, human-readable document-type label, matter title) **before embedding only**; the stored and displayed chunk text stays raw. |
 | `retrieval.profile_embeddings` | `true` | Adds one document-profile row (ordinal −1) per **latest final** version: title, type, matter, reference numbers, parties, identifiers, date and leading text, embedded as a single document-level vector. |
 | `retrieval.clause_embeddings` | `true` | Adds one row per notable clause (ordinals 1000+) for **final/executed** versions, from the `notable_clauses` artifact produced by metadata extraction, carrying `clause_type` and locus. |
 
@@ -229,13 +229,13 @@ each **api_url** live with a 2-second timeout:
 | Role | Product | api_url (probed) | ui_url (browser link) |
 | --- | --- | --- | --- |
 | Model gateway | LiteLLM | `components.litellm_url` | same |
-| Document parsing | Docling Serve | `components.docling_url` | — |
+| Document parsing | Docling Serve | `components.docling_url` | n/a |
 | Search index | OpenSearch | `components.opensearch_url` | same |
 | Pipeline orchestrator | `components.orchestrator_provider` | `components.orchestrator_api_url` | `components.orchestrator_ui_url` |
 | Traces | Langfuse | `components.traces_api_url` (falls back to `traces_url`) | `components.traces_url` |
 
-Health semantics are reachability, not configuration: **any** HTTP answer —
-including 401 or 404 — counts as `ok`; a connection failure is
+Health semantics are reachability, not configuration: **any** HTTP answer,
+including 401 or 404, counts as `ok`; a connection failure is
 `unreachable`; an empty URL is `disabled`.
 
 `api_url` and `ui_url` are two names for one service on purpose: LegalMemory
@@ -245,8 +245,8 @@ resolve to the app container itself and report a running Langfuse as
 unreachable.
 
 The **Service links** toggle in the console topbar controls whether the
-registry (and other pages) show deep links into the component dashboards —
-Hatchet, OpenSearch, Langfuse, LiteLLM — and the API docs. It is off by
+registry (and other pages) show deep links into the component dashboards
+(Hatchet, OpenSearch, Langfuse, LiteLLM) and the API docs. It is off by
 default and stored per browser.
 
 ## Configuration reference
@@ -261,7 +261,7 @@ each value.
 
 | Key | Env var | Default | Effect |
 | --- | --- | --- | --- |
-| `pipeline.stages.<stage>.model` | — (part of the `stages` map) | `$KI_LLM_MODEL` | Gateway model the stage calls. |
+| `pipeline.stages.<stage>.model` | n/a (part of the `stages` map) | `$KI_LLM_MODEL` | Gateway model the stage calls. |
 | `retrieval.embedding_model` | `KI_RETRIEVAL__EMBEDDING_MODEL` | `$KI_EMBEDDING_MODEL` | The appliance-wide embedding model; locked while chunks exist. |
 | `retrieval.rerank_model` | `KI_RETRIEVAL__RERANK_MODEL` | `$KI_LLM_MODEL` | Scores the top collapsed hits when rerank is enabled. |
 | `ask_model` | `KI_ASK_MODEL` | `$KI_LLM_MODEL` | The reference `/api/ask` assistant. |

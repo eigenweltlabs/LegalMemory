@@ -1,12 +1,12 @@
 ---
 title: Ontology
-description: The pluggable ontology artifact — file format, facets, scoping semantics, re-typing behavior, and the doc-type health metrics.
+description: "The pluggable ontology artifact: file format, facets, scoping semantics, re-typing behavior, and the doc-type health metrics."
 ---
 
 LegalMemory classifies every document against one pluggable ontology
 *artifact*. The artifact is data, never code: a deployment plugs one in, the
-console activates *facets* of it, and the scoped view — artifact minus
-disabled subtrees, restricted to active facets — is the sole vocabulary source
+console activates *facets* of it, and the scoped view (artifact minus
+disabled subtrees, restricted to active facets) is the sole vocabulary source
 for the extraction agent, retrieval filters, the MCP taxonomy tools, and the
 console. There is exactly one answer to "what document types exist here".
 
@@ -28,7 +28,7 @@ detects the gzip magic bytes and accepts either). Top-level fields:
 
 Node ids are the IRI tails of the source ontology (e.g.
 `RDMmVnDBUmOnVx8i4ZpOt2G`), so they stay stable across artifact rebuilds even
-when a label is reworded. Nodes may have multiple parents — the structure is a
+when a label is reworded. Nodes may have multiple parents; the structure is a
 DAG, not a strict tree. Child lists are derived at parse time and sorted by
 label; the parsed artifact is immutable in memory.
 
@@ -39,7 +39,7 @@ built from the SALI LMSS legal ontology:
 
 - `name: lmss`, `version: 2026-07-27.2`, 18,322 nodes.
 - Four facets: `doc_type` (roots *Document Types*, *Knowledge Type*, and
-  *Written Asynchronous Communication* — the last one gives correspondence
+  *Written Asynchronous Communication*; the last one gives correspondence
   forms such as email and letter a home in the type facet), `area_of_law`
   (root *Area of Law*), `service` (root *Service*), and `clause` (root
   *Contractual Clause*).
@@ -60,7 +60,7 @@ python scripts/build_ontology_artifact.py LMSS.owl \
 The script extracts `rdfs:label`, `rdfs:subClassOf`, `skos:definition`, and
 `skos:altLabel` from every `owl:Class`, records the source file's SHA-256, and
 locates facet roots by their labels in the source. All four facets are always
-included in the artifact even though a deployment may activate fewer —
+included in the artifact even though a deployment may activate fewer;
 activating a facet later is configuration, not a rebuild. Output is
 minified JSON, gzipped with a fixed mtime when the target ends in `.gz`, so
 rebuilds from identical input are byte-identical.
@@ -79,12 +79,12 @@ two places, in order:
 `POST /api/ontology/artifacts` (admin only) uploads a new artifact as a
 multipart file. The filename must end in `.json` or `.json.gz`; the payload is
 fully parsed before it is written to disk, so an invalid artifact is rejected
-with `422` and never stored. Uploading does not activate the artifact —
+with `422` and never stored. Uploading does not activate the artifact;
 activation is a scope change (`PUT /api/ontology/scope` with `artifact` set,
 or setting `ontology.artifact` in configuration).
 
 Loading is cached on `(file path, file mtime)`, and the scoped view on
-`(file path, file mtime, active facets, disabled nodes)` — so replacing the
+`(file path, file mtime, active facets, disabled nodes)`, so replacing the
 file or changing the scope is picked up without a restart, and repeated
 resolution per task is cheap.
 
@@ -106,7 +106,7 @@ which view.
 | `service` | The classify-matter stage (matter kind) | Deep facet walked with tools and judged by definitions, under the same visited-id discipline as document typing. Only offered when the facet is active. |
 | `clause` | The extract-metadata stage (notable clauses) | A `clause_search` tool over the facet; each clause's type node must come from a search result and be visible. Only offered when the facet is active. |
 
-Every consumer resolves exactly one facet by name — the document-typing agent
+Every consumer resolves exactly one facet by name; the document-typing agent
 never sees Area of Law roots and vice versa. Resolution happens at task
 execution time: each pipeline task constructs its runner with a freshly read
 configuration, so a mid-run artifact or scope change applies to every
@@ -115,7 +115,7 @@ browse view that combines all active facets; pipeline producers never do.
 
 Any node, interior or leaf, is a valid classification. "Stopping high" is the
 honest catch-all; depth pressure (below) is the health signal. Navigation is
-deterministic — roots, children, and node detail are pure lookups, and the
+deterministic: roots, children, and node detail are pure lookups, and the
 lexical search has a stable ranking (exact label > label prefix > label
 substring > synonym substring > definition substring, ties alphabetical) with
 no model calls.
@@ -133,16 +133,16 @@ crossing a disabled node. Disabling a node therefore hides its entire
 subtree (except nodes also reachable through a visible parent elsewhere in
 the DAG). Effects of a hidden branch:
 
-- **Extraction** — the agent's navigation tools simply never show hidden
+- **Extraction**: the agent's navigation tools simply never show hidden
   nodes, and a submitted node outside the visible set is rejected by the
   validator. A stored id that later falls out of scope resolves to its
   nearest visible ancestor when displayed.
-- **Retrieval filters** — documents and chunks store the *ancestor closure*
+- **Retrieval filters**: documents and chunks store the *ancestor closure*
   of their type node (`doc_type_ancestors`), and the `doc_type` search filter
   matches against that closure. Filtering by an interior node ("Agreements")
   matches every document typed at or below it. Hidden nodes are not offered
   by ontology search, so they stop being discoverable filter values.
-- **MCP taxonomy tools** — `list_taxonomies`, `ontology_search`,
+- **MCP taxonomy tools**: `list_taxonomies`, `ontology_search`,
   `ontology_roots`, `ontology_children`, and `ontology_node` all resolve the
   scoped `doc_type` facet from current configuration per call, so a scope
   change is visible to MCP clients immediately.
@@ -151,20 +151,20 @@ the DAG). Effects of a hidden branch:
 
 Saving a scope change does two things:
 
-1. **Future documents** — every pipeline task re-reads configuration when it
+1. **Future documents**: every pipeline task re-reads configuration when it
    starts, so the next task to run resolves the new scope. A task already
    in flight finishes under the scope it resolved at start; nothing is
    interrupted.
-2. **Selective re-typing** — the server re-queues the extract-metadata stage
+2. **Selective re-typing**: the server re-queues the extract-metadata stage
    (and everything downstream) for exactly two groups: documents whose type
    node is no longer visible, and documents honestly left untyped under a
    *different* fingerprint (a richer artifact may finally have a home for
    them). Documents whose node is still visible keep their result. Only
    settled documents (extract-metadata done or skipped) are re-queued; the
    response reports `requeued_documents` and, when any were re-queued,
-   best-effort launches an insertion run (`run` in the response — an
+   best-effort launches an insertion run (`run` in the response). An
    unreachable orchestrator does not fail the scope change; the rows stay
-   pending for the next trigger).
+   pending for the next trigger.
 
 ## The Ontology page in the console
 
@@ -177,8 +177,8 @@ described above.
 
 The tree editor deliberately shows more than the pipeline sees:
 `GET /api/ontology/children` returns children from the *unscoped* artifact
-with two flags per child — `disabled` (explicitly toggled off) and `hidden`
-(invisible because an ancestor is disabled) — so disabled branches remain
+with two flags per child, `disabled` (explicitly toggled off) and `hidden`
+(invisible because an ancestor is disabled), so disabled branches remain
 visible and can be re-enabled.
 
 ## Vocabulary health: depth pressure
@@ -192,16 +192,16 @@ response:
 | --- | --- |
 | `fingerprint` | The `doc_type` scope fingerprint the numbers were computed under. |
 | `branches` | Per top-level branch (keyed by root label): `total` typed documents whose ancestor closure contains that root, `shallow` of those at depth ≤ 2, and `share` = shallow/total (0 when the branch is empty). A document under multiple roots counts in each. |
-| `shallow_nodes` | The 20 most-used nodes at depth ≤ 2, each with `id`, `label`, `depth`, and document `count` — the exact nodes needing extension. |
+| `shallow_nodes` | The 20 most-used nodes at depth ≤ 2, each with `id`, `label`, `depth`, and document `count`, the exact nodes needing extension. |
 | `untyped_documents` | Documents where the extraction agent found no fitting node at all (`doc_type` is null). |
-| `stale_typed_documents` | Documents typed at a node that is not visible under the *current* scope — counted, not re-attributed, until re-typing runs. |
+| `stale_typed_documents` | Documents typed at a node that is not visible under the *current* scope; counted, not re-attributed, until re-typing runs. |
 | `alerts` | See below. |
 
 Two alert kinds are emitted:
 
-- `depth_pressure` — a branch has at least 50 typed documents and more than
+- `depth_pressure`: a branch has at least 50 typed documents and more than
   25% of them sit at depth ≤ 2.
-- `untyped_share` — at least 20 documents have been judged in total and more
+- `untyped_share`: at least 20 documents have been judged in total and more
   than 10% of them are untyped. This is the strongest signal to extend the
   artifact: those documents found no home in this ontology at all.
 
@@ -232,7 +232,7 @@ and let selective re-typing pick up exactly the affected documents.
 
 ## Related
 
-- [Data model](/concepts/data-model/) — how ontology labels appear on
+- [Data model](/concepts/data-model/): how ontology labels appear on
   documents and chunks.
-- [Insertion pipeline](/product/pipeline/) — the stages that consume each
+- [Insertion pipeline](/product/pipeline/): the stages that consume each
   facet.

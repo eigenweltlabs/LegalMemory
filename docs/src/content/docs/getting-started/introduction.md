@@ -4,8 +4,8 @@ description: What LegalMemory does, how it is put together, and what makes it di
 ---
 
 LegalMemory is an open-source, on-premises knowledge index for law firms. It
-continuously syncs the firm's document estate — DMS libraries, cloud drives,
-practice-management systems, mailboxes, chat — into a **shadow index**: the
+continuously syncs the firm's document estate (DMS libraries, cloud drives,
+practice-management systems, mailboxes, chat) into a **shadow index**: the
 sources are only ever read, never modified, and every document's source
 permissions are mirrored alongside its content.
 
@@ -24,7 +24,7 @@ On top of that index, LegalMemory does more than embed and retrieve:
   best version of each document. See [how retrieval works](/concepts/retrieval/).
 - **AI tools plug in over MCP.** An identity-bound MCP server exposes search,
   matter lookup, decision records, billing queries and entity resolution to any
-  MCP-capable client — with an append-only access ledger recording every call.
+  MCP-capable client, with an append-only access ledger recording every call.
 
 ## The appliance
 
@@ -33,7 +33,7 @@ components: PostgreSQL + pgvector as the system of record, OpenSearch for
 ACL-scoped hybrid retrieval, Docling Serve for document conversion and OCR,
 LiteLLM as the model gateway (cloud providers now, vLLM/TEI for air-gapped
 installs), Hatchet for pipeline orchestration, and Keycloak + oauth2-proxy for
-identity. The admin console — the product UI this documentation follows — runs
+identity. The admin console (the product UI this documentation follows) runs
 on the appliance itself.
 
 Every capability is a real service: there are no mocks, no silent fallbacks. A
@@ -42,10 +42,10 @@ silently.
 
 ## Where to go next
 
-- [Quick start](/getting-started/quickstart/) — bring the stack up and index a
+- [Quick start](/getting-started/quickstart/): bring the stack up and index a
   first source.
-- [Product guide](/product/overview/) — one page per screen of the admin
+- [Product guide](/product/overview/): one page per screen of the admin
   console.
-- [Connectors](/connectors/) — connect each supported source.
-- [Architecture](/concepts/architecture/) — how sync, pipeline, retrieval and
+- [Connectors](/connectors/): connect each supported source.
+- [Architecture](/concepts/architecture/): how sync, pipeline, retrieval and
   MCP fit together.

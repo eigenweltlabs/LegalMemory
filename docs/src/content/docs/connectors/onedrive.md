@@ -3,16 +3,16 @@ title: OneDrive
 description: Index a OneDrive for Business drive with mirrored sharing permissions.
 ---
 
-The OneDrive connector indexes a person's **OneDrive for Business drive** —
-files and folders — through Microsoft Graph, mirroring the drive's sharing
-permissions.
+The OneDrive connector indexes the files and folders in a person's
+**OneDrive for Business drive** through Microsoft Graph, mirroring the drive's
+sharing permissions.
 
 | | |
 | --- | --- |
 | Syncs | Drive items (files and folders) |
 | Incremental | Graph delta feed |
 | Scoping | Folders |
-| Permission mirror | Yes — owner-scoped, plus shares |
+| Permission mirror | Yes, owner-scoped, plus shares |
 | Live events | [Azure Event Hubs](/connectors/microsoft-live-events/) |
 | Token type | Refresh token |
 
@@ -23,8 +23,8 @@ entire drive.
 
 ## Register the app in Entra
 
-Same registration as [SharePoint Online](/connectors/sharepoint-online/#register-the-app-in-entra)
-— single-tenant app, **Web** platform, redirect URI from the setup modal,
+Same registration as [SharePoint Online](/connectors/sharepoint-online/#register-the-app-in-entra):
+single-tenant app, **Web** platform, redirect URI from the setup modal,
 admin consent, secret **Value**. The delegated Graph scopes for OneDrive are:
 
 `offline_access`, `User.Read`, `User.Read.All`, `Files.Read.All`,

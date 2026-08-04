@@ -1,12 +1,12 @@
 ---
 title: "Live events: Google Drive"
-description: Near-real-time Drive change delivery through Google Workspace Events and Pub/Sub — outbound-only pull.
+description: "Near-real-time Drive change delivery through Google Workspace Events and Pub/Sub: outbound-only pull."
 ---
 
 Drive event delivery is **outbound-only**: Google publishes to a Pub/Sub topic
 in the customer's project and the appliance pulls from a subscription on it.
 No inbound webhook is required. The connection's continuous interval remains
-enabled as reconciliation — it catches a lost or expired subscription, a
+enabled as reconciliation: it catches a lost or expired subscription, a
 broker outage, and the periodic full ACL refresh.
 
 The topic must be in the **same Google Cloud project as the Drive OAuth
@@ -49,7 +49,7 @@ gcloud pubsub subscriptions add-iam-policy-binding "$SUBSCRIPTION" \
 
 Prefer workload identity where the platform offers it. For a standalone
 on-prem host, create a key for that narrowly scoped service account and mount
-it read-only — the key must never be placed in `config.json` or committed with
+it read-only; the key must never be placed in `config.json` or committed with
 the appliance. The Compose deployment mounts only
 `KI_CONNECTOR_EVENTS_SECRET_DIR` into the **app** container (at
 `/run/connector-events`); workers that parse documents cannot read it.

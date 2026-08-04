@@ -1,9 +1,9 @@
 ---
 title: Data
-description: The document explorer — the ACL-scoped graph projection, the paginated document ledger, the full document record, and original-file downloads.
+description: "The document explorer: the ACL-scoped graph projection, the paginated document ledger, the full document record, and original-file downloads."
 ---
 
-The **Data** page is the document explorer: two views — graph and table — over
+The **Data** page is the document explorer: two views, graph and table, over
 the same ACL-scoped estate, one shared filter toolbar, and a document drawer
 that shows the complete stored record. Everything on the page is served by the
 API under the caller's own principals; there is no separate "admin view" of
@@ -49,8 +49,8 @@ Edges are of two classes. Structural edges are derived from the rows
 themselves: `contains` (project→matter, matter→document, project→document
 when the document has no matter, matter→thread, source→source_object),
 `version_of` (document→version), and `observed_as` (version→source_object).
-Stored relations — the typed edges the relate stage wrote, such as
-`references`, `responds_to`, `supersedes`, `annex_of`, `belongs_to_thread` —
+Stored relations (the typed edges the relate stage wrote, such as
+`references`, `responds_to`, `supersedes`, `annex_of`, `belongs_to_thread`)
 are included whenever both endpoints are visible, and are marked with
 `stored: true` plus the relation's id, provenance, and creation time so they
 remain distinguishable from derived structure.
@@ -71,7 +71,7 @@ The projection is filtered at every layer, not post-hoc:
 - Stored relations are included only when *both* endpoints are visible;
   threads enter the projection only via such relations.
 
-The graph a member sees is genuinely smaller than an administrator's — nodes
+The graph a member sees is genuinely smaller than an administrator's: nodes
 are absent, not blurred.
 
 ### What the console renders
@@ -102,7 +102,7 @@ The table is served by `GET /api/documents` with `detailed=true`.
 | --- | --- |
 | `project_id` | Documents in one project. |
 | `query` | Case-insensitive substring match on the title. |
-| `doc_type` | Exact match on the stored type node id (row filter only — the facet counts ignore it, so the type breakdown always describes the otherwise-filtered set). |
+| `doc_type` | Exact match on the stored type node id (row filter only; the facet counts ignore it, so the type breakdown always describes the otherwise-filtered set). |
 | `matter_id` | Exact matter id. |
 | `version_status` | Documents with an authorized version of this status (`draft`, `final`, `executed`, `unknown`). |
 | `language` | Exact language match. |
@@ -110,20 +110,20 @@ The table is served by `GET /api/documents` with `detailed=true`.
 | `detailed` | `true` returns the paginated envelope below; without it the endpoint returns a plain list for API clients. |
 
 Only documents with at least one version the caller may read are listed at
-all — the ledger joins through versions and applies the version-level access
+all: the ledger joins through versions and applies the version-level access
 predicate. The detailed envelope is:
 
-- `items` — one row per document: title, type, language, date, parties,
+- `items`: one row per document, carrying title, type, language, date, parties,
   identifiers, version and chunk counts, latest version's status/id/hash, and
   compact project and matter summaries.
-- `pagination` — `total`, `offset`, `limit`, `returned`, `has_more`.
-- `facets` — `doc_types` and `languages` as `{value, count}` lists over the
+- `pagination`: `total`, `offset`, `limit`, `returned`, `has_more`.
+- `facets`: `doc_types` and `languages` as `{value, count}` lists over the
   authorized, filtered set, for populating filter dropdowns with real counts.
 
 The console shows columns Document, Type, Project, Date, Versions, and
 Status, plus a collapsible panel for the matter-id, version-status, and
 language filters (page sizes 100–1,000). The command palette's matter lookup
-uses `GET /api/matters?query=` — matters matched by their own title, scoped
+uses `GET /api/matters?query=`, with matters matched by their own title, scoped
 through the caller's visible documents; the returned `documents` count is
 how many of the matter's documents the caller may read, and a matter whose
 readable count is zero never appears.
@@ -138,13 +138,13 @@ ranking:
 
 | Field | Meaning |
 | --- | --- |
-| `scope.fingerprint` | Stable fingerprint of the compiled access scope — the identity of the candidate set the query ran against. |
+| `scope.fingerprint` | Stable fingerprint of the compiled access scope, the identity of the candidate set the query ran against. |
 | `scope.projects` | Number of projects in the scope. |
 | `scope.documents` | Number of documents in the candidate set. |
 | `scope.filters` | Echo of the non-empty filters that constrained the search. |
 
 The ribbon renders this as "N document(s) across P project(s) · fingerprint
-…" — the visible proof of what was searchable *for this caller* when the
+…", the visible proof of what was searchable *for this caller* when the
 results were produced. Note the semantic difference from the table: the
 search `doc_type` filter matches the indexed ancestor closure (an interior
 ontology node covers its whole subtree), while the table's `doc_type` filter
@@ -153,25 +153,25 @@ is an exact match on the stored node id.
 ## The document drawer
 
 Opening a row (or a graph document node) loads
-`GET /api/documents/{document_id}` — the complete authorized record. The
+`GET /api/documents/{document_id}`, the complete authorized record. The
 drawer's sections and the fields behind them:
 
 | Section | Backing fields |
 | --- | --- |
 | Header and meta | `document.title`, `document.doc_type` with the resolved `doc_type_label`, `version.ordinal`/`status`, `document.language`, `document.doc_date`, version and related counts. |
-| Extracted metadata | Type, language, date, `parties`, `identifiers`, and the ontology path: `doc_type_path` (root-to-leaf labels resolved from the live artifact) with `doc_type_ancestors` (the stored id closure) as fallback, plus `ontology_fingerprint` — the scope the document was typed under. A document typed under an artifact that has since been unplugged still shows the stored ids rather than an empty box. |
-| How this was extracted | `extractions[]`, newest first — one row per extraction audit record with the `fields` it set, the `model`, the `prompt_version`, the `confidence`, and the timestamp. This is what a firm disputing a classification asks for first. |
-| Notable clauses | `clauses[]` from the `notable_clauses` artifact stored for the version's content hash — the clause pass of the extract-metadata stage. |
+| Extracted metadata | Type, language, date, `parties`, `identifiers`, and the ontology path: `doc_type_path` (root-to-leaf labels resolved from the live artifact) with `doc_type_ancestors` (the stored id closure) as fallback, plus `ontology_fingerprint`, the scope the document was typed under. A document typed under an artifact that has since been unplugged still shows the stored ids rather than an empty box. |
+| How this was extracted | `extractions[]`, newest first: one row per extraction audit record with the `fields` it set, the `model`, the `prompt_version`, the `confidence`, and the timestamp. This is what a firm disputing a classification asks for first. |
+| Notable clauses | `clauses[]` from the `notable_clauses` artifact stored for the version's content hash, the clause pass of the extract-metadata stage. |
 | All identifiers | Document, project, matter, and version ids, the version's content hash, and `latest_final_version_id`, each copyable. |
 | Document content | `content.text` from the parsed `structured_json` artifact, truncated with an expand control. |
-| Source provenance | `sources[]` — the source objects behind the selected version: connection, path, and object id. |
-| Version history | `versions[]`, ordered newest-ordinal first: id, ordinal, status, content hash, `status_evidence`, `redline_against`, provenance, and the source observations behind each version. Each entry is independently authorization-checked — a version with no source the caller may read is omitted entirely. |
-| Related documents | `related` — documents connected through stored relations or a shared matter/thread, each entry naming the basis (`stored_relation` vs. derived context) and relation kind, and each independently ACL-checked. |
-| Document access exceptions | `grants[]` — document-level allow/deny overrides, read-only here; they are managed on [Access control](/product/access-control/). No entries means project grants and mirrored source ACLs apply unmodified. |
+| Source provenance | `sources[]`, the source objects behind the selected version: connection, path, and object id. |
+| Version history | `versions[]`, ordered newest-ordinal first: id, ordinal, status, content hash, `status_evidence`, `redline_against`, provenance, and the source observations behind each version. Each entry is independently authorization-checked; a version with no source the caller may read is omitted entirely. |
+| Related documents | `related`, documents connected through stored relations or a shared matter/thread, each entry naming the basis (`stored_relation` vs. derived context) and relation kind, and each independently ACL-checked. |
+| Document access exceptions | `grants[]`, document-level allow/deny overrides, read-only here; they are managed on [Access control](/product/access-control/). No entries means project grants and mirrored source ACLs apply unmodified. |
 | Raw record | The matter, document, version, content-metadata, and entire API payloads as expandable JSON. |
 
 The endpoint returns `404` both for an unknown id and for a document none of
-whose versions the caller is authorized to read — the two cases are
+whose versions the caller is authorized to read; the two cases are
 indistinguishable by design.
 
 ## Original-file downloads
@@ -186,8 +186,8 @@ Properties of the link, served by `GET /api/downloads/{token}/{filename}`:
 
 - The token is a 32-byte random URL-safe value; the store is process-local
   and in-memory, and entries expire after 300 seconds.
-- The capability itself is the credential — no session is required to fetch
-  it — but **every** fetch re-checks the ACL snapshot using the principals
+- The capability itself is the credential (no session is required to fetch
+  it), but **every** fetch re-checks the ACL snapshot using the principals
   captured when the tool issued the link. A grant revoked after issuance
   invalidates an otherwise unexpired URL; the token is then revoked and the
   request fails with `404`.
@@ -209,9 +209,9 @@ Properties of the link, served by `GET /api/downloads/{token}/{filename}`:
 
 ## Related
 
-- [Data model](/concepts/data-model/) — the entities behind the projection:
+- [Data model](/concepts/data-model/) describes the entities behind the projection:
   documents, versions, source objects, relations.
-- [Insertion pipeline](/product/pipeline/) — the stages that produce every
+- [Insertion pipeline](/product/pipeline/): the stages that produce every
   field the drawer shows.
-- [Access control](/product/access-control/) — how the visible sets and
+- [Access control](/product/access-control/): how the visible sets and
   document exceptions are computed.

@@ -1,16 +1,16 @@
 ---
 title: The data model
-description: The three-layer data model — source observations, interpreted knowledge, pipeline state — and the design rules everything is built on.
+description: The three-layer data model (source observations, interpreted knowledge, pipeline state) and the design rules everything is built on.
 ---
 
-The data model for the shadow index. Everything else — sync, pipeline, retrieval, MCP
-tools, the UI — is defined against these entities. The model has three layers:
+The data model for the shadow index. Everything else (sync, pipeline, retrieval, MCP
+tools, the UI) is defined against these entities. The model has three layers:
 
-1. **Source layer** — immutable observations of the customer's systems. Never
+1. **Source layer**: immutable observations of the customer's systems. Never
    interpreted, never overwritten, only superseded. This is what sync writes.
-2. **Knowledge layer** — interpreted entities (matters, documents, relations,
+2. **Knowledge layer**: interpreted entities (matters, documents, relations,
    decisions). This is what the pipeline writes and what retrieval reads.
-3. **Pipeline layer** — per-object processing state, provenance, and errors. This is
+3. **Pipeline layer**: per-object processing state, provenance, and errors. This is
    what makes the system resumable and debuggable at millions of documents.
 
 Design rules that apply everywhere:
@@ -30,7 +30,7 @@ Design rules that apply everywhere:
   is a UI concern, never baked into the data model. Firms can extend taxonomies;
   core ids never change meaning. Free-text the model produces (titles, summaries,
   anonymized rationales) is kept in the *document's* language so firm knowledge
-  reads naturally — only the controlled vocabulary is English.
+  reads naturally; only the controlled vocabulary is English.
 
 ---
 
@@ -72,14 +72,14 @@ joined in the knowledge layer via content hash / near-dup detection).
 
 ### Blob & Artifact
 `Blob` = unique content (`content_hash`, `size`, `mime_sniffed`, optional cached copy
-subject to retention policy — the shadow index does **not** need to retain originals).
+subject to retention policy; the shadow index does **not** need to retain originals).
 `Artifact` = derived output keyed by `(content_hash, producer, producer_version)`:
 extracted text, structured JSON (layout, tables, tracked changes, comments), page
 images, OCR confidence map, embeddings. Artifacts are immutable and reproducible;
 cache-invalidation is "new producer_version, new artifact".
 
 ### AccessGrant
-`{principal, principal_kind: user|group|source_role, access: allow|deny, raw}` —
+`{principal, principal_kind: user|group|source_role, access: allow|deny, raw}`, where
 `raw` preserves the source-native ACL entry so nothing is lost in translation.
 Principals are mapped to firm identities (AD/Entra) in a separate `PrincipalMapping`
 table maintained by the connector.
@@ -94,7 +94,7 @@ table maintained by the connector.
 | `id` | uuid |
 | `name`, `aliases[]` | all name forms seen for one client entity |
 | `kind` | `legal_entity \| natural_person` |
-| `identifiers` | company-register number, tax id, DMS client code — whatever the firm has |
+| `identifiers` | company-register number, tax id, DMS client code, whatever the firm has |
 | provenance | confidence + evidence (clients are usually *imported* from the practice-management system and are then authoritative, `confidence = 1.0`) |
 
 ### Matter
@@ -105,18 +105,18 @@ retrieval is matter-aware.
 |---|---|
 | `id` | uuid |
 | `reference_numbers[]` | all matter reference numbers seen (firm's own, court's, opposing counsel's) |
-| `title` | e.g. "Müller GmbH v. Schmidt AG — share purchase" |
+| `title` | e.g. "Müller GmbH v. Schmidt AG: share purchase" |
 | `client_ids[]` | FK Client |
 | `practice_area` | taxonomy below |
 | `matter_kind` | `transaction \| litigation \| advisory \| regulatory \| internal` |
-| `parties[]` | `MatterParty { party_id, role }` — roles from the `PartyRole` taxonomy: `client, opposing_party, opposing_counsel, court, authority, notary, advisor, other` |
+| `parties[]` | `MatterParty { party_id, role }`, with roles from the `PartyRole` taxonomy: `client, opposing_party, opposing_counsel, court, authority, notary, advisor, other` |
 | `responsible[]` | lawyers/teams (principal refs) |
 | `status` | `active \| closed \| unknown` |
 | `time_range` | earliest/latest document dates |
 | provenance | matters are *inferred* by the pipeline unless imported from practice-management; keep both, prefer imported |
 
 ### Party (natural or legal person)
-Shared by matters (an opposing party in one matter may be the client in another —
+Shared by matters (an opposing party in one matter may be the client in another;
 conflict checks care about exactly this). `{id, name, aliases, kind, identifiers}`.
 
 ### Document (logical) and DocumentVersion
@@ -132,7 +132,7 @@ Document:
 | `doc_type` | taxonomy below |
 | `title` | normalized ("Share Purchase Agreement", not "SPA_final_FINAL_v3(2)") |
 | `language` | `de \| en \| mixed \| ...` |
-| `doc_date` | the date *of the document* (signing date, letter date) — distinct from any file mtime |
+| `doc_date` | the date *of the document* (signing date, letter date), distinct from any file mtime |
 | `parties[]` | parties to the document itself |
 | `latest_final_version_id` | resolved pointer, null if no final identified |
 
@@ -143,7 +143,7 @@ DocumentVersion:
 | `source_object_ids[]` | all places this exact content was seen |
 | `content_hash` | FK Blob |
 | `ordinal` | position in the chain (1 = earliest known) |
-| `status` | `draft \| final \| executed \| unknown` — `executed` = signed scan/qualified signature |
+| `status` | `draft \| final \| executed \| unknown`; `executed` = signed scan/qualified signature |
 | `status_evidence` | why we think so: filename signals, signature blocks, email context ("attached is the final version"), PDF-of-docx pairing |
 | `redline_against` | version id this is a markup of, if it carries tracked changes |
 
@@ -163,7 +163,7 @@ evidence}`:
 
 Duplicates are not drawn as edges: exact/semantic duplicates merge into a shared
 version (see MatterAssignment below), so there is no separate node for a `duplicate_of`
-edge to point at. Near-duplicate detection is intentionally out of scope —
+edge to point at. Near-duplicate detection is intentionally out of scope;
 template/precedent reuse is captured by `doc_type` classification. `work_product_of`
 (final document → EvalRecord input set) is planned but not yet emitted; it will land
 when the EvalRecord builder runs.
@@ -173,7 +173,7 @@ Reconstructed email/message threads: `{id, matter_id, participants[], subject_no
 time_range}`. Threads are the main substrate for decision-rationale extraction.
 
 ### DecisionRecord
-The anonymized "why" — extracted from threads and redlines, stored decoupled from
+The anonymized "why", extracted from threads and redlines, stored decoupled from
 client identity so it is usable as firm knowledge.
 
 | Field | Notes |
@@ -183,7 +183,7 @@ client identity so it is usable as firm knowledge.
 | `change_summary` | what changed between the versions |
 | `rationale_category` | `legal_risk \| market_standard \| negotiation_concession \| regulatory_requirement \| drafting_error \| client_instruction \| tactical` |
 | `rationale_text` | **anonymized** prose in the document's language: parties → roles ("the seller", "the client"), names/amounts normalized |
-| `generalizable` | bool — `client_instruction` and matter-specific tactics default to `false` and are excluded from cross-matter retrieval |
+| `generalizable` | bool; `client_instruction` and matter-specific tactics default to `false` and are excluded from cross-matter retrieval |
 | `source_evidence` | thread/email/version ids (ACL-protected; the anonymized text may be surfaced more broadly than its evidence, policy-controlled) |
 | provenance | model, prompt version, confidence |
 
@@ -197,8 +197,8 @@ the inputs that existed before it.
 | `instruction` | reconstructed task statement, in the document's language (e.g. "Draft a managing-director service agreement based on …") |
 | `input_refs[]` | DocumentVersions available at task start |
 | `reference_output_ref` | the human final version (gold answer) |
-| `rubric[]` | `{criterion, description, weight, kind: binary\|scale_1_5}` — derived from what the final version actually does: clauses present, positions taken, formalities met |
-| `holdout` | bool — excluded from the retrieval index to stay valid as a benchmark |
+| `rubric[]` | `{criterion, description, weight, kind: binary\|scale_1_5}`, derived from what the final version actually does: clauses present, positions taken, formalities met |
+| `holdout` | bool; excluded from the retrieval index to stay valid as a benchmark |
 | provenance | |
 
 ---
@@ -222,7 +222,7 @@ gen_evals → index`.
 | `status` | `pending \| running \| done \| failed \| quarantined \| skipped` |
 | `attempts`, `next_retry_at` | exponential backoff, capped |
 | `last_error` | class + message + truncated trace |
-| `producer_version` | pipeline/prompt/model version that produced `done` — bumping it re-queues the stage |
+| `producer_version` | pipeline/prompt/model version that produced `done`; bumping it re-queues the stage |
 
 `quarantined` is the poison-document terminal state: visible in the UI, counted, never
 blocking the rest of the corpus. `skipped` is policy (e.g. >2 GB media file, excluded
@@ -243,10 +243,10 @@ unlogged result.
 
 ---
 
-## 4. Taxonomies (v0 — firm-extensible)
+## 4. Taxonomies (v0, firm-extensible)
 
 > **Note:** document-type, area-of-law, service and clause vocabularies are now
-> supplied by the pluggable ontology artifact and scoped in the admin UI — see
+> supplied by the pluggable ontology artifact and scoped in the admin UI; see
 > [Ontology in the product guide](/product/ontology/). The lists below document
 > the built-in v0 baseline the default artifact extends.
 
@@ -295,14 +295,14 @@ sees German labels in the UI; the stored ids never change.
 
 ## 6. Open design decisions
 
-1. **Matter identity across sources** — practice-management import is authoritative
+1. **Matter identity across sources**: practice-management import is authoritative
    when available (RA-MICRO/Actaport already know the matters); pure-inference mode
    needs a merge/split review surface in the UI eventually.
-2. **Original-content caching** — the single-appliance MVP retains a content-addressed
+2. **Original-content caching**: the single-appliance MVP retains a content-addressed
    copy for crash-resume; production deployments need a configurable retain/refetch
    policy per source.
-3. **Anonymization reversibility** — v0 stores no reverse mapping (safest); revisit if
+3. **Anonymization reversibility**: v0 stores no reverse mapping (safest); revisit if
    firms want privileged deanonymization.
-4. **Graph store** — the Relation table is deliberately a plain typed-edge table in
+4. **Graph store**: the Relation table is deliberately a plain typed-edge table in
    Postgres; a graph engine is an optimization we adopt only if query patterns demand
    it (see architecture doc).

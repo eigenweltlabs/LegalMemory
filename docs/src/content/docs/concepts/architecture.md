@@ -1,6 +1,6 @@
 ---
 title: Architecture
-description: The system design — Postgres as the spine, the SyncSource contract, orchestrated sync runs, the insertion pipeline's robustness contract, and the MCP surface.
+description: "The system design: Postgres as the spine, the SyncSource contract, orchestrated sync runs, the insertion pipeline's robustness contract, and the MCP surface."
 ---
 
 On-prem, air-gap-capable, Docker-Compose-deployable. One Postgres instance is the
@@ -78,29 +78,29 @@ An optional body `{"source_id": "…"}` syncs one source; no body means every sy
 source. Each reserved run is a `pipeline_runs` row with `workflow = "source-sync"`, so a
 sync appears in `GET /api/runs` beside insertion runs and survives a closed tab.
 
-- **Workflow** — `knowledge-index-source-sync`, two Hatchet tasks over one run row:
+- **Workflow**: `knowledge-index-source-sync`, two Hatchet tasks over one run row:
   `scan` (the `SyncEngine` pass, no retries: a failed scan is a revoked scope or an
   expired licence, and a retry only pays for another crawl) then `handoff`
-  (retried — it is one cheap local enqueue).
-- **Lifecycle** — `queued` → `running` (`current_step` carries the live observation
+  (retried; it is one cheap local enqueue).
+- **Lifecycle**: `queued` → `running` (`current_step` carries the live observation
   count; `progress` stays 0 because a scan has no denominator until it ends, and a
   moving bar that measures nothing is a lie) → `completed` with `progress = 1`, or
   `failed` with the cause in `error` and the source set to `error`.
-- **Counters** — `observed`, `created`, `changed`, `unchanged`, `restored`,
+- **Counters**: `observed`, `created`, `changed`, `unchanged`, `restored`,
   `tombstoned`, `batches`, `mode`, `trigger` (`api` / `watch` / `event` / `cli`) and
   `insertion_run_id`.
-- **No overlap** — enforced by the partial unique index `uq_pipeline_runs_active_sync`
+- **No overlap**: enforced by the partial unique index `uq_pipeline_runs_active_sync`
   (one unfinished `source-sync` run per source) behind a per-source advisory lock, not
   by a disabled button. A second request puts the source in `skipped`.
-- **One path** — the sync button, `ki sync`, the scheduler and the folder watcher all
+- **One path**: the sync button, `ki sync`, the scheduler and the folder watcher all
   call `sync.runs.enqueue_sync`. Nothing scans on its own thread, so a scheduled sync and
   an operator click are the same kind of run and cannot collide.
-- **Handoff** — a run that created, changed, restored or tombstoned anything starts the
+- **Handoff**: a run that created, changed, restored or tombstoned anything starts the
   insertion pipeline and records its id as `insertion_run_id`. Controlled by
   `pipeline.auto_insert_after_sync`, **on by default**; turned off, the sync completes
   with a null `insertion_run_id` and nothing is converted or embedded until a partner
   says so.
-- **In-process deployments** — with `components.orchestrator_provider = "local"` the run
+- **In-process deployments**: with `components.orchestrator_provider = "local"` the run
   is reserved identically and executed on a background thread. Single-VM installs get
   the same run ledger, not a synchronous request.
 
@@ -112,7 +112,7 @@ fails its own run only).
 ### 1b. Scheduling: every continuous source, whatever its kind
 
 `sync_policy = {"mode": "continuous", "interval": "2m"}` is honoured by
-`sync/scheduler.py` for **every** source — SharePoint, Gmail, Slack and a mounted folder
+`sync/scheduler.py` for **every** source: SharePoint, Gmail, Slack and a mounted folder
 alike. It ticks in the app process (started by `ki serve`, not by `create_app`, so
 importing the app never starts crawling an estate), because the app is the only process
 present in every deployment: there is no Hatchet worker under the in-process
@@ -190,8 +190,8 @@ starts again from one. The set and not the count, because 340 missing today and 
 different 340 tomorrow is a connector returning garbage.
 
 The documents stay indexed and searchable while this happens, so the source payload
-carries `pending_deletion` and the connections page says
-"340 documents look deleted — confirming (2 of 3 syncs)". Immediate deletion still
+carries `pending_deletion` and the connections page reports that 340 documents look
+deleted and it is confirming (2 of 3 syncs). Immediate deletion still
 applies where there is nothing to confirm: a connector with `verifiable_emptiness` (a
 directory listing is the estate), a re-scope, or `sync_policy.allow_empty_scan`.
 
@@ -216,7 +216,7 @@ Stage-ordering nuances:
 - 3, 4 iterate: matter assignment improves relation detection and vice versa. Both
   stages are re-runnable; `producer_version` bump = corpus-wide cheap re-pass.
 - 5–7 subscribe to *knowledge-layer* conditions (e.g. "version chain has a final"),
-  not just per-object readiness — the scheduler materializes these as derived queues.
+  not just per-object readiness; the scheduler materializes these as derived queues.
 
 ### Robustness contract (the non-negotiables)
 
@@ -235,7 +235,7 @@ Stage-ordering nuances:
   the per-run stage counts report those rows as **`waiting`** (see
   `taxonomies.stage_bucket`). A dashboard reading `skipped 499` at every stage says the
   pipeline looked at the corpus and declined it; the truth was that `fetch` had not
-  finished. Completion ratios have always excluded blocked stages and still do — only
+  finished. Completion ratios have always excluded blocked stages and still do; only
   genuinely skipped work (a disabled stage, a stage with nothing to do) counts as
   settled.
 - **Timeouts + resource fences**: converters run in subprocess pools with hard

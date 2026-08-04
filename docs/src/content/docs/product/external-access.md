@@ -9,7 +9,7 @@ configuration, and (for administrators) the external-clients registry.
 
 | Endpoint | What it is |
 | --- | --- |
-| `/mcp/` | The MCP server — streamable-HTTP transport, stateless, JSON responses. |
+| `/mcp/` | The MCP server: streamable-HTTP transport, stateless, JSON responses. |
 | `POST /api/search` | REST hybrid search for integrations that do not speak MCP. |
 | `/openapi.json` | The generated API schema; interactive docs at `/docs`. |
 
@@ -38,7 +38,7 @@ The validated identity's principals are the only ACL input a tool ever sees:
 inside each tool, `principals_from_headers(headers, config)` calls
 `resolve_mcp_identity` and passes the resulting principal set to the retrieval
 layer. There is no request parameter, header fallback, or tool argument
-through which a caller can name its own principals — the older optional-config
+through which a caller can name its own principals; the older optional-config
 form that trusted an `x-ki-principals` header outright was removed for exactly
 that reason. The same invariant holds on REST: `/api/search` derives
 principals from the request's resolved identity and its body schema has no
@@ -47,7 +47,7 @@ principals field.
 ### Tools
 
 The list below is what `create_mcp_server` registers, in registration order.
-The console never hard-codes this list — it reads `GET /api/mcp/tools`
+The console never hard-codes this list; it reads `GET /api/mcp/tools`
 (administrator only), which enumerates `mcp.list_tools()` live with each
 tool's name, short title, and tags.
 
@@ -86,7 +86,7 @@ instead of answering when an invoice's source provenance is missing, and
 ### The access-ledger write per call
 
 Every tool invocation runs inside `audited_call`, a context manager that
-writes one `AuditEvent` row per call — action `mcp.<tool>` (for example
+writes one `AuditEvent` row per call: action `mcp.<tool>` (for example
 `mcp.search_semantic`), the caller's principals, the target where one exists
 (`document`/`entity` id), and an outcome of `success`, `error`, or `denied`.
 Identity-resolution failures are recorded as `denied` with empty principals
@@ -100,7 +100,7 @@ text is stored as a SHA-256 fingerprint plus character count, never verbatim
 `download_document` never puts document bytes in model context by default.
 It issues a process-local capability token (`secrets.token_urlsafe(32)`,
 TTL 300 seconds) that freezes the document/version/source-object identity,
-content hash, and — critically — the caller's principals at issuance. The
+content hash, and, critically, the caller's principals at issuance. The
 returned `ResourceLink` points at
 `GET /api/downloads/{token}/{filename}`, alongside a ready-to-run `curl`
 command, the SHA-256, size, and MIME type. On every fetch the endpoint
@@ -118,7 +118,7 @@ pasted:
 
 - **The 401 challenge.** An unauthenticated request to `/mcp` gets `401` with
   `WWW-Authenticate: Bearer resource_metadata="…"` (RFC 6750 §3.1,
-  RFC 9728 §5.1) — the only signal that makes a client start a login rather
+  RFC 9728 §5.1), the only signal that makes a client start a login rather
   than report a connection error. A request that *presented* a token which
   failed validation additionally gets `error="invalid_token"` with a
   description, and is recorded in the audit ledger as `mcp.authenticate` /
@@ -150,7 +150,7 @@ its headers (session or trusted proxy), and an unauthenticated request gets
 | `limit` | 1–100, default 20 | |
 
 The response is `{scope, hits}`. `scope` reports the compiled ACL scope the
-query ran under — `fingerprint`, project and document counts, and the active
+query ran under: `fingerprint`, project and document counts, and the active
 filters. Each hit carries `document_id`, `project_id`, `version_id`,
 `matter_id`, `title`, `doc_type` and `doc_type_label`, `version_status`,
 `score`, a term-centered `excerpt`, `source_paths`, `matched_identifiers`, and
@@ -159,9 +159,9 @@ filters. Each hit carries `document_id`, `project_id`, `version_id`,
 ## OpenAPI and API docs
 
 `/openapi.json` is the generated schema for the REST API (version 0.2.0), and
-FastAPI's interactive documentation is served at `/docs`. Internal routes —
-the download capability endpoint, the well-known documents, and the static
-assets — are marked `include_in_schema=False` and do not appear there. With
+FastAPI's interactive documentation is served at `/docs`. Internal routes
+(the download capability endpoint, the well-known documents, and the static
+assets) are marked `include_in_schema=False` and do not appear there. With
 the console's **Service links** toggle off, deep links to the API docs are
 hidden from the everyday admin surface.
 
@@ -179,5 +179,5 @@ Registration creates a database row and nothing else: no token, no grant, no
 access. `secret_ref` is a vault *reference*, never a secret value. The
 registered principal becomes visible in the grant picker (`/api/principals`
 reports it with origin `client`), and the client can read nothing until that
-principal holds a project or document grant — the console's registration modal
+principal holds a project or document grant; the console's registration modal
 says so out loud.

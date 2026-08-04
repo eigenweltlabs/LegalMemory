@@ -27,9 +27,9 @@ wildcards and no prefix matching.
 | `group:<id>` | `group:litigation` | Sign-in token (`groups` claim, leading/trailing `/` stripped); local grants |
 | `group:entra:<guid or email>`, `group:google:<email>` | `group:entra:2b1f…` | Mirrored source ACLs. The `entra` and `google` namespaces are treated as globally unique and stored as-is |
 | `group:src.<source-id>.<name>` | `group:src.42.sp:owners` | Mirrored source ACLs for every other group namespace. A source-local name such as a SharePoint site's "Owners" is bound to its source id before storage, so identically named groups at two sources can never match each other |
-| `role:authenticated` | — | Added to every successfully authenticated identity. Also written as a mirrored allow when a source marks an object organization-wide (`is_public`), which means "every authenticated caller of this appliance", never anonymous access |
-| `role:admin` | — | Minted at identity resolution when the caller's groups intersect `security.admin_groups`. Never stored as a claim |
-| `service:<name>` | — | Registered external API clients |
+| `role:authenticated` | n/a | Added to every successfully authenticated identity. Also written as a mirrored allow when a source marks an object organization-wide (`is_public`), which means "every authenticated caller of this appliance", never anonymous access |
+| `role:admin` | n/a | Minted at identity resolution when the caller's groups intersect `security.admin_groups`. Never stored as a claim |
+| `service:<name>` | n/a | Registered external API clients |
 
 The evaluator's administrator set is `{"role:admin", "system:admin"}`
 (`ADMIN_PRINCIPALS`); holding either casefolded string makes `is_admin` true.
@@ -53,7 +53,7 @@ typed, since they already name principals in the appliance's own namespace.
 Writing a project grant requires a managing role on that project
 (`can_manage_project`: appliance administrator, or an `allow` project grant
 with role `owner` or `admin`). Writing a document grant requires managing the
-owning project — or appliance administrator rights, which also covers
+owning project, or appliance administrator rights, which also covers
 documents that no project owns yet. The API exposes no endpoint that removes a
 grant. After each grant write, the server refreshes the per-chunk ACL
 projection used by the search index (`allowed_principals`,
@@ -66,7 +66,7 @@ Before evaluation, the caller's principal set is expanded
 (`AccessService.resolve_principals`), in this order:
 
 1. Normalize: strip and casefold every principal.
-2. Apply the alias map (`security.principal_aliases`). Aliases are additive —
+2. Apply the alias map (`security.principal_aliases`). Aliases are additive:
    they add principals, never remove any. `user:` and `username:` are treated
    as interchangeable spellings on both sides of the map, and the map is also
    applied in reverse (a caller holding the alias target also gains the source
@@ -83,7 +83,7 @@ Before evaluation, the caller's principal set is expanded
 
 `AccessService.version_predicate` is the single evaluator. Every listing,
 retrieval and search path uses it (directly or through `compile_scope`, which
-turns it into an explicit document-id filter for the search index — an empty
+turns it into an explicit document-id filter for the search index; an empty
 scope compiles to `match_none`).
 
 Given the expanded principal set:
@@ -101,12 +101,12 @@ Given the expanded principal set:
 
 | Condition | Definition |
 |---|---|
-| `any_allow` | A project allow **or** a document allow — or, in `sufficient` mode only, a mirrored source allow |
+| `any_allow` | A project allow **or** a document allow, or, in `sufficient` mode only, a mirrored source allow |
 | `source_intersection` | A mirrored source allow, **or** the version is observed on a `local_fs` source object that has no grant rows at all (local sources deliberately delegate to the local project/document boundary) |
 | `no_deny` | No project deny **and** no document deny **and** no mirrored source deny for any held principal |
 
 Deny therefore wins at every scope: a single deny row matching any held
-principal — local or mirrored — defeats every allow. A deny naming a principal
+principal, local or mirrored, defeats every allow. A deny naming a principal
 the caller does not actually hold has no effect on that caller.
 
 The `source_intersection` condition also means a local allow can never punch
@@ -120,12 +120,12 @@ reach.
 
 ## `source_acl_mode`: `sufficient` vs `intersect`
 
-The mode changes exactly one term of the predicate — what counts as
+The mode changes exactly one term of the predicate: what counts as
 `any_allow`:
 
 | Mode | `any_allow` | Consequence |
 |---|---|---|
-| `sufficient` (default) | project allow ∨ document allow ∨ source allow | A mirrored source allow is enough on its own. Faithful to the source — but an over-broad share there (a document shared with the whole organization) makes the document readable by every user of the appliance, bypassing local matter restrictions |
+| `sufficient` (default) | project allow ∨ document allow ∨ source allow | A mirrored source allow is enough on its own. Faithful to the source, but an over-broad share there (a document shared with the whole organization) makes the document readable by every user of the appliance, bypassing local matter restrictions |
 | `intersect` | project allow ∨ document allow | A mirrored source allow **and** a local project/document allow are both required for externally hosted sources. An over-broad share at source cannot defeat an ethical wall, at the cost of every external source needing local grants before anything is retrievable |
 
 `local_fs` sources without a readable object ACL are unaffected by the mode:
@@ -136,7 +136,7 @@ time.
 ## Unknown ACLs
 
 "Unknown" is defined at the connector boundary. A connector that could not
-read an object's permissions at all returns `None` — deliberately distinct
+read an object's permissions at all returns `None`, deliberately distinct
 from an empty viewer list, which asserts "nobody may see this". Per-source
 translation drops any single permission entry it cannot resolve to a
 principal, and `None` is reported as a capability gap rather than converted
@@ -167,7 +167,7 @@ The console's "Can this person see it?" panel is backed by
 | `limit` (optional, default 60, clamped 1–200) | Number of documents listed, most recently updated first |
 
 The endpoint is read-only and uses the same `resolve_principals` and
-`version_predicate` as the retrieval paths — the verdict cannot drift from the
+`version_predicate` as the retrieval paths, so the verdict cannot drift from the
 real decision. Grant rows are returned as evidence, never re-evaluated.
 
 Top-level response fields:
@@ -189,10 +189,10 @@ Per-document verdicts (`documents.items[]`):
 | `visible` | Whether the compiled predicate admits the document |
 | `allowed_by` | The allows that matched a held principal, each `{scope: source\|project\|document, principal, …}` |
 | `denied_by` | The denies that matched a held principal |
-| `source_allows` | Every mirrored allow on the document, with the mirrored member count of each group — the answer to "what membership would open this" |
+| `source_allows` | Every mirrored allow on the document, with the mirrored member count of each group, the answer to "what membership would open this" |
 
 The console renders three states: **visible** (green), **denied** (red,
-`denied_by` non-empty — an explicit deny matched), and **blocked** (neither —
+`denied_by` non-empty, meaning an explicit deny matched), and **blocked** (neither:
 no allow matched; the row lists the source groups whose membership would open
 the document, flagging groups with nobody mirrored). When `is_admin` is true
 the panel states explicitly that the principal holds `role:admin`, which
@@ -211,7 +211,7 @@ UI and both writing through the grant endpoints above:
   evaluator's rules: in either mode, a local allow on an externally sourced
   document only takes effect alongside a mirrored source allow.
 - **Wall** (`effect: deny`): an explicit deny on a project or a single
-  document. A deny beats every allow — mirrored source allows included — at
+  document. A deny beats every allow, mirrored source allows included, at
   evaluation time, for any caller holding the denied principal. The form
   requires explicit confirmation before writing. Because the deny is matched
   against the caller's *expanded* principal set, a wall written against a
@@ -236,8 +236,8 @@ members reach its documents through the mirrored source ACLs.
 `security.principal_aliases` is a flat string-to-string map, e.g.
 `{"group:entra:2b1f…": "group:litigation"}`. It exists for sources that cannot
 enumerate group memberships and for pinning a source group to a group the
-sign-in provider already asserts. It is applied inside `resolve_principals` —
-before *and* after membership expansion — additively and in both directions,
+sign-in provider already asserts. It is applied inside `resolve_principals`,
+before *and* after membership expansion, additively and in both directions,
 with `user:`/`username:` treated as interchangeable spellings. An alias is a
 namespace bridge, not an access decision: it can only add principals to the
 caller's set; the grant rows still decide.
@@ -264,7 +264,7 @@ Runtime effect of saving these settings:
   the current configuration on every request.
 - **Installed into the evaluator at process start**: `source_acl_mode` and
   `principal_aliases` are process-wide evaluator defaults, installed once by
-  `configure_access` when the API server or CLI starts — deliberately, so no
+  `configure_access` when the API server or CLI starts, deliberately, so no
   endpoint can evaluate under a different permission model than the rest of
   the appliance. A save through `PUT /api/config` (which is what this console
   page uses) persists them for the next start. The
@@ -279,7 +279,7 @@ Grants in a firm name groups, not individuals, so a mirrored
 `group:entra:<guid>` allow is unenforceable until the appliance knows who is
 in that group. After each successful full scan of a source whose connector
 supports ACLs, the sync engine replaces that source's `source_group_members`
-rows wholesale — replaced, not merged, so a member removed at source loses
+rows wholesale: replaced, not merged, so a member removed at source loses
 the access, and an empty snapshot is honored as a real state. Group ids are
 qualified on the way in exactly as ACL principals are (`entra`/`google`
 namespaces kept global, everything else bound as `src.<source-id>.<name>`),
@@ -287,8 +287,8 @@ so the two sides always meet.
 
 Matching at evaluation time: sources report members by email, while the
 appliance authenticates by OIDC subject. The identity resolver therefore
-carries both `user:<sub>` and `username:<preferred_username>` — plus both
-spellings of the verified `email` claim — and `expand_with_memberships` looks
+carries both `user:<sub>` and `username:<preferred_username>` (plus both
+spellings of the verified `email` claim), and `expand_with_memberships` looks
 up the value part of every `user:` and `username:` principal against
 `member_id`. Whichever spelling equals the mirrored address (in practice, the
 email) produces the match. `member_type: group` rows are group-in-group edges
@@ -361,7 +361,7 @@ must hold `role:admin`.
   a mirrored source allow (`source_intersection`), in both combination modes.
 - **Tombstones.** Source observations marked deleted are excluded from every
   ACL join, and a version with only tombstoned observations is invisible even
-  to administrators — it is retained for restoration and audit, not served.
+  to administrators; it is retained for restoration and audit, not served.
 - **Group name collisions.** Because non-global group namespaces are bound to
   their source id, two sources' identically named groups (`sp:owners` at two
   sites) can never grant across each other.
