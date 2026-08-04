@@ -103,6 +103,49 @@ class ProviderPermanentError(ValueError):
     """
 
 
+# The opposite end of the taxonomy from ProviderPermanentError: faults that belong to
+# the infrastructure rather than to the document. A gateway that is saturated,
+# restarting or briefly unreachable says nothing about whether this file can be
+# processed, so these must never spend the document's attempt budget and must never
+# reach the terminal QUARANTINED state.
+#
+# Evidence (2026-08-03, 51k run): LiteLLM was running 8 workers and saturated at 98
+# req/s, logging 1,500 timeouts and ~1,200 5xx in five minutes. The pipeline retried
+# three times per document and then quarantined — **250 documents permanently dropped
+# by a gateway capacity problem that lasted minutes**. Raising the worker count fixed
+# the saturation, but the classification defect would drop documents again on the next
+# transport blip. See vllm-fleet docs/scaling-to-50k.md §2.4 and §7.
+_TRANSIENT_GATEWAY_STATUSES = frozenset({408, 425, 429, 500, 502, 503, 504})
+
+
+def transient_gateway_fault(error: BaseException) -> str | None:
+    """A short reason if this failure is the gateway's or the network's, else None.
+
+    Walks the ``__cause__``/``__context__`` chain: a stage handler may re-raise a
+    transport failure wrapped in an error of its own, and the wrapper must not hide
+    that the underlying cause was infrastructure.
+
+    A 429 that survived ``_post_to_gateway``'s in-place retries counts as transient
+    here. The quota-dead 429 does not reach this function — it is raised as
+    ProviderPermanentError, which the runner classifies as deterministic before it
+    ever asks about transience.
+    """
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, httpx.HTTPStatusError):
+            status = getattr(current.response, "status_code", None)
+            if status in _TRANSIENT_GATEWAY_STATUSES:
+                return f"gateway answered HTTP {status}"
+        elif isinstance(current, httpx.TransportError):
+            # ConnectError, ReadError, WriteError, RemoteProtocolError, PoolTimeout,
+            # ConnectTimeout, ReadTimeout — the EMFILE/httpx storm of the 51k run.
+            return f"gateway transport failure ({type(current).__name__})"
+        current = current.__cause__ or current.__context__
+    return None
+
+
 # Statuses that are permanent whatever the body says. Evidence: LiteLLM gives these
 # no distinct wire shape — it maps the upstream status through and folds the provider's
 # own payload into the message string. Observed against this appliance's own gateway
