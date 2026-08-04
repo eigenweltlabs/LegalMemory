@@ -1532,6 +1532,7 @@ def create_app(
             "mirrors_acls": spec.mirrors_acls,
             "incremental": spec.incremental,
             "notes": spec.notes,
+            "setup_warning": spec.setup_warning,
             # Every deployment is bring-your-own-client: there is no shared OAuth app.
             "auth_fields": (
                 [

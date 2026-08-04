@@ -57,6 +57,11 @@ class ConnectorSpec:
     # None for connectors that do not use OAuth (static tokens, app auth).
     oauth_provider: str | None = None
     notes: str = ""
+    # A plain-language caution shown in the connect form, before anything is saved.
+    # Reserved for the case where a default could make more content searchable than an
+    # operator expects: the person filling this form runs a firm's IT, not its search
+    # index, and has to be able to act on it without knowing how any of this works.
+    setup_warning: str = ""
     # A mailbox or personal drive holds one person's correspondence. Granting such a
     # source to a group publishes that person's mail to the firm, so the API refuses a
     # broad default grant on these unless an admin confirms it explicitly.
@@ -133,6 +138,38 @@ CATALOG: tuple[ConnectorSpec, ...] = (
             "retrievable by that group's members only, unrestricted content by every "
             "authenticated user of this single-firm appliance. Incremental via the "
             "updated-since feed, deletions included. EU region."
+        ),
+    ),
+    ConnectorSpec(
+        short_name="netdocuments",
+        label="NetDocuments",
+        category="Legal DMS",
+        module=f"{SOURCES}.netdocuments",
+        class_name="NetDocumentsSource",
+        mirrors_acls=True,
+        incremental=True,
+        supports_scoping=True,
+        oauth_provider="netdocuments",
+        setup_warning=(
+            "NetDocuments lets a single document be locked to fewer people than the "
+            "folder it sits in. This connection cannot always tell when that has been "
+            "done, so by default those documents become searchable by everyone who can "
+            "see the folder around them. If your firm locks down individual documents, "
+            "switch off \u201cDocuments follow their folder\u2019s access\u201d under "
+            "Advanced options. Locked documents then stay out of search until an "
+            "administrator grants access."
+        ),
+        notes=(
+            "Indexes the cabinets the authorizing account can open — a cabinet outside "
+            "that account's access is never listed. Mirrors cabinet and workspace group "
+            "membership, honouring an explicit no-access row as the wall it is, and "
+            "expands those groups to their members. A document carrying its own access "
+            "list is mirrored to that list; a document whose own list cannot be read "
+            "stays fail-closed rather than inheriting its container, because an "
+            "override exists in order to be narrower. Incremental via a per-cabinet "
+            "modified-since search, with deletions reconciled from the previous run's "
+            "ids. Region-bound: the connection's API base URL must match the "
+            "repository's region."
         ),
     ),
     ConnectorSpec(
@@ -370,15 +407,6 @@ PLANNED: tuple[PlannedConnector, ...] = (
         notes=(
             "The dominant large-firm legal DMS. Planned: workspace and matter-file "
             "sync with mirrored folder and document security."
-        ),
-    ),
-    PlannedConnector(
-        short_name="netdocuments",
-        label="NetDocuments",
-        category="Legal DMS",
-        notes=(
-            "Cloud legal DMS widely used by US and UK firms. Planned: cabinet and "
-            "workspace sync with mirrored access."
         ),
     ),
     PlannedConnector(

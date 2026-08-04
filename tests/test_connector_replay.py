@@ -58,6 +58,11 @@ VALIDATE_ROUTES: dict[str, dict[str, Recorded]] = {
         )
     },
     "box": {"GET https://api.box.com/2.0/users/me": Recorded({"id": "1"})},
+    "netdocuments": {
+        "GET https://api.eu.netdocuments.com/v1/User/info": Recorded(
+            {"id": "anwalt@kanzlei.de", "name": "Anwalt"}
+        )
+    },
     "notion": {"GET https://api.notion.com/v1/users/me": Recorded({"id": "user-1"})},
     "slack": {"GET https://slack.com/api/auth.test": Recorded({"ok": True, "team": "Kanzlei"})},
     "confluence": {
@@ -1873,8 +1878,17 @@ def test_only_connectors_with_a_folder_tree_declare_scoping():
     scoping = {spec.short_name for spec in CATALOG if spec.supports_scoping}
     # A mailbox, a calendar or a chat workspace has no folder tree worth scoping, and
     # claiming otherwise would offer the operator a picker that cannot be populated.
-    # Clio's tree is its matter list — flat, but a real unit of selection.
-    assert scoping == {"sharepoint_online", "onedrive", "dropbox", "box", "google_drive", "clio"}
+    # Clio's tree is its matter list and NetDocuments' is its cabinet list — flat, but
+    # a real unit of selection.
+    assert scoping == {
+        "sharepoint_online",
+        "onedrive",
+        "dropbox",
+        "box",
+        "google_drive",
+        "clio",
+        "netdocuments",
+    }
 
 
 # ----------------------------------------------------------------- SharePoint scope
@@ -2049,3 +2063,508 @@ def test_sharepoint_browse_lists_the_folder_tree_for_the_picker(tmp_path):
 
     nested = _browse("sharepoint_online", routes, tmp_path, node="folder:drive-1|f-mandate")
     assert [node["title"] for node in nested if node["node_type"] == "folder"] == ["Mandat-Neu"]
+
+
+# ------------------------------------------------------------------ NetDocuments
+#
+# These mirror the manual matrix a connector is signed off against: two containers
+# carrying different access, a sync that keeps them different, a permission change at
+# the source that lands on the next run, and documents arriving and leaving.
+#
+# What they prove is that the connector's own logic does the right thing with these
+# payloads. What they cannot prove is that a live repository sends payloads shaped like
+# these — the published API definition this connector was built from documents no
+# response bodies, so every shape below is inferred and needs one live sync to confirm.
+
+ND = "https://api.eu.netdocuments.com"
+
+_ND_CABINETS = [
+    {"id": "NG-WALL01", "name": "Litigation (walled)"},
+    {"id": "NG-OPEN01", "name": "Corporate (firm-wide)"},
+]
+
+# Two cabinets, deliberately different: one group holds view rights on the first, a
+# different group on the second, and a third group is present but explicitly denied.
+_ND_MEMBERSHIP = {
+    "NG-WALL01": [
+        {"id": "UG-LIT", "name": "Litigation Wall", "rights": "V"},
+        {"id": "UG-INTERN", "name": "Interns", "rights": "N"},
+    ],
+    "NG-OPEN01": [{"id": "UG-CORP", "name": "Corporate", "rights": "VES"}],
+}
+
+
+def _nd_document(identifier: str, name: str, **extra) -> dict:
+    return {
+        "id": identifier,
+        "type": "document",
+        "name": name,
+        "extension": "txt",
+        "size": "9",
+        "version": "1",
+        "created": "2026-01-01T00:00:00Z",
+        "modified": "2026-02-01T00:00:00Z",
+        "author": "anwalt@kanzlei.de",
+        **extra,
+    }
+
+
+def _nd_routes(**overrides) -> dict[str, Recorded]:
+    routes: dict[str, Recorded] = {
+        f"GET {ND}/v1/User/info": Recorded({"id": "anwalt@kanzlei.de"}),
+        f"GET {ND}/v1/User/cabinets": Recorded({"standardList": _ND_CABINETS}),
+        f"GET {ND}/v1/cabinet/NG-WALL01/membership": Recorded(
+            {"standardList": _ND_MEMBERSHIP["NG-WALL01"]}
+        ),
+        f"GET {ND}/v1/cabinet/NG-OPEN01/membership": Recorded(
+            {"standardList": _ND_MEMBERSHIP["NG-OPEN01"]}
+        ),
+        f"GET {ND}/v2/container/NG-WALL01": Recorded(
+            {"standardList": [_nd_document("4711-0001-0001", "Klageschrift.txt")]}
+        ),
+        f"GET {ND}/v2/container/NG-OPEN01": Recorded(
+            {"standardList": [_nd_document("4711-0002-0001", "Vertrag.txt")]}
+        ),
+        f"GET {ND}/v1/Document/4711-0001-0001": Recorded(content=b"nd bytes"),
+        f"GET {ND}/v1/Document/4711-0002-0001": Recorded(content=b"nd bytes"),
+        f"GET {ND}/v1/Group/UG-LIT/members": Recorded(
+            {"standardList": [{"email": "Litigator@Kanzlei.de"}]}
+        ),
+        f"GET {ND}/v1/Group/UG-CORP/members": Recorded(
+            {"standardList": [{"email": "corporate@kanzlei.de"}]}
+        ),
+    }
+    routes.update(overrides)
+    return routes
+
+
+def test_netdocuments_two_cabinets_keep_the_different_access_they_have_at_the_source(tmp_path):
+    """Step one and two of the matrix: connect two containers, confirm they differ.
+
+    Read through the documents, because that is what the index actually holds — the
+    cabinets themselves are walked for context and never indexed.
+    """
+    connector, _client = build("netdocuments", _nd_routes(), staging=tmp_path)
+    try:
+        observations = list(connector.full_scan())
+    finally:
+        connector.close()
+
+    by_name = {item.name: item for item in observations}
+    assert set(by_name) == {"Klageschrift.txt", "Vertrag.txt"}
+
+    walled = [grant["principal"] for grant in by_name["Klageschrift.txt"].acl]
+    open_cabinet = [grant["principal"] for grant in by_name["Vertrag.txt"].acl]
+    assert walled == ["group:netdocuments:ug-lit"]
+    assert open_cabinet == ["group:netdocuments:ug-corp"]
+    # The two cabinets did not collapse into one audience.
+    assert walled != open_cabinet
+    # An explicit no-access row is a wall, never a grant.
+    assert "group:netdocuments:ug-intern" not in walled
+
+
+def test_netdocuments_containers_are_walked_for_context_but_never_indexed(tmp_path):
+    """Every class here carries "document" in its name; only one is a document.
+
+    The shared classifier reads a class name for content tokens, and this vendor is
+    called NetDocuments, so without an explicit declaration every cabinet and folder
+    would be indexed as a stub that matches every query weakly.
+    """
+    connector, _client = build("netdocuments", _nd_routes(), staging=tmp_path)
+    try:
+        names = {item.name for item in connector.full_scan()}
+    finally:
+        connector.close()
+
+    assert names == {"Klageschrift.txt", "Vertrag.txt"}
+    assert "Litigation (walled)" not in names
+    assert "Corporate (firm-wide)" not in names
+
+
+def test_netdocuments_documents_follow_their_folder_by_default(tmp_path):
+    """The default an operator gets: a document is findable by whoever can open its folder."""
+    connector, _client = build("netdocuments", _nd_routes(), staging=tmp_path)
+    try:
+        observations = list(connector.full_scan())
+    finally:
+        connector.close()
+
+    documents = [item for item in observations if item.name.endswith(".txt")]
+    assert documents, "no documents were produced"
+    assert all(item.acl for item in documents), "the default must produce a usable index"
+    claim = next(item for item in documents if item.name == "Klageschrift.txt")
+    assert [grant["principal"] for grant in claim.acl] == ["group:netdocuments:ug-lit"]
+
+
+def test_netdocuments_following_the_folder_can_be_turned_off(tmp_path):
+    """For a firm that restricts individual documents rather than whole folders.
+
+    Those documents are then left for an administrator to grant rather than being
+    reached through the folder around them.
+    """
+    connector, _client = build(
+        "netdocuments",
+        _nd_routes(),
+        staging=tmp_path,
+        config={"inherit_container_access_for_documents": False},
+    )
+    try:
+        observations = list(connector.full_scan())
+    finally:
+        connector.close()
+
+    documents = [item for item in observations if item.name.endswith(".txt")]
+    assert documents, "turning it off must not empty the sync"
+    assert all(item.acl is None for item in documents)
+
+
+def test_netdocuments_a_document_with_its_own_acl_is_mirrored_to_it(tmp_path):
+    routes = _nd_routes(
+        **{
+            f"GET {ND}/v2/container/NG-OPEN01": Recorded(
+                {
+                    "standardList": [
+                        _nd_document(
+                            "4711-0002-0001",
+                            "Vertrag.txt",
+                            acl=[{"id": "UG-PARTNERS", "rights": "V"}],
+                        )
+                    ]
+                }
+            )
+        }
+    )
+    connector, _client = build("netdocuments", routes, staging=tmp_path)
+    try:
+        observations = list(connector.full_scan())
+    finally:
+        connector.close()
+
+    contract = next(item for item in observations if item.name == "Vertrag.txt")
+    # Its own list wins over the folder around it, which is what makes following the
+    # folder a safe default rather than a blunt one.
+    assert [grant["principal"] for grant in contract.acl] == ["group:netdocuments:ug-partners"]
+
+
+def test_netdocuments_expands_cabinet_groups_into_memberships(tmp_path):
+    """Without these rows a group grant matches nobody and the cabinet is invisible."""
+    connector, _client = build("netdocuments", _nd_routes(), staging=tmp_path)
+    try:
+        list(connector.full_scan())
+        memberships = connector.memberships()
+    finally:
+        connector.close()
+
+    rows = {(row["group_id"], row["member_id"]) for row in memberships}
+    assert ("netdocuments:ug-lit", "litigator@kanzlei.de") in rows
+    assert ("netdocuments:ug-corp", "corporate@kanzlei.de") in rows
+    # Addresses are folded so a grant matches whatever case the caller signs in with.
+    assert all(row["member_id"] == row["member_id"].casefold() for row in memberships)
+    # The group ids in these rows have to be spelled exactly as the ACL spells them,
+    # or the grant and its expansion never meet.
+    assert {row["group_id"] for row in memberships} == {"netdocuments:ug-lit", "netdocuments:ug-corp"}
+    # A group denied with "N" is not a grant, so it is never expanded.
+    assert not any("intern" in row["group_id"] for row in memberships)
+
+
+def test_netdocuments_an_unreadable_membership_leaves_the_cabinet_unknown(tmp_path):
+    """Fail-closed: unreadable access is unknown, never 'nobody' and never 'everyone'."""
+    routes = _nd_routes(
+        **{f"GET {ND}/v1/cabinet/NG-WALL01/membership": Recorded({}, status=403)}
+    )
+    connector, _client = build("netdocuments", routes, staging=tmp_path)
+    try:
+        observations = list(connector.full_scan())
+    finally:
+        connector.close()
+
+    # The documents under the unreadable cabinet stay unknown rather than becoming
+    # visible to whoever the cabinet used to be readable by.
+    claim = next(item for item in observations if item.name == "Klageschrift.txt")
+    assert claim.acl is None
+
+
+def test_netdocuments_permission_mirroring_can_be_turned_off(tmp_path):
+    connector, client = build(
+        "netdocuments",
+        _nd_routes(),
+        staging=tmp_path,
+        config={"mirror_permissions": False},
+    )
+    try:
+        observations = list(connector.full_scan())
+    finally:
+        connector.close()
+
+    assert observations, "turning off the mirror must not empty the sync"
+    assert all(item.acl is None for item in observations)
+    assert not client.called("/membership"), "no membership call when mirroring is off"
+
+
+def test_netdocuments_walks_nested_workspaces_and_carries_the_matter_as_the_path(tmp_path):
+    routes = _nd_routes(
+        **{
+            f"GET {ND}/v2/container/NG-WALL01": Recorded(
+                {
+                    "standardList": [
+                        {
+                            "id": "4711-0100-0001",
+                            "type": "workspace",
+                            "name": "2026-0011 Mandant GmbH",
+                            "client": "Mandant GmbH",
+                            "matter": "2026-0011",
+                        }
+                    ]
+                }
+            ),
+            f"GET {ND}/v2/container/4711-0100-0001": Recorded(
+                {"standardList": [_nd_document("4711-0001-0001", "Klageschrift.txt")]}
+            ),
+        }
+    )
+    connector, _client = build("netdocuments", routes, staging=tmp_path)
+    try:
+        observations = list(connector.full_scan())
+    finally:
+        connector.close()
+
+    claim = next(item for item in observations if item.name == "Klageschrift.txt")
+    # A retrieved paragraph has to be able to say which matter it came from.
+    assert "2026-0011 Mandant GmbH" in claim.path
+
+
+def test_netdocuments_paginates_a_container_rather_than_stopping_at_the_first_page(tmp_path):
+    routes = _nd_routes(
+        **{
+            f"GET {ND}/v2/container/NG-OPEN01": [
+                Recorded(
+                    {
+                        "standardList": [_nd_document("4711-0002-0001", "Vertrag.txt")],
+                        "skiptoken": "page-2",
+                    },
+                    repeat=False,
+                ),
+                Recorded({"standardList": [_nd_document("4711-0002-0002", "Anlage.txt")]}),
+            ],
+            f"GET {ND}/v1/Document/4711-0002-0002": Recorded(content=b"nd bytes"),
+        }
+    )
+    connector, client = build("netdocuments", routes, staging=tmp_path)
+    try:
+        names = {item.name for item in connector.full_scan()}
+    finally:
+        connector.close()
+
+    assert {"Vertrag.txt", "Anlage.txt"} <= names
+    assert client.called("skiptoken")
+
+
+def test_netdocuments_a_cycle_in_the_container_graph_does_not_hang_the_sync(tmp_path):
+    """Saved filters can point back up their own tree; following one would never end."""
+    routes = _nd_routes(
+        **{
+            f"GET {ND}/v2/container/NG-OPEN01": Recorded(
+                {
+                    "standardList": [
+                        {"id": "4711-0300-0001", "type": "folder", "name": "Schleife"}
+                    ]
+                }
+            ),
+            f"GET {ND}/v2/container/4711-0300-0001": Recorded(
+                {
+                    "standardList": [
+                        {"id": "4711-0300-0001", "type": "folder", "name": "Schleife"}
+                    ]
+                }
+            ),
+        }
+    )
+    connector, client = build("netdocuments", routes, staging=tmp_path)
+    try:
+        list(connector.full_scan())
+    finally:
+        connector.close()
+
+    # It terminated, and the self-referencing folder was listed once rather than
+    # walked round the loop until the sync timed out.
+    assert client.call_count("/v2/container/4711-0300-0001") == 1
+
+
+def test_netdocuments_scoped_to_one_cabinet_never_reads_the_other(tmp_path):
+    connector, client = build(
+        "netdocuments",
+        _nd_routes(),
+        staging=tmp_path,
+        node_selections=[
+            NodeSelectionData(
+                source_node_id="NG-WALL01",
+                node_type="folder",
+                node_metadata={"cabinet_id": "NG-WALL01"},
+            )
+        ],
+    )
+    try:
+        names = {item.name for item in connector.full_scan()}
+    finally:
+        connector.close()
+
+    assert "Klageschrift.txt" in names
+    assert "Vertrag.txt" not in names
+    assert not client.called("/v2/container/NG-OPEN01")
+
+
+def _nd_cursor(**overrides) -> dict:
+    """A cursor as the previous run would have left it."""
+    data = {
+        "modified_since": "2026-02-15T00:00:00+00:00",
+        "full_sync_required": False,
+        "last_full_sync_timestamp": datetime.now(UTC).isoformat(),
+        "tracked_groups": {"UG-LIT": "Litigation Wall", "UG-CORP": "Corporate"},
+        "cabinet_acls": {
+            "NG-WALL01": ["group:netdocuments:ug-lit"],
+            "NG-OPEN01": ["group:netdocuments:ug-corp"],
+        },
+        "container_documents": {
+            "NG-WALL01": ["4711-0001-0001"],
+            "NG-OPEN01": ["4711-0002-0001"],
+        },
+    }
+    data.update(overrides)
+    return data
+
+
+def test_netdocuments_incremental_picks_up_documents_modified_since_the_watermark(tmp_path):
+    """Step four of the matrix: a document added at the source arrives on the next run."""
+    routes = _nd_routes(
+        **{
+            f"GET {ND}/v1/Search/NG-OPEN01": Recorded(
+                {"standardList": [_nd_document("4711-0002-0009", "Nachtrag.txt")]}
+            ),
+            f"GET {ND}/v1/Search/NG-WALL01": Recorded({"standardList": []}),
+            f"GET {ND}/v1/Document/4711-0002-0009": Recorded(content=b"nd bytes"),
+        }
+    )
+    connector, client = build(
+        "netdocuments", routes, staging=tmp_path, cursor_data=_nd_cursor()
+    )
+    try:
+        batch = connector.changes(None)
+    finally:
+        connector.close()
+
+    assert {item.name for item in batch.observations} == {"Nachtrag.txt"}
+    # The watermark is a query, not a token: it has to reach the search call.
+    assert client.called("modified>=")
+    assert json.loads(batch.next_cursor)["modified_since"] > "2026-02-15"
+
+
+def test_netdocuments_incremental_re_emits_a_cabinet_whose_access_changed(tmp_path):
+    """Step three of the matrix: change the wall at the source, see it on our side.
+
+    Nothing about a document changes when a firm re-permissions its cabinet, so a
+    modified-since search alone would keep serving the old audience until the next
+    full scan. The run diffs cabinet membership against the cursor snapshot instead.
+    """
+    routes = _nd_routes(
+        **{
+            f"GET {ND}/v1/cabinet/NG-WALL01/membership": Recorded(
+                {
+                    "standardList": [
+                        {"id": "UG-PARTNERS", "name": "Partners", "rights": "V"},
+                        # The group that used to hold the cabinet is now denied.
+                        {"id": "UG-LIT", "name": "Litigation Wall", "rights": "N"},
+                    ]
+                }
+            ),
+            f"GET {ND}/v1/Search/NG-OPEN01": Recorded({"standardList": []}),
+            f"GET {ND}/v1/Group/UG-PARTNERS/members": Recorded(
+                {"standardList": [{"email": "partner@kanzlei.de"}]}
+            ),
+        }
+    )
+    connector, _client = build(
+        "netdocuments",
+        routes,
+        staging=tmp_path,
+        cursor_data=_nd_cursor(),
+    )
+    try:
+        batch = connector.changes(None)
+        memberships = connector.memberships()
+    finally:
+        connector.close()
+
+    by_name = {item.name: item for item in batch.observations}
+    # The whole cabinet came back so every document carries the new audience.
+    assert "Klageschrift.txt" in by_name
+    assert [grant["principal"] for grant in by_name["Klageschrift.txt"].acl] == [
+        "group:netdocuments:ug-partners"
+    ]
+    # The revoked group is gone from the grant, and is not expanded either.
+    assert not any("ug-lit" in row["group_id"] for row in memberships)
+    assert json.loads(batch.next_cursor)["cabinet_acls"]["NG-WALL01"] == [
+        "group:netdocuments:ug-partners"
+    ]
+
+
+def test_netdocuments_incremental_deletes_documents_of_a_cabinet_that_closed(tmp_path):
+    """A cabinet withdrawn from the authorizing account takes its documents with it."""
+    routes = _nd_routes(
+        **{
+            f"GET {ND}/v1/User/cabinets": Recorded(
+                {"standardList": [{"id": "NG-OPEN01", "name": "Corporate (firm-wide)"}]}
+            ),
+            f"GET {ND}/v1/Search/NG-OPEN01": Recorded({"standardList": []}),
+        }
+    )
+    connector, _client = build(
+        "netdocuments", routes, staging=tmp_path, cursor_data=_nd_cursor()
+    )
+    try:
+        batch = connector.changes(None)
+    finally:
+        connector.close()
+
+    assert set(batch.deleted_external_ids) == {"4711-0001-0001"}
+    assert "NG-WALL01" not in json.loads(batch.next_cursor)["cabinet_acls"]
+
+
+@pytest.mark.parametrize(
+    ("label", "response"),
+    [
+        # 403 and 404 are reported as an empty body by the shared request helper, so an
+        # unreadable listing and a genuinely empty one are indistinguishable at this
+        # layer. Both must be read as "unreadable" while the cursor knows about
+        # cabinets, or a withdrawn grant silently empties the index.
+        ("forbidden", Recorded({}, status=403)),
+        ("empty", Recorded({"standardList": []})),
+    ],
+)
+def test_netdocuments_an_unreadable_cabinet_listing_never_deletes_the_estate(
+    label, response, tmp_path
+):
+    """The dangerous failure is treating an outage as 'the firm deleted everything'."""
+    routes = _nd_routes(**{f"GET {ND}/v1/User/cabinets": response})
+    connector, _client = build(
+        "netdocuments", routes, staging=tmp_path, cursor_data=_nd_cursor()
+    )
+    try:
+        batch = connector.changes(None)
+    finally:
+        connector.close()
+
+    assert batch.deleted_external_ids == [], label
+    assert batch.observations == [], label
+    assert json.loads(batch.next_cursor)["full_sync_required"] is True, label
+
+
+def test_netdocuments_browse_lists_cabinets_as_the_unit_of_selection(tmp_path):
+    connector, _client = build("netdocuments", _nd_routes(), staging=tmp_path)
+    try:
+        nodes = connector.browse_children(None)
+    finally:
+        connector.close()
+
+    assert {node["source_node_id"] for node in nodes} == {"NG-WALL01", "NG-OPEN01"}
+    # A cabinet is the security boundary; picking below it could cross a wall.
+    assert all(node["has_children"] is False for node in nodes)

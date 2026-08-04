@@ -73,6 +73,52 @@ class ClioConfig(SourceConfig):
     )
 
 
+class NetDocumentsConfig(SourceConfig):
+    """NetDocuments configuration schema."""
+
+    api_base_url: str = Field(
+        default="https://api.eu.netdocuments.com",
+        title="Region API base URL",
+        description=(
+            "NetDocuments runs isolated regional services and a repository lives in "
+            "exactly one of them. EU firms use https://api.eu.netdocuments.com, US "
+            "https://api.vault.netvoyage.com, AU https://api.au.netdocuments.com. It "
+            "must match the region the repository is hosted in; a token issued in one "
+            "region is not accepted in another."
+        ),
+    )
+
+    @field_validator("api_base_url")
+    @classmethod
+    def validate_api_base_url_ssrf(cls, v: str) -> str:
+        """Validate the region URL for SSRF safety."""
+        validate_url(v.strip())
+        return v.strip().rstrip("/")
+
+    mirror_permissions: bool = Field(
+        default=True,
+        title="Mirror NetDocuments Access",
+        description=(
+            "Mirror cabinet and workspace group access so content is retrievable only "
+            "by the groups that hold rights on it in NetDocuments, with those groups "
+            "expanded to their members. When false, access is left unknown and nothing "
+            "is retrievable until an administrator grants it at the project level."
+        ),
+    )
+
+    inherit_container_access_for_documents: bool = Field(
+        default=True,
+        title="Documents follow their folder\u2019s access",
+        description=(
+            "On: a document can be found by everyone who can open the folder it sits "
+            "in. This is what most firms want, and it is how search finds anything at "
+            "all. Off: a document that NetDocuments has locked down on its own stays "
+            "out of search until an administrator grants access to it. Turn it off if "
+            "your firm restricts individual documents rather than whole folders."
+        ),
+    )
+
+
 class ConfluenceConfig(SourceConfig):
     """Confluence configuration schema."""
 

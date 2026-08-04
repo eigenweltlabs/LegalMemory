@@ -84,6 +84,14 @@ class SystemMetadata(BaseModel):
 class BaseEntity(BaseModel):
     """Base entity schema."""
 
+    # Whether this entity is a container walked through for context rather than a
+    # document to index. ``None`` means "decide from the class name", which is how
+    # every entity predating this field still works. An entity sets it explicitly when
+    # the name heuristic gets it wrong — a NetDocuments cabinet is a container, but its
+    # class name contains "document" because that is the vendor's name, and it would
+    # otherwise be indexed as a stub that matches every query weakly.
+    is_container_entity: ClassVar[Optional[bool]] = None
+
     # Populated from flagged fields by entity pipeline (composition over inheritance)
     entity_id: Optional[str] = Field(None, description="ID of the entity in the source.")
     breadcrumbs: Optional[List[Breadcrumb]] = Field(None, description="List of breadcrumbs.")
