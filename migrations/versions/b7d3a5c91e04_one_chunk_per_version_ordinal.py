@@ -34,8 +34,23 @@ def upgrade() -> None:
           AND a.id > b.id
         """
     )
-    op.create_unique_constraint(
-        "uq_chunks_version_ordinal", "chunks", ["document_version_id", "ordinal"]
+    # Idempotent: after the 2026-08-01 incident the constraint was hotfixed
+    # straight onto the demo database, so a plain ADD CONSTRAINT collides (42P07,
+    # "already exists") whenever Alembic's version pointer is still behind this
+    # revision. Add it only when it isn't already there.
+    op.execute(
+        """
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_constraint WHERE conname = 'uq_chunks_version_ordinal'
+            ) THEN
+                ALTER TABLE chunks
+                    ADD CONSTRAINT uq_chunks_version_ordinal
+                    UNIQUE (document_version_id, ordinal);
+            END IF;
+        END $$;
+        """
     )
 
 
