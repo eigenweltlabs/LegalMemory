@@ -107,18 +107,14 @@ class NetDocumentsConfig(SourceConfig):
     )
 
     inherit_container_access_for_documents: bool = Field(
-        default=False,
-        title="Let documents inherit their container's access",
+        default=True,
+        title="Documents follow their folder\u2019s access",
         description=(
-            "OFF by default, and the default is the safe one. NetDocuments lets a "
-            "single document carry an access list narrower than the workspace it sits "
-            "in, which is how a firm restricts one memo inside an otherwise open "
-            "matter. This connector reads that per-document list when the profile "
-            "carries it; where it does not, the document stays fail-closed. Turning "
-            "this on makes such a document inherit its container's access instead, "
-            "which publishes exactly the overrides that exist to be narrower. Turn it "
-            "on only for a repository where document-level overrides are known not to "
-            "be used."
+            "On: a document can be found by everyone who can open the folder it sits "
+            "in. This is what most firms want, and it is how search finds anything at "
+            "all. Off: a document that NetDocuments has locked down on its own stays "
+            "out of search until an administrator grants access to it. Turn it off if "
+            "your firm restricts individual documents rather than whole folders."
         ),
     )
 

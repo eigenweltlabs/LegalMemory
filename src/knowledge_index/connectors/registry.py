@@ -57,6 +57,11 @@ class ConnectorSpec:
     # None for connectors that do not use OAuth (static tokens, app auth).
     oauth_provider: str | None = None
     notes: str = ""
+    # A plain-language caution shown in the connect form, before anything is saved.
+    # Reserved for the case where a default could make more content searchable than an
+    # operator expects: the person filling this form runs a firm's IT, not its search
+    # index, and has to be able to act on it without knowing how any of this works.
+    setup_warning: str = ""
     # A mailbox or personal drive holds one person's correspondence. Granting such a
     # source to a group publishes that person's mail to the firm, so the API refuses a
     # broad default grant on these unless an admin confirms it explicitly.
@@ -145,6 +150,15 @@ CATALOG: tuple[ConnectorSpec, ...] = (
         incremental=True,
         supports_scoping=True,
         oauth_provider="netdocuments",
+        setup_warning=(
+            "NetDocuments lets a single document be locked to fewer people than the "
+            "folder it sits in. This connection cannot always tell when that has been "
+            "done, so by default those documents become searchable by everyone who can "
+            "see the folder around them. If your firm locks down individual documents, "
+            "switch off \u201cDocuments follow their folder\u2019s access\u201d under "
+            "Advanced options. Locked documents then stay out of search until an "
+            "administrator grants access."
+        ),
         notes=(
             "Indexes the cabinets the authorizing account can open — a cabinet outside "
             "that account's access is never listed. Mirrors cabinet and workspace group "

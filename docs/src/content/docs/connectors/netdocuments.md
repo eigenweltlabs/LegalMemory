@@ -90,17 +90,16 @@ The connector mirrors that membership onto cabinets and the containers inside
 them, and expands each granted group into its members so a grant matches a real
 caller. An explicit no-access row is dropped, never inverted into a grant.
 
-**The gap worth understanding.** A NetDocuments document can carry an access
-list of its own, narrower than the workspace it sits in — one restricted memo
-inside an otherwise open matter. The connector reads that list when the
-document profile carries it. Where it does not, the document stays
-**fail-closed**: unknown access, retrievable by nobody until an administrator
-grants it at the project level.
+**Documents follow their folder's access** (on by default). A document is
+searchable by everyone who can open the folder it sits in. This is what most
+firms want and it is how search finds anything at all.
 
-That default is deliberate. Falling back to the container's access would
-publish exactly the overrides that exist in order to be narrower. A firm that
-knows its repository does not use document-level overrides can opt in with
-**Let documents inherit their container's access**, and should not otherwise.
+Turn it off if your firm restricts individual documents rather than whole
+folders. Those documents then stay out of search until an administrator grants
+access to them.
+
+The connect form states this before anything is saved, so it is a decision an
+administrator makes once at setup rather than discovers later.
 
 ## Incremental sync
 
@@ -127,5 +126,5 @@ looking like "no cabinets".
 | OAuth endpoints and scope list | Verified — from the published API definition; regional API hosts confirmed live |
 | Paths, parameters, pagination | Verified against the published API definition |
 | Response body shapes | **Inferred.** The definition documents almost no response bodies |
-| Per-document access list | **Unconfirmed.** Read defensively; absent means fail-closed |
+| Per-document access list | **Unconfirmed** against a live repository |
 | Live repository sync | **Not yet run** |

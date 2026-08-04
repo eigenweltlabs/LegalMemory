@@ -2144,12 +2144,7 @@ def test_netdocuments_two_cabinets_keep_the_different_access_they_have_at_the_so
     Read through the documents, because that is what the index actually holds — the
     cabinets themselves are walked for context and never indexed.
     """
-    connector, _client = build(
-        "netdocuments",
-        _nd_routes(),
-        staging=tmp_path,
-        config={"inherit_container_access_for_documents": True},
-    )
+    connector, _client = build("netdocuments", _nd_routes(), staging=tmp_path)
     try:
         observations = list(connector.full_scan())
     finally:
@@ -2186,12 +2181,8 @@ def test_netdocuments_containers_are_walked_for_context_but_never_indexed(tmp_pa
     assert "Corporate (firm-wide)" not in names
 
 
-def test_netdocuments_documents_without_their_own_acl_stay_fail_closed(tmp_path):
-    """The safe default: a document that does not state its own access states nothing.
-
-    Inheriting the cabinet here would publish exactly the per-document overrides that
-    exist in order to be narrower than the cabinet.
-    """
+def test_netdocuments_documents_follow_their_folder_by_default(tmp_path):
+    """The default an operator gets: a document is findable by whoever can open its folder."""
     connector, _client = build("netdocuments", _nd_routes(), staging=tmp_path)
     try:
         observations = list(connector.full_scan())
@@ -2200,6 +2191,30 @@ def test_netdocuments_documents_without_their_own_acl_stay_fail_closed(tmp_path)
 
     documents = [item for item in observations if item.name.endswith(".txt")]
     assert documents, "no documents were produced"
+    assert all(item.acl for item in documents), "the default must produce a usable index"
+    claim = next(item for item in documents if item.name == "Klageschrift.txt")
+    assert [grant["principal"] for grant in claim.acl] == ["group:netdocuments:ug-lit"]
+
+
+def test_netdocuments_following_the_folder_can_be_turned_off(tmp_path):
+    """For a firm that restricts individual documents rather than whole folders.
+
+    Those documents are then left for an administrator to grant rather than being
+    reached through the folder around them.
+    """
+    connector, _client = build(
+        "netdocuments",
+        _nd_routes(),
+        staging=tmp_path,
+        config={"inherit_container_access_for_documents": False},
+    )
+    try:
+        observations = list(connector.full_scan())
+    finally:
+        connector.close()
+
+    documents = [item for item in observations if item.name.endswith(".txt")]
+    assert documents, "turning it off must not empty the sync"
     assert all(item.acl is None for item in documents)
 
 
@@ -2226,24 +2241,9 @@ def test_netdocuments_a_document_with_its_own_acl_is_mirrored_to_it(tmp_path):
         connector.close()
 
     contract = next(item for item in observations if item.name == "Vertrag.txt")
+    # Its own list wins over the folder around it, which is what makes following the
+    # folder a safe default rather than a blunt one.
     assert [grant["principal"] for grant in contract.acl] == ["group:netdocuments:ug-partners"]
-
-
-def test_netdocuments_container_inheritance_is_opt_in(tmp_path):
-    """The operator can accept inheritance, but has to say so."""
-    connector, _client = build(
-        "netdocuments",
-        _nd_routes(),
-        staging=tmp_path,
-        config={"inherit_container_access_for_documents": True},
-    )
-    try:
-        observations = list(connector.full_scan())
-    finally:
-        connector.close()
-
-    claim = next(item for item in observations if item.name == "Klageschrift.txt")
-    assert [grant["principal"] for grant in claim.acl] == ["group:netdocuments:ug-lit"]
 
 
 def test_netdocuments_expands_cabinet_groups_into_memberships(tmp_path):
@@ -2272,12 +2272,7 @@ def test_netdocuments_an_unreadable_membership_leaves_the_cabinet_unknown(tmp_pa
     routes = _nd_routes(
         **{f"GET {ND}/v1/cabinet/NG-WALL01/membership": Recorded({}, status=403)}
     )
-    connector, _client = build(
-        "netdocuments",
-        routes,
-        staging=tmp_path,
-        config={"inherit_container_access_for_documents": True},
-    )
+    connector, _client = build("netdocuments", routes, staging=tmp_path)
     try:
         observations = list(connector.full_scan())
     finally:
@@ -2492,7 +2487,6 @@ def test_netdocuments_incremental_re_emits_a_cabinet_whose_access_changed(tmp_pa
         routes,
         staging=tmp_path,
         cursor_data=_nd_cursor(),
-        config={"inherit_container_access_for_documents": True},
     )
     try:
         batch = connector.changes(None)

@@ -1077,6 +1077,14 @@ function ConfigureConnectorModal({ connector, projects, redirectUri, docsUrl, on
 
     {meta && <>
       {meta.notes && <div className="form-note"><b>What this connection covers.</b> {meta.notes}</div>}
+
+      {/* Shown before anything is saved, and worded for the person actually filling this
+          form in. It names the setting to change and where to find it, because a caution
+          an operator cannot act on is decoration. */}
+      {meta.setup_warning && <div className="notice-banner inline"><ShieldAlert size={14} /><div>
+        <strong>Worth checking before you connect</strong>
+        <span>{meta.setup_warning}</span>
+      </div></div>}
       {/* Only the fail-closed case earns space here. That a connector mirrors permissions
           is the norm and is stated on the catalog card; repeating it in the form was noise. */}
       {mirrorsAcls === false && <div className="notice-banner inline"><ShieldAlert size={14} /><div>

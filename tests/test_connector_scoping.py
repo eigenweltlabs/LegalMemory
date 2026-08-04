@@ -342,3 +342,43 @@ def test_a_selection_resolves_from_its_node_id_when_metadata_is_absent():
     assert parse("drive:host,g1,g2|b!drive-abc") == {"site_id": "host,g1,g2", "drive_id": "b!drive-abc"}
     assert parse("site:host,g1,g2") == {"site_id": "host,g1,g2"}
     assert parse("nonsense") == {}
+
+
+# ---------------------------------------------------------------------------
+# What the connect form warns about
+# ---------------------------------------------------------------------------
+
+
+def test_a_setup_warning_is_written_for_the_person_filling_the_form():
+    """The warning is read by a firm's IT, not by whoever wrote the connector.
+
+    So it is checked for the two things that make it actionable: it names the setting
+    to change, and it says where to find it. A caution an operator cannot act on is
+    decoration, and one written in the vocabulary of the codebase is not read at all.
+    """
+    spec = _spec("netdocuments")
+    warning = spec.setup_warning
+    assert warning, "netdocuments must warn before anything is saved"
+
+    field_titles = {field["title"] for field in _config_fields(spec)}
+    named = [title for title in field_titles if title and title in warning]
+    assert named, f"the warning names no setting an operator can change: {field_titles}"
+    assert "Advanced options" in warning, "the warning must say where that setting lives"
+
+    # The words that would send an operator to ask an engineer what the sentence meant.
+    jargon = [
+        term
+        for term in ("ACL", "fail-closed", "principal", "inherit", "container", "mirror")
+        if term.lower() in warning.lower()
+    ]
+    assert not jargon, f"warning is written for engineers, not operators: {jargon}"
+
+
+def test_the_connect_form_is_given_the_setup_warning():
+    """A warning that stops at the registry never reaches anyone."""
+    from knowledge_index.connectors.registry import CATALOG as REGISTRY
+
+    warned = [spec.short_name for spec in REGISTRY if spec.setup_warning]
+    assert "netdocuments" in warned
+    # Not blanket noise: it is only worth the space where a default could surprise.
+    assert len(warned) < len(REGISTRY)

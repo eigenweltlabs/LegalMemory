@@ -19,11 +19,11 @@ Access graph generation:
    view / edit / share / administer rights, or an explicit no-access row that is how a
    firm builds an ethical wall. Containers mirror that membership; the groups are
    expanded to their members so a grant matches a real caller.
- - A document may carry an access list narrower than its container. The connector reads
-   that list from the document profile when it is present. Where it is not, the
-   document stays fail-closed rather than inheriting the container — inheriting would
-   publish precisely the overrides that exist in order to be narrower. An operator who
-   knows their repository does not use document overrides can opt into inheritance.
+ - A document may carry an access list of its own. The connector reads that list where
+   the profile carries it. Where it does not, the document follows its container, which
+   is the default and what the connect form describes at setup; an operator whose firm
+   restricts individual documents turns that off and those documents are left for an
+   administrator to grant.
 
 Provenance and its limits: this connector was written against the NetDocuments API
 definition Microsoft publishes for its certified Power Platform connector
@@ -251,8 +251,8 @@ class NetDocumentsSource(BaseSource):
         """The mirrored ACL for one document.
 
         A per-document access list wins when the profile carries one. Where it does
-        not, the document stays unknown — fail-closed — unless the operator has
-        explicitly accepted container inheritance for this repository.
+        not, the document follows its container unless the operator has turned that
+        off for this connection.
         """
         if not self._mirror_permissions:
             return None

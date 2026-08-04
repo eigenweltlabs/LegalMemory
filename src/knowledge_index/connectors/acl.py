@@ -260,15 +260,13 @@ def netdocuments_document_acl_to_access(
 ) -> AccessControl | None:
     """Translate a per-document access list, when the profile carries one.
 
-    NetDocuments lets a document override the access it inherits from its container,
-    which is how a firm restricts one memo inside an otherwise open matter. The public
-    Swagger the connector was built from documents no response body for the profile
-    call, so which key holds this list is unverified against a live repository; the
-    reader tries the plausible spellings and returns ``None`` when none is present.
+    NetDocuments lets a document carry access separate from its container. The public
+    API definition this connector was built from documents no response body for the
+    profile call, so which key holds this list is unverified against a live repository;
+    the reader tries the plausible spellings and returns ``None`` when none is present.
 
-    ``None`` is the safe answer, not the useless one: the caller keeps the document
-    fail-closed and reports a capability gap, rather than falling back to the container
-    ACL and publishing an override that exists precisely to be narrower.
+    ``None`` means "this payload said nothing about access" and is left for the caller
+    to resolve, rather than being reported here as an empty list.
     """
     if acl is None:
         return None
