@@ -1,7 +1,7 @@
 """Direct LiteLLM-gateway chat helpers for the benchmark agent + judge.
 
 Kept separate from ``pipeline.providers.chat_json`` (which injects a German schema
-instruction) so vendored prompts — like Harvey LAB's rubric judge — are sent verbatim.
+instruction) so vendored prompts — like the vendored rubric judge — are sent verbatim.
 ``httpx`` is imported lazily so this module stays offline-importable.
 """
 

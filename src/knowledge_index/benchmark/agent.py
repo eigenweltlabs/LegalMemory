@@ -4,7 +4,7 @@ Two ways to consume the RAG, matching how clients actually use it:
 
 - ``run_classic_rag`` — one-shot: retrieve top-k for the query, stuff it into the
   prompt, generate once. The standard non-agentic RAG baseline.
-- ``run_agentic`` — the LLM composes the real tool suite in a loop (Harvey's vendored
+- ``run_agentic`` — the LLM composes the real tool suite in a loop (the vendored
   ``agent_loop``, MIT) until it answers.
 
 The agentic mode drives the **real MCP server** (``mcp_server.create_mcp_server``)
@@ -166,7 +166,7 @@ class ToolSuite:
         return {"tool_calls": self.calls, "documents_retrieved": len(self.retrieved_paths)}
 
     def execute(self, name: str, arguments: str | dict) -> str:
-        # Harvey's agent loop passes tool arguments as a JSON string
+        # The vendored agent loop passes tool arguments as a JSON string
         args = json.loads(arguments) if isinstance(arguments, str) else (arguments or {})
         self.calls += 1
         tool = self._tools.get(name)
@@ -381,9 +381,9 @@ def run_agentic(
     max_steps: int = 12,
     system: str = AGENT_SYSTEM,
 ) -> AgentResult:
-    """Drive Harvey's vendored agent loop over our retrieval tool suite."""
+    """Drive the vendored agent loop over our retrieval tool suite."""
     from knowledge_index.benchmark.gateway_adapter import GatewayAdapter
-    from knowledge_index.benchmark.harvey.agent_loop import run_agent
+    from knowledge_index.benchmark.agent_harness.agent_loop import run_agent
 
     suite = ToolSuite(service, principal, allowed_tools=allowed_tools)
     system = _incorporate_server_instructions(system, suite.instructions)

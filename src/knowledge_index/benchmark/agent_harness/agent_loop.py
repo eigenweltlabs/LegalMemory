@@ -16,7 +16,7 @@ import time
 import json
 from pathlib import Path
 
-from knowledge_index.benchmark.harvey.base import ModelAdapter, ModelResponse
+from knowledge_index.benchmark.agent_harness.base import ModelAdapter, ModelResponse
 
 
 def run_agent(

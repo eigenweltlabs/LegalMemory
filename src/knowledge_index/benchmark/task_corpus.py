@@ -1,13 +1,13 @@
-"""Shape the Harvey LAB task set into a realistic law-firm DMS tree.
+"""Shape an open legal-task set into a realistic law-firm DMS tree.
 
-Harvey LAB (github.com/harveyai/harvey-labs, MIT) ships one folder per task with a
+The source dataset (github.com/harveyai/harvey-labs, MIT) ships one folder per task with a
 ``task.json`` (title, instructions, PASS/FAIL criteria) and a ``documents/`` bundle
 of real ``.docx/.xlsx/.eml`` files. This module reads a local checkout and packs
 those bundles into a ``mock_dms/`` tree with the same envelope the existing fixture
 generator produces — ``mock_dms/`` + ``acl-by-path.json`` + a manifest +
 ``scenario.json`` — so the standard ``local_fs`` connector ingests it unchanged.
 
-Two layouts (``build_harvey_corpus(..., layout=...)``):
+Two layouts (``build_task_corpus(..., layout=...)``):
 - **flat** — ``matter = instrument`` (e.g. "Account Control Agreement") with a subfolder
   per scenario, one ACL group per practice area. The draft / redline / subsequent-turn
   task types on one instrument are its version-chain material.
@@ -40,7 +40,7 @@ from knowledge_index.benchmark import noise
 #: default is the deterministic filename guess; an LLM resolver can be injected instead.
 PartyResolver = Callable[[list["_Scenario"]], list[tuple[str, str]]]
 
-# Harvey task-type suffixes, longest first so the greedy strip is unambiguous.
+# Task-type suffixes, longest first so the greedy strip is unambiguous.
 _TASK_TYPE_SUFFIXES: tuple[str, ...] = (
     "counterparty-paper-review",
     "subsequent-turn-redline",
@@ -56,7 +56,7 @@ _TASK_TYPE_SUFFIXES: tuple[str, ...] = (
 
 @dataclass
 class ScenarioRecord:
-    """One packed Harvey scenario = one working set inside a matter."""
+    """One packed scenario = one working set inside a matter."""
 
     scenario_id: str
     matter_ref: str
@@ -100,7 +100,7 @@ def _title_case(slug: str) -> str:
 def _discover_scenarios(source: Path, areas: list[str]) -> list[_Scenario]:
     tasks_root = source / "tasks"
     if not tasks_root.is_dir():
-        raise ValueError(f"not a Harvey LAB checkout (missing tasks/): {source}")
+        raise ValueError(f"not a task-set checkout (missing tasks/): {source}")
     roots = [tasks_root / area for area in areas] if areas else [tasks_root]
     scenarios: list[_Scenario] = []
     for root in roots:
@@ -113,7 +113,7 @@ def _discover_scenarios(source: Path, areas: list[str]) -> list[_Scenario]:
             documents = sorted(p for p in documents_dir.iterdir() if p.is_file())
             if not documents:
                 continue
-            # Harvey LAB contains both layouts:
+            # The dataset contains both layouts:
             #   instrument-tasktype/scenario-NN/task.json
             #   instrument-tasktype/task.json
             # In both cases ``documents/`` is next to task.json.  Treat only an
@@ -474,7 +474,7 @@ def _build_firm_corpus(
     return summary
 
 
-def build_harvey_corpus(
+def build_task_corpus(
     output: str | Path,
     source: str | Path,
     *,
@@ -487,7 +487,7 @@ def build_harvey_corpus(
     structure: str | Path | dict | None = None,
     noise_level: str | None = None,
 ) -> dict:
-    """Pack a Harvey checkout into ``output/mock_dms`` and its manifests.
+    """Pack a task-set checkout into ``output/mock_dms`` and its manifests.
 
     ``layout``: ``"flat"`` (matter = instrument, scenario subfolders) or ``"firm"`` (a
     realistic Client / Matter / Workstream tree, one scenario = one matter, per-client
@@ -515,7 +515,7 @@ def build_harvey_corpus(
 
     scenarios = _discover_scenarios(source, areas)
     if not scenarios:
-        raise ValueError("no Harvey scenarios found for the requested areas")
+        raise ValueError("no scenarios found for the requested areas")
 
     if layout == "firm":
         return _build_firm_corpus(

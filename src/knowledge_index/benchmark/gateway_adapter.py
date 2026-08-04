@@ -1,6 +1,6 @@
-"""Harvey's ``ModelAdapter`` interface implemented over our LiteLLM gateway.
+"""The vendored ``ModelAdapter`` interface implemented over our LiteLLM gateway.
 
-Lets us run Harvey's vendored ``agent_loop`` unchanged while keeping the transport
+Lets us run the vendored ``agent_loop`` unchanged while keeping the transport
 ours: OpenAI chat-completions through the gateway, so cost stays tracked and air-gapped
 deployments work. Tool definitions are passed through in OpenAI format (the loop is
 format-agnostic — it just hands ``tools`` to the adapter).
@@ -9,7 +9,7 @@ format-agnostic — it just hands ``tools`` to the adapter).
 from __future__ import annotations
 
 from knowledge_index.benchmark import gateway
-from knowledge_index.benchmark.harvey.base import ModelAdapter, ModelResponse, ToolCall
+from knowledge_index.benchmark.agent_harness.base import ModelAdapter, ModelResponse, ToolCall
 from knowledge_index.config import AppConfig
 
 
@@ -27,7 +27,7 @@ class GatewayAdapter(ModelAdapter):
 
     @staticmethod
     def _to_openai_tools(tools: list[dict]) -> list[dict]:
-        # Harvey's canonical tool defs are flat {name, description, parameters};
+        # The vendored canonical tool defs are flat {name, description, parameters};
         # OpenAI chat-completions wants them nested under "function". Accept both.
         out = []
         for tool in tools or []:

@@ -246,7 +246,7 @@ def parser() -> argparse.ArgumentParser:
         "freeze-gold", help="commit a generated gold set into the benchmark package (one-time)"
     )
     freeze.add_argument("corpus_dir", help="a generate-benchmark output directory")
-    freeze.add_argument("--name", required=True, help="frozen set name, e.g. harvey-full")
+    freeze.add_argument("--name", required=True, help="frozen set name, e.g. contracts-banking")
 
     retrieval_eval = commands.add_parser(
         "run-retrieval-eval",

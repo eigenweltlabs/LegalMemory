@@ -18,7 +18,7 @@ from docx import Document as WordDocument
 
 from knowledge_index.benchmark import metrics, presets
 from knowledge_index.benchmark.gold import generate_gold
-from knowledge_index.benchmark.harvey_corpus import build_harvey_corpus
+from knowledge_index.benchmark.task_corpus import build_task_corpus
 from knowledge_index.benchmark.retrieval_eval import run_queries
 from knowledge_index.config import AppConfig
 from tests.conftest import TEST_EMBEDDING_MODEL, TEST_LLM_MODEL
@@ -170,7 +170,7 @@ def test_preset_groups_resolve_and_always_include_full() -> None:
 
 
 def _write_task(task_dir: Path, *, title: str, marker: str, filler: str) -> None:
-    """One Harvey-shaped task: task.json + a docx (holds the marker) + an email."""
+    """One upstream-shaped task: task.json + a docx (holds the marker) + an email."""
     scenario = task_dir / "scenario-01"
     documents = scenario / "documents"
     documents.mkdir(parents=True)
@@ -208,7 +208,7 @@ def _write_task(task_dir: Path, *, title: str, marker: str, filler: str) -> None
     )
 
 
-def _mini_harvey(root: Path) -> Path:
+def _mini_task_set(root: Path) -> Path:
     area = root / "tasks" / "contracts" / "banking"
     _write_task(
         area / "account-control-agreement-first-draft",
@@ -226,7 +226,7 @@ def _mini_harvey(root: Path) -> Path:
 
 
 def _write_flat_task(task_dir: Path, *, title: str) -> None:
-    """Write the flat task/task.json layout used by current Harvey areas."""
+    """Write the flat task/task.json layout used by current upstream areas."""
     documents = task_dir / "documents"
     documents.mkdir(parents=True)
     document = WordDocument()
@@ -240,8 +240,8 @@ def _write_flat_task(task_dir: Path, *, title: str) -> None:
 
 
 def test_build_corpus_shapes_a_firm_tree_and_is_deterministic(tmp_path: Path) -> None:
-    source = _mini_harvey(tmp_path / "harvey")
-    summary = build_harvey_corpus(tmp_path / "out", source, areas=["contracts/banking"])
+    source = _mini_task_set(tmp_path / "task_set")
+    summary = build_task_corpus(tmp_path / "out", source, areas=["contracts/banking"])
 
     assert summary["matters"] == 2
     assert summary["scenarios"] == 2
@@ -252,17 +252,17 @@ def test_build_corpus_shapes_a_firm_tree_and_is_deterministic(tmp_path: Path) ->
     assert len(acl) == 4
     assert all(path.startswith("Mandate/") for path in acl)
 
-    repeat = build_harvey_corpus(tmp_path / "out2", source, areas=["contracts/banking"])
+    repeat = build_task_corpus(tmp_path / "out2", source, areas=["contracts/banking"])
     assert repeat["content_hash"] == summary["content_hash"]
 
 
-def test_build_corpus_supports_flat_harvey_task_layout(tmp_path: Path) -> None:
-    source = tmp_path / "harvey"
+def test_build_corpus_supports_flat_task_layout(tmp_path: Path) -> None:
+    source = tmp_path / "task_set"
     area = source / "tasks" / "banking-finance"
     _write_flat_task(area / "draft-fee-letter", title="Fee Letter")
     _write_flat_task(area / "review-credit-agreement", title="Credit Agreement")
 
-    summary = build_harvey_corpus(tmp_path / "out", source, areas=["banking-finance"])
+    summary = build_task_corpus(tmp_path / "out", source, areas=["banking-finance"])
 
     assert summary["matters"] == 2
     assert summary["scenarios"] == 2
@@ -273,14 +273,14 @@ def test_build_corpus_supports_flat_harvey_task_layout(tmp_path: Path) -> None:
 def test_firm_layout_uses_the_injected_party_resolver(tmp_path: Path) -> None:
     """The firm builder names each matter via the injected resolver and groups matters
     under one client folder + one per-client ACL — the seam the LLM resolver plugs into."""
-    source = _mini_harvey(tmp_path / "harvey")
+    source = _mini_task_set(tmp_path / "task_set")
     seen: list[int] = []
 
     def resolver(scenarios):  # both matters belong to one client, distinct counterparties
         seen.append(len(scenarios))
         return [("Northwind", "Acme"), ("Northwind", "Globex")]
 
-    summary = build_harvey_corpus(
+    summary = build_task_corpus(
         tmp_path / "out",
         source,
         areas=["contracts/banking"],
@@ -306,9 +306,9 @@ def test_firm_layout_uses_the_injected_party_resolver(tmp_path: Path) -> None:
 
 
 def test_firm_naming_resolver_rejected_for_flat_layout(tmp_path: Path) -> None:
-    source = _mini_harvey(tmp_path / "harvey")
+    source = _mini_task_set(tmp_path / "task_set")
     with pytest.raises(ValueError, match="firm layout"):
-        build_harvey_corpus(
+        build_task_corpus(
             tmp_path / "out",
             source,
             areas=["contracts/banking"],
@@ -320,7 +320,7 @@ def test_firm_naming_resolver_rejected_for_flat_layout(tmp_path: Path) -> None:
 def test_firm_layout_applies_a_curated_structure_manifest(tmp_path: Path) -> None:
     """A structure manifest is authoritative: its client / matter number / title are used
     verbatim, matters group under the shared client, and a '/' in a title is folder-safe."""
-    source = _mini_harvey(tmp_path / "harvey")
+    source = _mini_task_set(tmp_path / "task_set")
     structure = {
         "matters": {
             "contracts/banking/account-control-agreement-first-draft/scenario-01": {
@@ -337,7 +337,7 @@ def test_firm_layout_applies_a_curated_structure_manifest(tmp_path: Path) -> Non
             },
         }
     }
-    summary = build_harvey_corpus(
+    summary = build_task_corpus(
         tmp_path / "out", source, areas=["contracts/banking"], layout="firm", structure=structure
     )
 
@@ -380,8 +380,8 @@ def test_firm_noise_keeps_every_file_walled_and_is_deterministic(tmp_path: Path)
     walled to its own client, and the whole build is reproducible."""
     import re
 
-    source = _mini_harvey(tmp_path / "harvey")
-    summary = build_harvey_corpus(
+    source = _mini_task_set(tmp_path / "task_set")
+    summary = build_task_corpus(
         tmp_path / "out", source, areas=["contracts/banking"], layout="firm", noise_level="heavy"
     )
     assert set(summary["noise"]) == {"flat", "alt", "junk"}
@@ -394,16 +394,16 @@ def test_firm_noise_keeps_every_file_walled_and_is_deterministic(tmp_path: Path)
         client_slug = re.sub(r"[^a-z0-9]+", "-", path.split("/")[1].lower()).strip("-")
         assert [g["principal"] for g in grants] == [f"group:{client_slug}"]
 
-    repeat = build_harvey_corpus(
+    repeat = build_task_corpus(
         tmp_path / "out2", source, areas=["contracts/banking"], layout="firm", noise_level="heavy"
     )
     assert repeat["content_hash"] == summary["content_hash"]
 
 
 def test_noise_requires_firm_layout(tmp_path: Path) -> None:
-    source = _mini_harvey(tmp_path / "harvey")
+    source = _mini_task_set(tmp_path / "task_set")
     with pytest.raises(ValueError, match="firm layout"):
-        build_harvey_corpus(
+        build_task_corpus(
             tmp_path / "out", source, areas=["contracts/banking"], layout="flat", noise_level="light"
         )
 
@@ -446,8 +446,8 @@ def _generate_marker_gold(corpus_dir: Path) -> dict:
 
 
 def test_generate_gold_verifies_dedupes_and_reports(tmp_path: Path) -> None:
-    source = _mini_harvey(tmp_path / "harvey")
-    build_harvey_corpus(tmp_path / "out", source, areas=["contracts/banking"])
+    source = _mini_task_set(tmp_path / "task_set")
+    build_task_corpus(tmp_path / "out", source, areas=["contracts/banking"])
 
     stats = _generate_marker_gold(tmp_path / "out")
     # 2 scenarios × 3 proposals; the hallucination is rejected per scenario
@@ -503,20 +503,20 @@ def test_stratified_sample_spreads_across_practice_areas() -> None:
 def test_freeze_makes_gold_a_committed_artifact_resolvable_by_name(tmp_path: Path) -> None:
     from knowledge_index.benchmark import store
 
-    source = _mini_harvey(tmp_path / "harvey")
-    build_harvey_corpus(tmp_path / "out", source, areas=["contracts/banking"])
+    source = _mini_task_set(tmp_path / "task_set")
+    build_task_corpus(tmp_path / "out", source, areas=["contracts/banking"])
     _generate_marker_gold(tmp_path / "out")
 
     data_dir = tmp_path / "frozen"
-    info = store.freeze(tmp_path / "out", "harvey-banking-test", data_dir=data_dir)
-    assert (data_dir / "harvey-banking-test.gold.jsonl").exists()
-    meta = json.loads((data_dir / "harvey-banking-test.meta.json").read_text())
+    info = store.freeze(tmp_path / "out", "banking-test", data_dir=data_dir)
+    assert (data_dir / "banking-test.gold.jsonl").exists()
+    meta = json.loads((data_dir / "banking-test.meta.json").read_text())
     assert meta["source"].startswith("harveyai/harvey-labs")
     assert meta["corpus_config"]["content_hash"] == info["corpus_config"]["content_hash"]
-    assert store.list_frozen(data_dir=data_dir) == ["harvey-banking-test"]
+    assert store.list_frozen(data_dir=data_dir) == ["banking-test"]
 
-    by_name = store.resolve("harvey-banking-test", data_dir=data_dir)
-    by_path = store.resolve(str(data_dir / "harvey-banking-test.gold.jsonl"), data_dir=data_dir)
+    by_name = store.resolve("banking-test", data_dir=data_dir)
+    by_path = store.resolve(str(data_dir / "banking-test.gold.jsonl"), data_dir=data_dir)
     assert by_name == by_path
     with pytest.raises(FileNotFoundError):
         store.resolve("does-not-exist", data_dir=data_dir)
@@ -1082,8 +1082,8 @@ def test_benchmark_runs_end_to_end_and_full_beats_naive(
     from knowledge_index.db.models import Source
     from knowledge_index.sync import LocalFilesystemSource, SyncEngine
 
-    source = _mini_harvey(tmp_path / "harvey")
-    summary = build_harvey_corpus(tmp_path / "out", source, areas=["contracts/banking"])
+    source = _mini_task_set(tmp_path / "task_set")
+    summary = build_task_corpus(tmp_path / "out", source, areas=["contracts/banking"])
     _generate_marker_gold(tmp_path / "out")
     source_root = Path(summary["source_root"])
     acl_map = json.loads(Path(summary["acl_by_path"]).read_text(encoding="utf-8"))
@@ -1092,7 +1092,7 @@ def test_benchmark_runs_end_to_end_and_full_beats_naive(
     with factory() as session:  # type: Session
         record = Source(
             kind="local_fs",
-            display_name="harvey-bench",
+            display_name="task-bench",
             config={"root": str(source_root), "acl_by_path": acl_map},
         )
         session.add(record)

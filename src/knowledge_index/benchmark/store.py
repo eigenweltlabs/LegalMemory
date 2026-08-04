@@ -77,7 +77,7 @@ def freeze(corpus_dir: str | Path, name: str, *, data_dir: Path | None = None) -
         "gold_queries": len(lines),
         "by_kind": by_kind,
         "reproduce": (
-            f"ki generate-benchmark <out> --source <harvey-labs> "
+            f"ki generate-benchmark <out> --source <task-set checkout> "
             f"--areas {','.join(scenario.get('areas', []))} "
             f"--seed {scenario.get('seed')}"
         ),
