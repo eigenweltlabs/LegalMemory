@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from hatchet_sdk import Context, Hatchet
+from hatchet_sdk import Context, DesiredWorkerLabel, Hatchet
 from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
@@ -48,6 +48,30 @@ from knowledge_index.taxonomies import (
 )
 
 ConfigGetter = Callable[[], AppConfig]
+
+# Which resource lane executes each insertion stage. A lane is a worker process
+# that serves one physical resource, so its slot count is that resource's
+# concurrency and nothing else can spend it. convert -> the docling CPU farm,
+# index -> the embedding provider + OpenSearch, everything else -> the vLLM
+# fleet, and fetch -> local disk + postgres. fetch gets its own lane despite
+# being cheap: sharing the gpu lane let it consume fleet slots, and made lane
+# utilisation unreadable (the opening fetch wave pins the gpu lane at 100% with
+# every GPU idle).
+#
+# required=True on the label: a stage never runs outside its lane. The
+# corollary is that every lane named here must have a live worker or its stages
+# stay queued until schedule_timeout -- `docker compose up` must bring up
+# worker, worker-convert and worker-index together.
+STAGE_LANES = {
+    "fetch": "io",
+    "convert": "convert",
+    "classify_matter": "gpu",
+    "relate": "gpu",
+    "extract_metadata": "gpu",
+    "extract_decisions": "gpu",
+    "index": "index",
+}
+
 NONTERMINAL_STATUSES = {
     ProcessingStatus.PENDING.value,
     ProcessingStatus.RUNNING.value,
@@ -93,17 +117,37 @@ def build_hatchet_runtime(
 ) -> HatchetRuntime:
     get_config = _as_getter(config)
     client = Hatchet()
+    # Admission, not capacity: this bounds how many document DAGs are in flight,
+    # while the lane slot counts bound what actually runs. Deliberately allowed
+    # far above total lane capacity -- a document occupies one stage at a time,
+    # so an admission cap near total slots lets a cohort bunched at one stage
+    # (say convert, the narrowest lane) leave every other lane idle with no way
+    # to admit work for them. Queued DAGs cost hatchet-postgres rows, not slots
+    # or DB sessions.
     document_concurrency = _positive_int_env(
-        "KI_HATCHET_DOCUMENT_CONCURRENCY", default=16, maximum=1024
+        "KI_HATCHET_DOCUMENT_CONCURRENCY", default=16, maximum=16384
     )
     relation_concurrency = _positive_int_env(
-        "KI_RELATE_MODEL_CONCURRENCY", default=16, maximum=256
+        # cap matches document concurrency: relate is the longest stage and a
+        # tighter gate just parks in-flight documents behind it (2026-08-03
+        # smoke: 4,096-doc concurrency produced only ~1,500 GPU-visible
+        # requests with relate gated at 1,024)
+        "KI_RELATE_MODEL_CONCURRENCY", default=16, maximum=4096
+    )
+    # The index stage embeds every chunk with one synchronous call per chunk to
+    # the external embedding provider (OpenAI text-embedding-3-small). Left
+    # uncapped it inherits document_concurrency and a fan-out of index tasks blows
+    # the provider's RPM limit, drawing a 429 storm that quarantines documents.
+    # Give it its own throttle, like RELATE, so steady-state request rate stays
+    # under the provider ceiling (LiteLLM rpm/tpm is the hard backstop).
+    index_concurrency = _positive_int_env(
+        "KI_INDEX_MODEL_CONCURRENCY", default=16, maximum=1024
     )
     workflow = client.workflow(
         name="knowledge-index-document-insertion",
         description="One resumable insertion workflow per source document",
         input_validator=InsertionInput,
-        version=f"5-c{document_concurrency}-r{relation_concurrency}",
+        version=f"6-lanes-c{document_concurrency}-r{relation_concurrency}-i{index_concurrency}",
         # Hatchet's GROUP_ROUND_ROBIN strategy advances this many document DAGs
         # through their child stages without scheduling the entire corpus root-first.
         # The stages are predominantly remote I/O, so the default is deliberately
@@ -143,13 +187,25 @@ def build_hatchet_runtime(
         task = workflow.task(
             name=stage,
             parents=parents,
-            retries=6,
+            retries=8,
             backoff_factor=5.0,
-            backoff_max_seconds=60,
+            # The retry budget has to outlast pipeline.claim_timeout_seconds
+            # (1800s). A stage row held at `running` by a dead attempt is not
+            # claimable until it expires, so a task whose retries run out first
+            # dies and strands the document: 7,359 classify rows ended up that
+            # way on 2026-08-03. 5+25+125+420*5 = 2,255s.
+            backoff_max_seconds=420,
             schedule_timeout=timedelta(hours=6),
             execution_timeout=timedelta(hours=6),
+            desired_worker_labels={
+                "lane": DesiredWorkerLabel(value=STAGE_LANES[stage], required=True)
+            },
             concurrency=(
-                relation_concurrency if stage == PipelineStage.RELATE.value else None
+                relation_concurrency
+                if stage == PipelineStage.RELATE.value
+                else index_concurrency
+                if stage == PipelineStage.INDEX.value
+                else None
             ),
         )(stage_handler(stage, final=position == len(stages) - 1))
         parents = [task]
@@ -462,12 +518,17 @@ def start_hatchet_worker(
 ) -> None:
     runtime = build_hatchet_runtime(session_factory, config)
     _start_run_sweeper(session_factory, _as_getter(config))
-    # One worker for all workflows. Insertion tasks are short (one stage for one document)
-    # so slots turn over quickly, and separate containers would add deployment machinery
-    # without isolating a scarce local resource.
+    _start_claim_recovery(session_factory, _as_getter(config))
+    # One worker process serves one resource lane, named by KI_WORKER_LANE and
+    # advertised as a worker label. Insertion stages carry a required lane label
+    # (see STAGE_LANES), so this process only ever runs the stages that spend the
+    # resource it was sized for. The non-insertion workflows are unlabelled and
+    # run on whichever lane has a free slot.
+    lane = os.environ.get("KI_WORKER_LANE", "gpu").strip() or "gpu"
     runtime.client.worker(
-        "knowledge-index-insertion-worker",
+        f"knowledge-index-{lane}-worker",
         slots=slots,
+        labels={"lane": lane},
         workflows=[
             runtime.workflow,
             runtime.access_workflow,
@@ -476,6 +537,42 @@ def start_hatchet_worker(
             runtime.restore_workflow,
         ],
     ).start()
+
+
+def _start_claim_recovery(
+    session_factory: sessionmaker[Session], get_config: ConfigGetter
+) -> None:
+    """Expire abandoned stage claims for as long as this worker lives.
+
+    recover_stale_claims used to run only at worker startup. Every claim orphaned
+    mid-run -- a restarted worker, a cancelled task -- therefore stayed `running`
+    forever, _claim_next kept refusing it, and the document was stranded while its
+    task burned six retries raising "stage remains running". Set
+    ``KI_CLAIM_RECOVERY_SECONDS=0`` to leave the timer out.
+    """
+    if os.environ.get("KI_CLAIM_RECOVERY_SECONDS", "").strip() == "0":
+        return
+    interval = _positive_int_env("KI_CLAIM_RECOVERY_SECONDS", default=120, maximum=86400)
+
+    def loop() -> None:
+        while True:
+            time.sleep(interval)
+            try:
+                freed = PipelineRunner(session_factory, get_config()).recover_stale_claims()
+                if freed:
+                    print(
+                        f"[ki claims] released {freed} expired claims",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+            except Exception as exc:  # noqa: BLE001 - must never kill the worker
+                print(
+                    f"[ki claims] recovery failed: {type(exc).__name__}: {exc}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+
+    threading.Thread(target=loop, name="ki-claim-recovery", daemon=True).start()
 
 
 def _start_run_sweeper(session_factory: sessionmaker[Session], get_config: ConfigGetter) -> None:

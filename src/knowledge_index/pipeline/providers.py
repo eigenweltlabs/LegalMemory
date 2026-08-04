@@ -36,6 +36,13 @@ log = logging.getLogger(__name__)
 # gateway 408 is reported cleanly and owned by the pipeline retry policy.
 MODEL_REQUEST_TIMEOUT_SECONDS = float(os.getenv("KI_MODEL_REQUEST_TIMEOUT_SECONDS", "660"))
 
+# Degenerate-agent-loop trips (see chat_agent): warn on the Nth identical
+# back-to-back tool call, abort on the Mth; cap the conversation's prompt size
+# well below the model's serving context (262k on the current fleet).
+REPEATED_CALL_WARN = int(os.getenv("KI_AGENT_REPEATED_CALL_WARN", "3"))
+REPEATED_CALL_ABORT = int(os.getenv("KI_AGENT_REPEATED_CALL_ABORT", "6"))
+AGENT_PROMPT_TOKEN_BUDGET = int(os.getenv("KI_AGENT_PROMPT_TOKEN_BUDGET", "160000"))
+
 # One dead billing key must not be rediscovered once per document. After a permanent
 # fault the same model fails fast for this long without touching the network, so a
 # 500-file estate quarantines in seconds under one identical, readable cause instead of
@@ -189,8 +196,8 @@ def chat_json(
                 {
                     "role": "system",
                     "content": (
-                        f"{system}\n\nAntworte ausschließlich mit einem einzelnen JSON-Objekt, "
-                        f"das exakt diesem JSON-Schema entspricht:\n{schema_json}"
+                        f"{system}\n\nRespond with a single JSON object only, "
+                        f"matching this JSON schema exactly:\n{schema_json}"
                     ),
                 },
                 {"role": "user", "content": user},
@@ -267,6 +274,17 @@ def chat_agent(
     base = gateway_url(config)
     headers = _headers()
 
+    # Degenerate-loop defenses (2026-08-01 run: one classify attempt repeated the
+    # identical tool call ~70 turns, 9.8M prompt tokens, and died on the context
+    # wall an hour later). Two independent trips, both ending in a clean stage
+    # retry instead of an hour-long hang:
+    #  - the same (tool, arguments) call repeated back-to-back is warned once,
+    #    then aborted;
+    #  - the conversation's prompt size is budgeted well below the serving
+    #    context, using the gateway's own reported prompt_tokens.
+    repeat_signature: str | None = None
+    repeat_count = 0
+
     for iteration in range(max_iters):
         # Give the agent freedom to inspect evidence, but make the bounded loop
         # actually converge: on the final turn it must submit the typed result
@@ -295,6 +313,13 @@ def chat_agent(
         # One row per gateway turn: an agent loop is several real, separately billed
         # calls, not one call retried.
         _record_usage(response, body, model, call="agent")
+        prompt_tokens = int(((body.get("usage") or {}).get("prompt_tokens")) or 0)
+        if prompt_tokens > AGENT_PROMPT_TOKEN_BUDGET:
+            raise ModelOutputInvalid(
+                f"agent {model} conversation reached {prompt_tokens} prompt tokens "
+                f"(budget {AGENT_PROMPT_TOKEN_BUDGET}) without submitting — aborted "
+                "before the serving context limit"
+            )
         message = body["choices"][0]["message"]
         tool_calls = message.get("tool_calls") or []
 
@@ -348,6 +373,29 @@ def chat_agent(
                     )
                     continue
                 return candidate
+            signature = f"{name}:{fn.get('arguments') or ''}"
+            if signature == repeat_signature:
+                repeat_count += 1
+            else:
+                repeat_signature, repeat_count = signature, 1
+            if repeat_count >= REPEATED_CALL_ABORT:
+                raise ModelOutputInvalid(
+                    f"agent {model} repeated the identical tool call {name!r} "
+                    f"{repeat_count} times in a row — degenerate loop aborted"
+                )
+            if repeat_count >= REPEATED_CALL_WARN:
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": call.get("id"),
+                        "content": (
+                            f"you have made this exact {name} call {repeat_count} times — "
+                            "its result does not change. Use what you already have, make a "
+                            f"DIFFERENT call, or finish with `{submit}`."
+                        ),
+                    }
+                )
+                continue
             handler = registry.get(name)
             if handler is None:
                 result = f"unknown tool: {name}"

@@ -27,6 +27,7 @@ def run_agent(
     tools: list[dict],
     max_turns: int = 200,
     transcript_path: str | None = None,
+    prepare_step=None,
 ) -> dict:
     """Run the agent loop to completion.
 
@@ -58,13 +59,20 @@ def run_agent(
         transcript_file = open(transcript_path, "w")
 
     context_overflow = False
+    calls_so_far: list[str] = []  # tool names, in order, for ``prepare_step``
     try:
         for turn in range(max_turns):
             turn_count = turn + 1
 
-            # Call the model
+            # Call the model. ``prepare_step`` mirrors the demo harness's
+            # ``prepareStep``: it inspects the tool calls made so far and may pin
+            # the next one, which is how the demo forces a relation traversal a
+            # small model would otherwise skip.
             try:
-                response = adapter.chat(messages, tools)
+                choice = prepare_step(calls_so_far) if prepare_step else None
+                response = adapter.chat(messages, tools, choice) if choice else (
+                    adapter.chat(messages, tools)
+                )
             except Exception as e:
                 err_msg = str(e)
                 if "prompt is too long" in err_msg or "context_length_exceeded" in err_msg:
@@ -88,6 +96,7 @@ def run_agent(
             # Execute each tool call and feed results back
             tool_results = []
             for tc in response.tool_calls:
+                calls_so_far.append(tc.name)
                 result = tool_executor.execute(tc.name, tc.arguments)
 
                 if transcript_file:

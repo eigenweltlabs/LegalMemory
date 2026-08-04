@@ -210,57 +210,107 @@ def parser() -> argparse.ArgumentParser:
         help="firm layout: inject realistic DMS mess (flat matters, renamed folders, "
         "junk). Deterministic and gold-safe. Default: none (clean).",
     )
-    benchmark.add_argument(
-        "--gold",
-        default="",
-        help="comma-separated gold kinds to generate: working_set, factoid, qa "
-        "(default: none — the corpus only)",
+    gold = commands.add_parser(
+        "generate-gold",
+        help="LLM-generate + machine-verify retrieval gold from the source corpus "
+        "(needs the gateway; no database)",
     )
-    benchmark.add_argument("--per-scenario", type=int, default=4, help="qa: questions per scenario")
-    benchmark.add_argument(
-        "--gold-model",
-        default="",
-        help="qa: gateway model for question generation (default: KI_LLM_MODEL)",
-    )
-
-    llm_gold = commands.add_parser(
-        "derive-llm-gold",
-        help="append LLM-generated, source-verified retrieval gold (needs the gateway)",
-    )
-    llm_gold.add_argument("corpus_dir", help="a generate-benchmark output directory")
-    llm_gold.add_argument("--per-scenario", type=int, default=4)
-    llm_gold.add_argument(
+    gold.add_argument("corpus_dir", help="a generate-benchmark output directory")
+    gold.add_argument("--per-scenario", type=int, default=4, help="max labels per scenario")
+    gold.add_argument(
         "--model", default="", help="gateway model (default: KI_LLM_MODEL)"
     )
-    llm_gold.add_argument("--limit-scenarios", type=int, help="cap scenarios (for a cheap dry run)")
+    gold.add_argument(
+        "--limit-scenarios", type=int, help="cap scenarios (stratified across practice areas)"
+    )
+    gold.add_argument("--seed", type=int, default=42, help="sampling seed")
+    gold.add_argument(
+        "--max-gold-docs",
+        type=int,
+        default=5,
+        help="drop a label whose answer appears in more visible documents than this",
+    )
+    gold.add_argument(
+        "--concurrency",
+        type=int,
+        default=64,
+        help="parallel proposal calls; each scenario is checkpointed independently, so a re-run resumes",
+    )
+    gold.add_argument(
+        "--output-dir",
+        help="write retrieval-gold.jsonl / rejected.jsonl here instead of corpus_dir "
+        "(for read-only corpus mounts)",
+    )
 
     freeze = commands.add_parser(
-        "freeze-gold", help="commit a reviewed gold set into the benchmark package (one-time)"
+        "freeze-gold", help="commit a generated gold set into the benchmark package (one-time)"
     )
     freeze.add_argument("corpus_dir", help="a generate-benchmark output directory")
     freeze.add_argument("--name", required=True, help="frozen set name, e.g. contracts-banking")
 
     retrieval_eval = commands.add_parser(
-        "run-retrieval-eval", help="score a frozen gold set against the live index"
+        "run-retrieval-eval",
+        help="single-shot retrieval matrix: score gold per preset against the live index",
     )
     retrieval_eval.add_argument("gold", help="a frozen set name or a path to a *.gold.jsonl file")
     retrieval_eval.add_argument(
-        "--baseline",
-        default="ladder",
-        help="one baseline (bm25|naive_dense|full) or 'ladder' for the gated comparison",
+        "--presets",
+        default="competitors",
+        help="a group (competitors|ablations|sweep|all) or comma-separated preset names",
     )
     retrieval_eval.add_argument("--report", help="write the full report JSON here")
     retrieval_eval.add_argument("--min-lift", type=float, default=0.05)
-
-    qa_eval = commands.add_parser(
-        "run-qa-eval",
-        help="ask an agent QA questions (llm_question gold) and score answers + recall",
+    retrieval_eval.add_argument(
+        "--concurrency",
+        type=int,
+        default=1,
+        help="parallel queries per preset (default serial; >1 makes latency percentiles "
+        "measure a loaded system)",
     )
-    qa_eval.add_argument("gold", help="a retrieval-gold.jsonl (uses its llm_question labels)")
-    qa_eval.add_argument("--limit", type=int, help="cap number of questions")
-    qa_eval.add_argument("--agent-model", default="", help="gateway model (default: KI_LLM_MODEL)")
-    qa_eval.add_argument("--judge-model", default="", help="gateway model (default: KI_LLM_MODEL)")
-    qa_eval.add_argument("--report", help="write the full report JSON here")
+    retrieval_eval.add_argument(
+        "--checkpoint-dir",
+        help="write each preset's result here as it completes; resume skips finished presets",
+    )
+    retrieval_eval.add_argument(
+        "--check-walls",
+        action="store_true",
+        help="also probe every query with an outsider principal (security audit; off "
+        "by default — quality runs don't pay for access-management testing)",
+    )
+
+    agentic_eval = commands.add_parser(
+        "run-agentic-eval",
+        help="the headline benchmark: agents consuming the RAG, compared across configs",
+    )
+    agentic_eval.add_argument("gold", help="a frozen set name or a path to a *.gold.jsonl file")
+    agentic_eval.add_argument(
+        "--configs",
+        default="default",
+        help="'default', 'all', or comma-separated config names (see agentic_eval.AGENT_CONFIGS)",
+    )
+    agentic_eval.add_argument(
+        "--limit", type=int, help="cap number of queries (stratified across gold kinds)"
+    )
+    agentic_eval.add_argument("--max-steps", type=int, default=12, help="agent tool-loop ceiling")
+    agentic_eval.add_argument("--agent-model", default="", help="gateway model for the agent")
+    agentic_eval.add_argument("--judge-model", default="", help="gateway model for the judge")
+    agentic_eval.add_argument("--seed", type=int, default=42, help="query sampling seed")
+    agentic_eval.add_argument(
+        "--concurrency",
+        type=int,
+        default=64,
+        help="parallel queries within a config; configs stay sequential (cost attribution)",
+    )
+    agentic_eval.add_argument(
+        "--wall-probe",
+        action="store_true",
+        help="also run the outsider-agent wall probe (security audit; off by default)",
+    )
+    agentic_eval.add_argument(
+        "--checkpoint-dir",
+        help="write each config's result here as it completes; resume skips finished configs",
+    )
+    agentic_eval.add_argument("--report", help="write the full report JSON here")
 
     bench_ingest = commands.add_parser(
         "bench-ingest",
@@ -269,26 +319,6 @@ def parser() -> argparse.ArgumentParser:
     bench_ingest.add_argument("corpus_dir", help="a generate-benchmark output directory")
     bench_ingest.add_argument("--name", default="benchmark-corpus")
     bench_ingest.add_argument("--report", help="write the measurement JSON here")
-
-    task_eval = commands.add_parser(
-        "run-task-eval",
-        help="real-usage benchmark: agent/RAG produce work product, scored by rubric",
-    )
-    task_eval.add_argument("corpus_dir", help="a generate-benchmark output directory")
-    task_eval.add_argument(
-        "--modes",
-        default="closed_book,classic_rag,agentic,oracle",
-        help="comma-separated baseline ladder",
-    )
-    task_eval.add_argument("--limit-tasks", type=int, help="cap number of tasks (cost control)")
-    task_eval.add_argument("--max-steps", type=int, default=25, help="agent tool-loop ceiling")
-    task_eval.add_argument(
-        "--agent-model", default="", help="gateway model for the agent (default: KI_LLM_MODEL)"
-    )
-    task_eval.add_argument(
-        "--judge-model", default="", help="gateway model for the judge (default: KI_LLM_MODEL)"
-    )
-    task_eval.add_argument("--report", help="write the full report JSON here")
 
     serve = commands.add_parser("serve", help="run admin UI, API, and MCP endpoint")
     serve.add_argument("--host", default="127.0.0.1")
@@ -339,45 +369,23 @@ def main() -> None:
             structure=structure,
             noise_level=args.noise,
         )
-        requested = [k.strip() for k in args.gold.split(",") if k.strip()]
-        unknown = [k for k in requested if k not in ("working_set", "factoid", "qa")]
-        if unknown:
-            raise SystemExit(f"unknown --gold kind(s): {unknown}; use working_set, factoid, qa")
-        gold: dict = {}
-        deterministic = tuple(
-            "instruction_working_set" if k == "working_set" else k
-            for k in requested
-            if k in ("working_set", "factoid")
-        )
-        if deterministic:
-            from knowledge_index.benchmark import write_gold
-
-            gold["deterministic"] = write_gold(args.output, kinds=deterministic)
-        if "qa" in requested:
-            # LLM question gold — needs the model gateway (reachable litellm URL)
-            from knowledge_index.benchmark import generate_llm_gold
-
-            config = ConfigStore(args.config).get()
-            gold["qa"] = generate_llm_gold(
-                args.output,
-                config,
-                per_scenario=args.per_scenario,
-                model=_model_flag(args.gold_model),
-            )
-        summary["gold"] = gold or "none — pass --gold working_set,factoid,qa"
         print(json.dumps(summary, indent=2, ensure_ascii=False))
         return
-    if args.command == "derive-llm-gold":
+    if args.command == "generate-gold":
         # needs the model gateway + config, but no database or index
-        from knowledge_index.benchmark import generate_llm_gold
+        from knowledge_index.benchmark import generate_gold
 
         config = ConfigStore(args.config).get()
-        stats = generate_llm_gold(
+        stats = generate_gold(
             args.corpus_dir,
             config,
             per_scenario=args.per_scenario,
-            model=_model_flag(args.model),
+            model_name=args.model or os.environ.get("KI_LLM_MODEL", ""),
             limit_scenarios=args.limit_scenarios,
+            seed=args.seed,
+            max_gold_docs=args.max_gold_docs,
+            concurrency=args.concurrency,
+            output_dir=args.output_dir,
         )
         print(json.dumps(stats, indent=2, ensure_ascii=False))
         return
@@ -559,27 +567,61 @@ def main() -> None:
             )
         )
     elif args.command == "run-retrieval-eval":
-        from knowledge_index.benchmark import evaluate, evaluate_ladder, resolve
-        from knowledge_index.benchmark.harness import CorpusCoverageError
+        from knowledge_index.benchmark import (
+            evaluate_matrix,
+            render_matrix_markdown,
+            resolve,
+            resolve_presets,
+        )
+        from knowledge_index.benchmark.retrieval_eval import CorpusCoverageError
 
         gold_file = resolve(args.gold)
         try:
-            if args.baseline == "ladder":
-                report = evaluate_ladder(factory, store.get(), gold_file, min_lift=args.min_lift)
-                passed = report["gate"]["passed"]
-            else:
-                report = evaluate(factory, store.get(), gold_file, baseline=args.baseline)
-                passed = report["ethical_wall"]["clean"]
+            report = evaluate_matrix(
+                factory,
+                store.get(),
+                gold_file,
+                presets=resolve_presets(args.presets),
+                min_lift=args.min_lift,
+                concurrency=args.concurrency,
+                checkpoint_dir=args.checkpoint_dir,
+                check_ethical_wall=args.check_walls,
+            )
         except CorpusCoverageError as exc:
             failure = {"error": str(exc), "corpus": exc.coverage}
             print(json.dumps(failure, indent=2, ensure_ascii=False))
             raise SystemExit(1) from exc
-        rendered = json.dumps(report, indent=2, ensure_ascii=False)
         if args.report:
-            Path(args.report).write_text(rendered, encoding="utf-8")
-        print(rendered)
-        if not passed:
+            Path(args.report).write_text(
+                json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+        print(render_matrix_markdown(report))
+        if not report["gate"].get("passed"):
             raise SystemExit(1)
+    elif args.command == "run-agentic-eval":
+        from knowledge_index.benchmark import evaluate_agentic, render_agentic_markdown, resolve
+        from knowledge_index.benchmark.agentic_eval import resolve_configs
+
+        config = store.get()
+        report = evaluate_agentic(
+            factory,
+            config,
+            resolve(args.gold),
+            configs=resolve_configs(args.configs),
+            agent_model=args.agent_model or os.environ.get("KI_LLM_MODEL", ""),
+            judge_model=args.judge_model or os.environ.get("KI_LLM_MODEL", ""),
+            limit=args.limit,
+            max_steps=args.max_steps,
+            seed=args.seed,
+            probe_walls=args.wall_probe,
+            concurrency=args.concurrency,
+            checkpoint_dir=args.checkpoint_dir,
+        )
+        if args.report:
+            Path(args.report).write_text(
+                json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+        print(render_agentic_markdown(report))
     elif args.command == "bench-ingest":
         import time
 
@@ -639,40 +681,6 @@ def main() -> None:
                 else None
             ),
         }
-        rendered = json.dumps(report, indent=2, ensure_ascii=False)
-        if args.report:
-            Path(args.report).write_text(rendered, encoding="utf-8")
-        print(rendered)
-    elif args.command == "run-qa-eval":
-        from knowledge_index.benchmark.qa_eval import evaluate_qa
-
-        config = store.get()
-        report = evaluate_qa(
-            factory,
-            config,
-            args.gold,
-            agent_model=_model_flag(args.agent_model),
-            judge_model=_model_flag(args.judge_model),
-            limit=args.limit,
-        )
-        rendered = json.dumps(report, indent=2, ensure_ascii=False)
-        if args.report:
-            Path(args.report).write_text(rendered, encoding="utf-8")
-        print(rendered)
-    elif args.command == "run-task-eval":
-        from knowledge_index.benchmark.task_eval import evaluate_tasks
-
-        config = store.get()
-        report = evaluate_tasks(
-            factory,
-            config,
-            args.corpus_dir,
-            modes=tuple(m for m in args.modes.split(",") if m.strip()),
-            agent_model=_model_flag(args.agent_model),
-            judge_model=_model_flag(args.judge_model),
-            limit=args.limit_tasks,
-            max_steps=args.max_steps,
-        )
         rendered = json.dumps(report, indent=2, ensure_ascii=False)
         if args.report:
             Path(args.report).write_text(rendered, encoding="utf-8")

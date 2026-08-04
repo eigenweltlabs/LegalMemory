@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import re
+from dataclasses import replace
 from datetime import datetime
 
 import httpx
@@ -109,12 +111,39 @@ class OpenSearchIndex:
         }
 
     def _lexical_body(self, query_text: str, strict_filter: dict, size: int) -> dict:
+        """BM25 over the chunk body, plus the party names the query appears to name.
+
+        Extracted party names are otherwise reachable only through an exact filter
+        nobody sets — measured over real agent traffic, `party` was passed on 1.5%
+        of searches and `practice_area` never. Folding them into the ranked query
+        makes the metadata earn its keep without the caller having to know it is
+        there. Measured on 300 gold requests against this index: recall@20 is
+        unchanged (0.870) but the answering document ranks higher — MRR 0.487 ->
+        0.514, 43 requests improved against 11 worsened (p < 0.001) — for +13.7ms
+        on a 20.7ms leg. It is a ranking aid, not a recall aid.
+        """
+        should: list[dict] = [{"match": {"text": {"query": query_text}}}]
+        boost = self.config.retrieval.metadata_boost
+        if boost > 0:
+            for token in _named_entities(query_text):
+                should.append(
+                    {
+                        "wildcard": {
+                            "parties": {
+                                "value": f"*{token}*",
+                                "case_insensitive": True,
+                                "boost": boost,
+                            }
+                        }
+                    }
+                )
         return {
             "size": size,
             **_SOURCE_EXCLUDES,
             "query": {
                 "bool": {
-                    "must": {"match": {"text": {"query": query_text}}},
+                    "should": should,
+                    "minimum_should_match": 1,
                     "filter": strict_filter["bool"]["filter"],
                 }
             },
@@ -168,7 +197,7 @@ class OpenSearchIndex:
         filters: SearchFilters,
         limit: int,
     ) -> list[dict]:
-        """BM25 leg over the German-analyzed text field, ACL-scoped like kNN."""
+        """BM25 leg over the English-analyzed text field, ACL-scoped like kNN."""
         self.ensure_index()
         strict_filter = _combined_filter(scope, filters)
         if "match_none" in strict_filter:
@@ -200,7 +229,7 @@ class OpenSearchIndex:
         self,
         *,
         query_text: str,
-        query_vector: list[float],
+        query_vector: list[float] | None,
         scope: CompiledAccessScope,
         filters: SearchFilters,
         limit: int,
@@ -209,8 +238,9 @@ class OpenSearchIndex:
 
         Each leg is independently ACL-scoped by the same strict filter — fusion never
         sees an unauthorized row. Returns a dict keyed by leg name; a leg that cannot
-        match (empty query / fully-denied scope) returns an empty list without a
-        network hop for that leg."""
+        match (empty query / fully-denied scope / ``query_vector=None`` for a caller
+        that disabled the semantic leg) returns an empty list without a network hop
+        for that leg."""
         self.ensure_index()
         strict_filter = _combined_filter(scope, filters)
         size = _oversample(limit)
@@ -219,7 +249,12 @@ class OpenSearchIndex:
         # (leg name, body or None-if-skippable). Order is preserved end to end.
         legs: list[tuple[str, dict | None]] = [
             ("lexical", None if denied else self._lexical_body(query_text, strict_filter, size)),
-            ("semantic", self._knn_body(query_vector, strict_filter, size)),
+            (
+                "semantic",
+                None
+                if denied or query_vector is None
+                else self._knn_body(query_vector, strict_filter, size),
+            ),
             (
                 "identifier",
                 None
@@ -299,7 +334,7 @@ class OpenSearchIndex:
 
     def _mapping_properties(self) -> dict:
         return {
-            "text": {"type": "text", "analyzer": "legal_german"},
+            "text": {"type": "text", "analyzer": "legal_english"},
             "project_id": {"type": "keyword"},
             "document_id": {"type": "keyword"},
             "document_version_id": {"type": "keyword"},
@@ -355,6 +390,68 @@ class OpenSearchIndex:
         )
         pushed.raise_for_status()
 
+    #: filters whose stored values are human-readable enough to hand back.
+    #: doc_type is deliberately absent — its values are opaque ontology node ids
+    #: ("RC5oECr2QXab5MFKmjUd7y6"), which tell a caller nothing it can act on.
+    _SUGGESTIBLE = {"party": "parties", "identifier": "identifiers"}
+
+    def suggest_filter_values(
+        self,
+        *,
+        scope: CompiledAccessScope,
+        filters: SearchFilters,
+        limit: int = 5,
+    ) -> dict[str, list[str]]:
+        """Near-miss values for the filters that just returned nothing.
+
+        A filtered search that returns an empty list tells the caller nothing about
+        *why*, so an agent either guesses again or wanders off to another matter —
+        both observed. Each suggestible filter is re-run with that one filter
+        dropped, and the field's surviving values in the caller's own scope are
+        offered back. Only ever called on the empty path, so the normal search pays
+        nothing for it.
+        """
+        out: dict[str, list[str]] = {}
+        for name, field in self._SUGGESTIBLE.items():
+            wanted = getattr(filters, name, None)
+            if not wanted:
+                continue
+            # Drop the failing filter, keep every other constraint and the ACL.
+            relaxed = replace(filters, **{name: None})
+            body = {
+                "size": 0,
+                "query": _combined_filter(scope, relaxed),
+                "aggs": {"v": {"terms": {"field": field, "size": 400}}},
+            }
+            try:
+                response = httpx.post(
+                    f"{self.base_url}/{self.index_name}/_search", json=body, timeout=30
+                )
+                response.raise_for_status()
+                buckets = response.json()["aggregations"]["v"]["buckets"]
+            except Exception:  # a suggestion is a courtesy; never fail the search for it
+                continue
+            needle = str(wanted).casefold()
+            # Match on any word of the requested value, not just the whole string:
+            # a caller asking for "Huang-Whitfield" should be shown the Whitfield
+            # entities. Short words are dropped so "of"/"AG" cannot match everything.
+            tokens = [t for t in re.split(r"[^0-9a-z]+", needle) if len(t) >= 3]
+            near = [
+                value
+                for value in (str(b["key"]) for b in buckets)
+                if not _looks_like_id(value)
+                and (
+                    needle in value.casefold()
+                    or any(token in value.casefold() for token in tokens)
+                )
+            ]
+            # No near miss means the value simply is not here. Offering unrelated
+            # values would be worse than silence — a list of arbitrary case numbers
+            # reads as a menu and invites the caller to pick one at random.
+            if near:
+                out[name] = near[:limit]
+        return out
+
     def ensure_index(self) -> None:
         if self._index_ready:
             return
@@ -372,7 +469,7 @@ class OpenSearchIndex:
                 "settings": {
                     "index.knn": True,
                     "number_of_replicas": 0,
-                    "analysis": {"analyzer": {"legal_german": {"type": "german"}}},
+                    "analysis": {"analyzer": {"legal_english": {"type": "english"}}},
                 },
                 "mappings": {
                     "dynamic": False,
@@ -392,6 +489,42 @@ class OpenSearchIndex:
 
 def _oversample(limit: int) -> int:
     return min(max(limit * 5, 50), 500)
+
+
+# Words that open a question are capitalised by grammar, not because they name
+# anything — without this every request would match on its first word.
+_SENTENCE_OPENERS = frozenset(
+    """What Which When Where Who Whose Why How Pull Does Did Have Has Can Could Should
+    Would Check Find Show Give Tell Look There This That These Those Please""".split()
+)
+
+
+def _named_entities(text: str, *, limit: int = 4) -> list[str]:
+    """Capitalised words a query uses to name a party, cheaply and without a model.
+
+    Deliberately crude: a false positive costs one extra should-clause that matches
+    no party, which changes nothing. Bounded so a long query cannot fan out.
+    """
+    out: list[str] = []
+    for word in text.split():
+        # Keep the leading run of letters/digits only: it drops trailing punctuation
+        # and the possessive/contraction tail, so "What's" is recognised as the
+        # opener "What" rather than sneaking through as its own name.
+        token = re.split(r"[^0-9A-Za-z]", word, maxsplit=1)[0]
+        if len(token) >= 4 and token[:1].isupper() and token not in _SENTENCE_OPENERS:
+            if token not in out:
+                out.append(token)
+        if len(out) >= limit:
+            break
+    return out
+
+
+_UUID_SHAPE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
+
+
+def _looks_like_id(value: str) -> bool:
+    """``parties`` mixes resolved entity ids with canonical names; only names help."""
+    return bool(_UUID_SHAPE.match(value))
 
 
 def _combined_filter(scope: CompiledAccessScope, filters: SearchFilters) -> dict:
@@ -416,17 +549,64 @@ def _combined_filter(scope: CompiledAccessScope, filters: SearchFilters) -> dict
         ("matter_id", filters.matter_id),
         ("version_status", filters.version_status),
         ("language", filters.language),
-        # F3/F4 exact-term filters. `identifier` matches the typed identifier
-        # keyword (distinct from the fuzzy identifiers_text ranking leg); `party`
-        # matches a party_id or canonical name; `clause_type` a clause-facet node
-        # id on clause chunks; `chunk_kind` scopes to body/profile/clause chunks.
-        ("identifiers", filters.identifier),
-        ("parties", filters.party),
+        # F3/F4 exact-term filters. `party` matches a party_id or canonical name;
+        # `clause_type` a clause-facet node id on clause chunks; `chunk_kind` scopes
+        # to body/profile/clause chunks. (`identifier` is handled below — a raw
+        # keyword term match was too strict to be usable.)
         ("clause_type", filters.clause_type),
         ("chunk_kind", filters.chunk_kind),
     ):
         if value:
             clauses.append({"term": {field: value}})
+    if filters.party:
+        # `parties` is a keyword field holding BOTH resolved entity ids and canonical
+        # names, so an exact term match only works for a caller who already knows
+        # which of the two a given document stored, spelled exactly. Callers do not:
+        # measured over real agent calls, 16 of 25 party filters that returned nothing
+        # used a short form of a name that is stored in full ("Thornton" against
+        # "Thornton & Associates LLP"). Match the id exactly, the name loosely.
+        clauses.append(
+            {
+                "bool": {
+                    "should": [
+                        {"term": {"parties": {"value": filters.party, "case_insensitive": True}}},
+                        {"prefix": {"parties": {"value": filters.party, "case_insensitive": True}}},
+                        {
+                            "wildcard": {
+                                "parties": {
+                                    "value": f"*{filters.party}*",
+                                    "case_insensitive": True,
+                                }
+                            }
+                        },
+                    ],
+                    "minimum_should_match": 1,
+                }
+            }
+        )
+    if filters.identifier:
+        # `identifiers` is a raw keyword field holding values copied verbatim from
+        # the document ("LF-2024-0917", "Agreement No. CX-MSA-2025-0042"), so an
+        # exact term match is case- and punctuation-sensitive against whatever the
+        # caller typed. Measured: 200 of 205 real agent calls returned zero. Accept
+        # the exact value, OR the same value as a phrase over the analyzed
+        # identifier text, which is case-insensitive and tolerates the caller's
+        # separators and any prefix words around the value.
+        clauses.append(
+            {
+                "bool": {
+                    "should": [
+                        {"term": {"identifiers": filters.identifier}},
+                        {"match_phrase": {"identifiers_text": filters.identifier}},
+                    ],
+                    "minimum_should_match": 1,
+                }
+            }
+        )
+    # chunk_kinds (terms) is the broad kind scope; a single chunk_kind term above is
+    # narrower and simply ANDs with it when both are set.
+    if filters.chunk_kinds:
+        clauses.append({"terms": {"chunk_kind": filters.chunk_kinds}})
     date_range = _date_range(filters.date_from, filters.date_to)
     if date_range:
         clauses.append({"range": {"doc_date": date_range}})

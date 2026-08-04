@@ -13,9 +13,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections.abc import Callable
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from knowledge_index.config import AppConfig
@@ -324,8 +325,20 @@ def _matter_summary(session: Session, matter: Matter) -> dict:
     }
 
 
-def search_matters(session: Session, config: AppConfig, query: str, *, limit: int = 8) -> list[dict]:
-    """Rank existing matters against a free-text query (party, ref, title, topic)."""
+def search_matters(
+    session: Session,
+    config: AppConfig,
+    query: str,
+    *,
+    limit: int = 8,
+    include_semantic: bool = True,
+) -> list[dict]:
+    """Rank existing matters against a free-text query (party, ref, title, topic).
+
+    ``include_semantic=False`` skips the embedding leg for callers that must stay
+    cheap — the create-time replay runs under the matter-create lock, and an
+    embedding call per holder serialized the whole cold-start classify wave
+    (measured 2026-08-01: 1,057 connections queued on the advisory lock)."""
     query = (query or "").strip()
     if not query:
         return []
@@ -333,16 +346,19 @@ def search_matters(session: Session, config: AppConfig, query: str, *, limit: in
 
     # Semantic: nearest already-indexed chunks -> their matters (skips cleanly when the
     # index is cold, i.e. nothing indexed yet on a fresh estate).
-    try:
-        from knowledge_index.search_backend import OpenSearchIndex
+    if include_semantic:
+        try:
+            from knowledge_index.search_backend import OpenSearchIndex
 
-        vector = embed_text(query, config)
-        for rank, hit in enumerate(OpenSearchIndex(config).matter_hits_by_vector(vector, size=40)):
-            matter_id = (hit.get("_source") or {}).get("matter_id")
-            if matter_id:
-                scored[matter_id] = max(scored.get(matter_id, 0.0), 1.0 / (10 + rank))
-    except Exception:
-        pass
+            vector = embed_text(query, config)
+            for rank, hit in enumerate(
+                OpenSearchIndex(config).matter_hits_by_vector(vector, size=40)
+            ):
+                matter_id = (hit.get("_source") or {}).get("matter_id")
+                if matter_id:
+                    scored[matter_id] = max(scored.get(matter_id, 0.0), 1.0 / (10 + rank))
+        except Exception:
+            pass
 
     # Lexical: matter title contains the query.
     for matter in session.scalars(
@@ -392,6 +408,38 @@ def _advisory_xact_lock(session: Session, key: str) -> None:
     session.execute(select(func.pg_advisory_xact_lock(lock_id)))
 
 
+def _matter_by_reference(
+    session: Session, project_id: str | None, reference: str
+) -> Matter | None:
+    """Find the matter carrying this exact reference.
+
+    reference_numbers is jsonb, so on Postgres this is a containment lookup the
+    GIN index answers directly. This used to load every Matter row and scan it in
+    Python while holding the matter-ref lock -- fine at 60 matters, quadratic
+    across the ~1,300 this corpus creates, and the reason matter creation slowed
+    to ~2 per five minutes. SQLite has no jsonb operator, so tests keep the scan.
+    """
+    reference = (reference or "").strip().upper()
+    if not reference:
+        return None
+    if session.bind is not None and session.bind.dialect.name == "postgresql":
+        stmt = select(Matter).where(
+            text("matters.reference_numbers @> cast(:ref as jsonb)")
+        ).params(ref=json.dumps([reference]))
+        if project_id:
+            stmt = stmt.where(Matter.project_id == project_id)
+        return session.scalars(stmt.limit(1)).first()
+    return next(
+        (
+            item
+            for item in session.scalars(select(Matter)).all()
+            if reference in (item.reference_numbers or [])
+            and (not project_id or item.project_id == project_id)
+        ),
+        None,
+    )
+
+
 def get_or_create_matter(
     session_factory: sessionmaker[Session],
     *,
@@ -415,15 +463,7 @@ def get_or_create_matter(
         return {"error": "title must not be empty"}
     with session_factory() as session:
         _advisory_xact_lock(session, f"matter-ref:{project_id or 'none'}:{reference}")
-        existing = next(
-            (
-                item
-                for item in session.scalars(select(Matter)).all()
-                if reference in (item.reference_numbers or [])
-                and (not project_id or item.project_id == project_id)
-            ),
-            None,
-        )
+        existing = _matter_by_reference(session, project_id, reference)
         if existing is not None:
             summary = _matter_summary(session, existing)
             summary["created"] = False
@@ -465,33 +505,126 @@ def classification_tools(
     caller can enforce that a submitted matter_id was actually looked at, not invented.
     """
     seen = seen_matter_ids if seen_matter_ids is not None else set()
+    # Enforced create protocol (2026-08-01 audit): the prompt's "create IMMEDIATELY
+    # after your searches came up empty" was only a request, and a create acting on
+    # a minutes-old empty search minted duplicate "splinter" matters when a sibling
+    # created the real one in between. Track the call sequence so the tool can
+    # reject stale creates, and remember the last queries so the create can replay
+    # them at the true decision moment.
+    last_call: list[str | None] = [None]
+    last_queries: list[str] = []
 
     def run_search(args: dict) -> str:
-        results = search_matters(session, config, str(args.get("query", "")))
+        query = str(args.get("query", ""))
+        results = search_matters(session, config, query)
         seen.update(result["id"] for result in results)
+        last_call[0] = "search_matters"
+        if query.strip():
+            last_queries.append(query.strip())
+            del last_queries[:-3]  # keep the tail; older queries are stale anyway
         return json.dumps(results, ensure_ascii=False)
 
     def run_peek(args: dict) -> str:
         result = peek_matter(session, str(args.get("matter_id", "")))
         if "id" in result:
             seen.add(result["id"])
+        last_call[0] = "peek_matter"
         return json.dumps(result, ensure_ascii=False)
+
+    def run_list_folder(_args: dict) -> str:
+        last_call[0] = "list_folder"
+        return folder_ls(session, source_id, locus_path)
 
     def run_create(args: dict) -> str:
         assert session_factory is not None
         requested_reference = str(args.get("reference_number") or "").strip()
-        result = get_or_create_matter(
-            session_factory,
-            project_id=project_id,
-            reference_number=requested_reference or (fallback_reference or ""),
-            title=str(args.get("title", "")),
-            provenance=provenance,
-            # a matter created under the folder-derived placeholder is a triage
-            # pile, not a real case file — mark it so the UI can surface it
-            status="unknown" if requested_reference else "unassigned",
-        )
+        title = str(args.get("title", "")).strip()
+        if last_call[0] not in ("search_matters", "create_matter_refused"):
+            last_call[0] = "create_matter"
+            return json.dumps(
+                {
+                    "error": "stale_search",
+                    "message": (
+                        "create_matter must be your IMMEDIATELY NEXT action after "
+                        "search_matters — your last search is stale and other documents "
+                        "classify in parallel. Search again now, then create."
+                    ),
+                }
+            )
+        # Replay the agent's own recent queries (plus the exact reference and title
+        # it is about to use) at the true decision moment, holding the create lock,
+        # so two concurrent creators serialize and the later one is guaranteed to
+        # see what the earlier one committed — regardless of which reference string
+        # each model chose. The lock is sharded by the create key and the replay is
+        # lexical-only: one global lock around an embedding call serialized the
+        # whole cold-start classify wave (measured: 1,057 advisory-lock waiters).
+        lock_key = (requested_reference or title).strip().upper()
+        # Fast path, deliberately outside the lock: during the cold-start wave
+        # most documents of a matter reach create_matter after some sibling has
+        # already created it, and their only possible outcome is the refusal
+        # below. Answering here keeps them off the lock queue entirely -- with
+        # thousands of classify tasks live, that queue is what stalls the stage.
+        # Correctness is unchanged: anything that passes this check still does
+        # the authoritative replay under the lock.
+        if requested_reference:
+            prior = _matter_by_reference(session, project_id, requested_reference)
+            if prior is not None and prior.id not in seen:
+                summary = _matter_summary(session, prior)
+                seen.add(prior.id)
+                last_call[0] = "create_matter_refused"
+                return json.dumps(
+                    {
+                        "error": "matter_list_changed",
+                        "new_matters": [summary],
+                        "message": (
+                            "these matters were created since you searched — assign to "
+                            "one if it is this document's matter, or call create_matter "
+                            "again to confirm a genuinely new matter"
+                        ),
+                    },
+                    ensure_ascii=False,
+                )
+        with session_factory() as replay_session:
+            _advisory_xact_lock(
+                replay_session, f"matter-create:{project_id or 'none'}:{lock_key}"
+            )
+            fresh: dict[str, dict] = {}
+            for query in {*last_queries, requested_reference, title} - {""}:
+                for row in search_matters(
+                    replay_session, config, query, include_semantic=False
+                ):
+                    if row["id"] not in seen:
+                        fresh[row["id"]] = row
+            if fresh:
+                seen.update(fresh)
+                last_call[0] = "create_matter_refused"
+                return json.dumps(
+                    {
+                        "error": "matter_list_changed",
+                        "new_matters": list(fresh.values()),
+                        "message": (
+                            "these matters were created since you searched — assign to "
+                            "one if it is this document's matter, or call create_matter "
+                            "again to confirm a genuinely new matter"
+                        ),
+                    },
+                    ensure_ascii=False,
+                )
+            # Create while the outer session still holds the create lock: a racing
+            # creator blocks on the lock above and then replays against our commit.
+            result = get_or_create_matter(
+                session_factory,
+                project_id=project_id,
+                reference_number=requested_reference or (fallback_reference or ""),
+                title=title,
+                provenance=provenance,
+                # a matter created under the folder-derived placeholder is a triage
+                # pile, not a real case file — mark it so the UI can surface it
+                status="unknown" if requested_reference else "unassigned",
+            )
         if "id" in result:
             seen.add(result["id"])
+        last_call[0] = "create_matter"
         return json.dumps(result, ensure_ascii=False)
 
     tools = [
@@ -522,7 +655,7 @@ def classification_tools(
                 "document is filed and which matter its neighbours belong to."
             ),
             parameters={"type": "object", "properties": {}},
-            handler=lambda _args: folder_ls(session, source_id, locus_path),
+            handler=run_list_folder,
         ),
         AgentTool(
             name="peek_matter",
@@ -548,8 +681,10 @@ def classification_tools(
                     "instead). Other documents of the same matter may be classifying in "
                     "parallel and only see this matter once it is created, so call this "
                     "IMMEDIATELY after your searches came up empty — never search, then read "
-                    "around, then create. Omit reference_number only when the document and "
-                    "path truly show none; a stable placeholder is derived from the folder."
+                    "around, then create; a create that does not directly follow "
+                    "search_matters is rejected as stale. Omit reference_number only when the "
+                    "document and path truly show none; a stable placeholder is derived from "
+                    "the folder."
                 ),
                 parameters={
                     "type": "object",
@@ -639,8 +774,44 @@ def search_entities(session: Session, config: AppConfig, query: str, *, limit: i
     return results
 
 
+_ENTITY_NAME_SUFFIXES = frozenset(
+    "ag gmbh kg se sa nv bv ab oy plc llp llc lp ltd inc corp co pc pllc "
+    "gbr ohg ug mbh sarl sas spa srl".split()
+)
+
+
+def _normalize_entity_name(text: str) -> str:
+    """Lowercased, punctuation-free, trailing-legal-suffix-free form of a name.
+
+    Used ONLY to judge whether a search_entities query plausibly looked for a
+    party — never to merge entities (merging stays the agent's call, and the
+    deterministic net in ``_resolve_document_parties`` matches verbatim names)."""
+    tokens = re.sub(r"[^\w\s]", " ", (text or "").lower()).split()
+    while tokens and tokens[-1] in _ENTITY_NAME_SUFFIXES:
+        tokens.pop()
+    return " ".join(tokens)
+
+
+def entity_search_covered(name: str, searched_queries: set[str]) -> bool:
+    """True when one of the agent's search_entities queries covered this party:
+    after normalization, one string contains the other ("Vantage Prime Bank"
+    covers "Vantage Prime Bank AG"). A name that normalizes to nothing needs no
+    search."""
+    normalized = _normalize_entity_name(name)
+    if not normalized:
+        return True
+    for query in searched_queries:
+        candidate = _normalize_entity_name(query)
+        if candidate and (candidate in normalized or normalized in candidate):
+            return True
+    return False
+
+
 def party_resolution_tools(
-    session: Session, config: AppConfig, seen_ids: set[str]
+    session: Session,
+    config: AppConfig,
+    seen_ids: set[str],
+    searched_queries: set[str] | None = None,
 ) -> list[AgentTool]:
     """The tool the extraction agent uses to resolve a party to a firm-wide entity:
     search the firm's known parties/clients (semantic-first, exactly like
@@ -648,10 +819,15 @@ def party_resolution_tools(
 
     ``seen_ids`` accumulates every id the agent is shown, so the stage can reject an
     existing_id the agent never actually saw (the "name alone is not enough" guard).
-    """
+    ``searched_queries`` accumulates every query the agent ran, so the stage can
+    equally reject a CREATE for a party the agent never searched — without it,
+    create is the frictionless default and the entity layer fills with twins
+    (the 2026-08-01 audit: 63% duplicate party rows, 23.7% reuse)."""
 
     def _search(args: dict) -> str:
         needle = str(args.get("query", "")).strip()
+        if searched_queries is not None and needle:
+            searched_queries.add(needle)
         results = search_entities(session, config, needle) if needle else []
         for row in results:
             seen_ids.add(row["id"])

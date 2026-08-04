@@ -381,6 +381,7 @@ def test_all_document_query_paths_return_exact_citations(
     seeded = _seed_cited_document(session)
     service = RetrievalService(session, AppConfig(artifact_dir=tmp_path / "artifacts"))
 
+    authorized = service._bulk_authorized_sources(["version-1"], PRINCIPALS)
     hit = service._hit_from_source(
         {
             "document_id": "document-1",
@@ -392,9 +393,9 @@ def test_all_document_query_paths_return_exact_citations(
                 "locus": "Liability",
             },
         },
-        principals=PRINCIPALS,
         query_terms={"liability"},
         score=1.0,
+        authorized_sources=authorized.get("version-1", []),
         chunk_id="chunk-1",
     )
     assert hit is not None

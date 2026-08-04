@@ -29,6 +29,10 @@ class SearchFilters:
     party: str | None = None
     clause_type: str | None = None
     chunk_kind: str | None = None
+    # chunk_kinds: restrict to a *set* of chunk kinds (terms semantics). Set by
+    #   RetrievalService from config.retrieval.search_chunk_kinds; a single
+    #   chunk_kind above is the narrower filter and wins when both are present.
+    chunk_kinds: list[str] | None = None
     # practice_area: an Area-of-Law ontology node id, SUBTREE semantics (a parent area
     #   matches its children). The practice area lives on the Matter, not on the chunk, so
     #   RetrievalService resolves this into ``matter_ids`` (the matters it covers) BEFORE the

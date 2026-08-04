@@ -103,7 +103,8 @@ class ExtractedParty(BaseModel):
         default=None,
         description="The id of an existing entity returned by search_entities, when this "
         "party IS that already-known entity. null to create a new one. Reuse an id ONLY "
-        "when identifiers or the matter context confirm it — never on name similarity alone.",
+        "when identifiers or the matter context confirm it — never on name similarity alone. "
+        "null is only accepted for a party you actually searched with search_entities.",
     )
     kind: str = Field(
         default="legal_entity",
@@ -494,13 +495,14 @@ METADATA_SYSTEM = (
     "(a) Give its role on THIS document, and its CANONICAL legal name only — strip the "
     "address/seat, register text, and defined-term labels so the same entity reads "
     "identically everywhere.\n"
-    "(b) Call search_entities with the party's name (and any register number/LEI) to see "
-    "whether the firm already knows it. If a returned candidate is the SAME real-world "
-    "entity, put its id in existing_id; a matching NAME ALONE is never enough — different "
-    "companies share names, so reuse an id only when identifiers or the matter context "
-    "agree. Otherwise leave existing_id null to create a new entity.\n"
+    "(b) Call search_entities for EVERY party — with its name (and any register "
+    "number/LEI) — BEFORE deciding whether it is new. If a returned candidate is the "
+    "SAME real-world entity, put its id in existing_id; a matching NAME ALONE is never "
+    "enough — different companies share names, so reuse an id only when identifiers or "
+    "the matter context agree. Otherwise leave existing_id null to create a new entity.\n"
     "(c) Any non-null existing_id MUST be an id returned by search_entities in this "
-    "conversation."
+    "conversation, and a null existing_id is only accepted for a party you actually "
+    "searched."
 )
 
 DECISION_SYSTEM = (
