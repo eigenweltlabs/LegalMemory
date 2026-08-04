@@ -1,4 +1,4 @@
-# CI-only overrides. Two memory settings, nothing else.
+# CI-only overrides. Two memory settings and one port, nothing else.
 #
 # The round-trip job deliberately runs docker-compose.yml as it ships — the ownership of
 # the snapshot repository, the read-only mounts the app container backs up through and the
@@ -18,6 +18,14 @@ services:
       # because tests/conftest.py's live_stack fixture skips the whole suite when it is
       # missing — so one worker that answers /health is the entire requirement.
       DOCLING_SERVE_ENG_LOC_NUM_WORKERS: "1"
+    # docker-compose.yml stopped publishing this port so a fleet run can scale docling
+    # to N replicas, which cannot happen while N containers claim one host port. CI runs
+    # exactly one replica and scripts/ci-stack.sh probes /health from the runner rather
+    # than from inside the network, so the binding is restored here — for this job only.
+    # Without it that probe can never succeed and `up` fails ten minutes later on a
+    # timeout that says nothing about ports.
+    ports:
+      - "127.0.0.1:${DOCLING_PORT:-5001}:5001"
 
   opensearch:
     environment:

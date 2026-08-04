@@ -18,6 +18,7 @@ from knowledge_index.config import AppConfig
 from knowledge_index.db.models import Blob, ProcessingState, Source, SourceObject
 from knowledge_index.pipeline.providers import AgentTool, ModelOutputInvalid, chat_agent
 from knowledge_index.pipeline.runner import PipelineRunner
+from tests.conftest import TEST_LLM_MODEL
 
 
 class _Result(BaseModel):
@@ -56,9 +57,9 @@ def _tool_call_body(name: str, arguments: dict, *, prompt_tokens: int = 1000) ->
     }
 
 
-def _slot():
-    config = AppConfig()
-    return config.models.extract, config
+def _agent() -> tuple[str, AppConfig]:
+    """The gateway-served model name and the config, as chat_agent takes them."""
+    return TEST_LLM_MODEL, AppConfig()
 
 
 def _noop_tool(calls: list[dict]) -> AgentTool:
@@ -71,7 +72,7 @@ def _noop_tool(calls: list[dict]) -> AgentTool:
 
 
 def test_identical_repeated_call_is_warned_then_aborted(monkeypatch) -> None:
-    slot, config = _slot()
+    model, config = _agent()
     monkeypatch.setenv("LITELLM_MASTER_KEY", "sk-test")
     monkeypatch.setattr(providers_module, "_record_usage", lambda *a, **k: None)
     monkeypatch.setattr(
@@ -82,7 +83,7 @@ def test_identical_repeated_call_is_warned_then_aborted(monkeypatch) -> None:
     executed: list[dict] = []
     with pytest.raises(ModelOutputInvalid, match="degenerate loop"):
         chat_agent(
-            slot,
+            model,
             config,
             system="s",
             user="u",
@@ -95,7 +96,7 @@ def test_identical_repeated_call_is_warned_then_aborted(monkeypatch) -> None:
 
 
 def test_prompt_token_budget_aborts(monkeypatch) -> None:
-    slot, config = _slot()
+    model, config = _agent()
     monkeypatch.setenv("LITELLM_MASTER_KEY", "sk-test")
     monkeypatch.setattr(providers_module, "_record_usage", lambda *a, **k: None)
     monkeypatch.setattr(
@@ -107,7 +108,7 @@ def test_prompt_token_budget_aborts(monkeypatch) -> None:
     )
     with pytest.raises(ModelOutputInvalid, match="prompt tokens"):
         chat_agent(
-            slot,
+            model,
             config,
             system="s",
             user="u",

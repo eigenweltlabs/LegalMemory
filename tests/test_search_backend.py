@@ -61,9 +61,10 @@ def test_multi_search_runs_three_legs_in_one_request(monkeypatch) -> None:
     assert captured["content"].decode("utf-8").strip("\n").count("\n") == 5
 
 
-def test_multi_search_denied_scope_runs_only_semantic(monkeypatch) -> None:
-    # A fully-denied scope short-circuits the lexical + identifier legs (they can only
-    # return authorized rows), but the semantic leg still runs with the deny filter.
+def test_multi_search_denied_scope_skips_every_leg(monkeypatch) -> None:
+    # A fully-denied scope short-circuits all three legs, semantic included: each is
+    # ACL-scoped by the same match_none filter, so none of them can match anything and
+    # the round-trip is skipped entirely rather than spent proving that.
     index, captured = _index(
         monkeypatch,
         filter_body={"match_none": {}},
@@ -77,8 +78,31 @@ def test_multi_search_denied_scope_runs_only_semantic(monkeypatch) -> None:
         limit=5,
     )
     assert result == {"lexical": [], "semantic": [], "identifier": []}
-    # Only one leg body was sent (semantic).
-    assert captured["content"].decode("utf-8").strip("\n").count("\n") == 1
+    # No leg was active, so nothing was sent at all.
+    assert captured == {}
+
+
+def test_multi_search_without_a_vector_skips_the_semantic_leg(monkeypatch) -> None:
+    # A caller that disabled the semantic leg passes query_vector=None; the other two
+    # still run, in one round-trip.
+    index, captured = _index(
+        monkeypatch,
+        filter_body={"bool": {"filter": []}},
+        responses=[
+            {"hits": {"hits": [{"_id": "lex"}]}},
+            {"hits": {"hits": [{"_id": "ident"}]}},
+        ],
+    )
+    result = index.multi_search(
+        query_text="Aktenzeichen 5 O 12/23",
+        query_vector=None,
+        scope=None,
+        filters=None,
+        limit=5,
+    )
+    assert result == {"lexical": [{"_id": "lex"}], "semantic": [], "identifier": [{"_id": "ident"}]}
+    # Two active legs -> two header/body pairs -> four NDJSON lines.
+    assert captured["content"].decode("utf-8").strip("\n").count("\n") == 3
 
 
 def test_multi_search_raises_on_leg_error(monkeypatch) -> None:
