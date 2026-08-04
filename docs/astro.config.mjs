@@ -1,6 +1,8 @@
 import { defineConfig } from "astro/config";
 import starlight from "@astrojs/starlight";
 
+import { remarkBaseLinks } from "./src/plugins/base-links.mjs";
+
 // The public URL the site is deployed under. Deployments set DOCS_SITE_URL;
 // the appliance itself learns the same value through KI_DOCS_URL so the admin
 // UI can link here.
@@ -18,9 +20,14 @@ export default defineConfig({
   // With a base path, `/docs/page` and `/docs/page/` must both resolve; the
   // default would emit only one and 404 the other behind a proxy.
   trailingSlash: "ignore",
+  // Pages link to each other from the site root; this puts the deployment's
+  // base path back on the front of those links so they survive a sub-path.
+  markdown: { remarkPlugins: [[remarkBaseLinks, { base }]] },
   integrations: [
     starlight({
       title: "LegalMemory",
+      // The same prefix for links that live in frontmatter rather than prose.
+      routeMiddleware: "./src/starlightRouteData.js",
       description:
         "Open-source, on-prem legal knowledge index: a continuously synced shadow index over a firm's document estate, exposed through MCP.",
       social: [
