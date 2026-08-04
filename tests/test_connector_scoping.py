@@ -80,7 +80,17 @@ def test_only_folder_shaped_sources_advertise_scoping():
     Advertising it would put a folder picker in front of an operator that cannot work.
     """
     scoped = {spec.short_name for spec in CATALOG if spec.supports_scoping}
-    assert scoped == {"sharepoint_online", "onedrive", "google_drive", "dropbox", "box", "clio"}
+    assert scoped == {
+        "sharepoint_online",
+        "onedrive",
+        "google_drive",
+        "dropbox",
+        "box",
+        "clio",
+        # NetDocuments picks by cabinet: flat, like Clio's matter list, but a real
+        # unit of selection — and the one a firm draws its walls around.
+        "netdocuments",
+    }
 
 
 # ---------------------------------------------------------------------------

@@ -452,3 +452,51 @@ providers:
       note: >-
         A bot token reads history only in channels the bot has joined. Invite it with
         /invite @<app name> in every public or private channel that should be indexed.
+
+  netdocuments:
+    oauth_type: with_refresh
+    # NetDocuments runs isolated regional services. Authorization always starts at the
+    # US-hosted sign-in page, which redirects the firm to its own region; the token
+    # exchange, and every later API call, must go to the region the repository lives in.
+    # This entry serves the EU region; other regions need their own entry.
+    authorize_url: https://vault.netvoyage.com/neWeb2/OAuth.aspx
+    token_url: https://api.eu.netdocuments.com/v1/OAuth
+    # NetDocuments expects the client credentials as HTTP Basic on the token call, not
+    # in the form body. Sending them in the body returns invalid_client.
+    client_credential_location: header
+    # Read is the whole grant. "organize" would let this appliance change ACLs and
+    # "edit"/"delete_doc" would let it alter a firm's documents; a shadow index needs
+    # neither and must not be able to do either.
+    scope: read
+    registration:
+      console: NetDocuments Developer Portal
+      console_url: https://netdocuments.force.com/login
+      create: >-
+        The portal account is not self-service. Open a support request at
+        support.netdocuments.com with help-desk field "API Support" and subject
+        "Request Dev Portal account"; the account is created on that ticket. Then
+        Applications → New.
+      app_type: >-
+        Application type must be REST and client type Confidential (Authorization Code
+        grant). A public client cannot hold the client secret this connection needs.
+      redirect_field: >-
+        Enter it as the application's Redirect URI exactly, including scheme and port.
+      scope_label: OAuth scopes requested at sign-in
+      scope_location: >-
+        Requested automatically in the authorization URL; nothing to type. NetDocuments
+        defines read, organize, edit, delete_doc, delete_container, lookup and admin —
+        this appliance asks for read alone.
+      consent: >-
+        A repository administrator maps the application's client id to an account in
+        Repository Administration → Service Account. Until that mapping exists the
+        sign-in succeeds and every API call comes back empty.
+      secret: >-
+        The application page shows Client Id and Client Secret once it is saved.
+      account: >-
+        Authorize with a dedicated account whose cabinet access is exactly what the firm
+        wants searchable. Cabinets that account cannot open are never listed, so they
+        are never indexed.
+      note: >-
+        Region matters twice. The repository's region decides the API base URL in this
+        connection's settings and the token endpoint above; a token issued for one
+        region is rejected by another.

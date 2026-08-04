@@ -73,6 +73,56 @@ class ClioConfig(SourceConfig):
     )
 
 
+class NetDocumentsConfig(SourceConfig):
+    """NetDocuments configuration schema."""
+
+    api_base_url: str = Field(
+        default="https://api.eu.netdocuments.com",
+        title="Region API base URL",
+        description=(
+            "NetDocuments runs isolated regional services and a repository lives in "
+            "exactly one of them. EU firms use https://api.eu.netdocuments.com, US "
+            "https://api.vault.netvoyage.com, AU https://api.au.netdocuments.com. It "
+            "must match the region the repository is hosted in; a token issued in one "
+            "region is not accepted in another."
+        ),
+    )
+
+    @field_validator("api_base_url")
+    @classmethod
+    def validate_api_base_url_ssrf(cls, v: str) -> str:
+        """Validate the region URL for SSRF safety."""
+        validate_url(v.strip())
+        return v.strip().rstrip("/")
+
+    mirror_permissions: bool = Field(
+        default=True,
+        title="Mirror NetDocuments Access",
+        description=(
+            "Mirror cabinet and workspace group access so content is retrievable only "
+            "by the groups that hold rights on it in NetDocuments, with those groups "
+            "expanded to their members. When false, access is left unknown and nothing "
+            "is retrievable until an administrator grants it at the project level."
+        ),
+    )
+
+    inherit_container_access_for_documents: bool = Field(
+        default=False,
+        title="Let documents inherit their container's access",
+        description=(
+            "OFF by default, and the default is the safe one. NetDocuments lets a "
+            "single document carry an access list narrower than the workspace it sits "
+            "in, which is how a firm restricts one memo inside an otherwise open "
+            "matter. This connector reads that per-document list when the profile "
+            "carries it; where it does not, the document stays fail-closed. Turning "
+            "this on makes such a document inherit its container's access instead, "
+            "which publishes exactly the overrides that exist to be narrower. Turn it "
+            "on only for a repository where document-level overrides are known not to "
+            "be used."
+        ),
+    )
+
+
 class ConfluenceConfig(SourceConfig):
     """Confluence configuration schema."""
 

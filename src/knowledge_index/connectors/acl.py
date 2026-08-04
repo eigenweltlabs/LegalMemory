@@ -206,6 +206,97 @@ def box_collaborations_to_access(entries: list[dict[str, Any]] | None) -> Access
     return AccessControl(viewers=sorted(set(viewers)), is_public=False)
 
 
+# ------------------------------------------------------------------- NetDocuments
+
+# NetDocuments grants a cabinet right as a single letter. V/E/S/A all imply the holder
+# can open the content; N is an explicit denial, which is how an ethical wall is built,
+# and it must never be read as a grant. Anything unrecognised is treated as no read:
+# guessing in the permissive direction is the one error that publishes a walled matter.
+NETDOCUMENTS_READ_RIGHTS = frozenset({"v", "e", "s", "a"})
+
+
+def netdocuments_membership_to_access(
+    entries: list[dict[str, Any]] | None,
+) -> AccessControl | None:
+    """Translate a ``/v1/cabinet/{id}/membership`` group access list.
+
+    NetDocuments secures content through cabinet and workspace membership: a group is
+    added to a cabinet with view, edit, share or administer rights, and an explicit "no
+    access" row is how a firm walls a group out again. Only the granting letters become
+    viewers, and an ``N`` row is dropped rather than inverted into a grant.
+
+    Returns ``None`` when the membership could not be read at all, which keeps the
+    container fail-closed instead of asserting that nobody may see it.
+    """
+    if entries is None:
+        return None
+    viewers: list[str] = []
+    for entry in entries:
+        identifier = _clean(entry.get("id") or entry.get("groupId"))
+        if not identifier:
+            continue
+        rights = {
+            letter
+            for letter in _clean(
+                entry.get("rights") or entry.get("access") or entry.get("accessCode")
+            )
+            if letter.isalpha()
+        }
+        if not rights & NETDOCUMENTS_READ_RIGHTS:
+            continue
+        if identifier.startswith("ug-"):
+            # Group ids keep their prefix so the membership expansion and the grant
+            # agree on one spelling.
+            viewers.append(f"group:netdocuments:{identifier}")
+        elif "@" in identifier:
+            viewers.append(f"user:{identifier}")
+        else:
+            viewers.append(f"group:netdocuments:{identifier}")
+    return AccessControl(viewers=sorted(set(viewers)), is_public=False)
+
+
+def netdocuments_document_acl_to_access(
+    acl: list[dict[str, Any]] | None,
+) -> AccessControl | None:
+    """Translate a per-document access list, when the profile carries one.
+
+    NetDocuments lets a document override the access it inherits from its container,
+    which is how a firm restricts one memo inside an otherwise open matter. The public
+    Swagger the connector was built from documents no response body for the profile
+    call, so which key holds this list is unverified against a live repository; the
+    reader tries the plausible spellings and returns ``None`` when none is present.
+
+    ``None`` is the safe answer, not the useless one: the caller keeps the document
+    fail-closed and reports a capability gap, rather than falling back to the container
+    ACL and publishing an override that exists precisely to be narrower.
+    """
+    if acl is None:
+        return None
+    viewers: list[str] = []
+    for entry in acl:
+        identifier = _clean(entry.get("id") or entry.get("name") or entry.get("principal"))
+        if not identifier:
+            continue
+        rights = {
+            letter
+            for letter in _clean(
+                entry.get("rights") or entry.get("access") or entry.get("accessCode")
+            )
+            if letter.isalpha()
+        }
+        if not rights & NETDOCUMENTS_READ_RIGHTS:
+            continue
+        if identifier.startswith("ug-"):
+            viewers.append(f"group:netdocuments:{identifier}")
+        elif "@" in identifier:
+            viewers.append(f"user:{identifier}")
+        else:
+            viewers.append(f"group:netdocuments:{identifier}")
+    if not viewers:
+        return None
+    return AccessControl(viewers=sorted(set(viewers)), is_public=False)
+
+
 # ------------------------------------------------------------------------- Confluence
 
 

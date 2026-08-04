@@ -708,8 +708,10 @@ def test_planned_connectors_are_roadmap_cards_and_nothing_more():
     assert {entry["id"] for entry in planned_entries} == {
         item.short_name for item in PLANNED
     }
-    # The names a law firm actually looks for.
-    assert {"imanage", "netdocuments", "ra_micro", "datev_anwalt", "annotext"} <= {
+    # The names a law firm actually looks for. NetDocuments has left this list by
+    # being built — a roadmap card graduating into a ConnectorSpec is the point of
+    # the list, not a break in it.
+    assert {"imanage", "ra_micro", "datev_anwalt", "annotext"} <= {
         entry["id"] for entry in planned_entries
     }
     assert not {item.short_name for item in PLANNED} & {spec.short_name for spec in BUILT}

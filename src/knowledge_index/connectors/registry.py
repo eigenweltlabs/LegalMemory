@@ -136,6 +136,29 @@ CATALOG: tuple[ConnectorSpec, ...] = (
         ),
     ),
     ConnectorSpec(
+        short_name="netdocuments",
+        label="NetDocuments",
+        category="Legal DMS",
+        module=f"{SOURCES}.netdocuments",
+        class_name="NetDocumentsSource",
+        mirrors_acls=True,
+        incremental=True,
+        supports_scoping=True,
+        oauth_provider="netdocuments",
+        notes=(
+            "Indexes the cabinets the authorizing account can open — a cabinet outside "
+            "that account's access is never listed. Mirrors cabinet and workspace group "
+            "membership, honouring an explicit no-access row as the wall it is, and "
+            "expands those groups to their members. A document carrying its own access "
+            "list is mirrored to that list; a document whose own list cannot be read "
+            "stays fail-closed rather than inheriting its container, because an "
+            "override exists in order to be narrower. Incremental via a per-cabinet "
+            "modified-since search, with deletions reconciled from the previous run's "
+            "ids. Region-bound: the connection's API base URL must match the "
+            "repository's region."
+        ),
+    ),
+    ConnectorSpec(
         short_name="teams",
         label="Microsoft Teams",
         category="Messaging",
@@ -370,15 +393,6 @@ PLANNED: tuple[PlannedConnector, ...] = (
         notes=(
             "The dominant large-firm legal DMS. Planned: workspace and matter-file "
             "sync with mirrored folder and document security."
-        ),
-    ),
-    PlannedConnector(
-        short_name="netdocuments",
-        label="NetDocuments",
-        category="Legal DMS",
-        notes=(
-            "Cloud legal DMS widely used by US and UK firms. Planned: cabinet and "
-            "workspace sync with mirrored access."
         ),
     ),
     PlannedConnector(
