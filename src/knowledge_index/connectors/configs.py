@@ -105,10 +105,23 @@ class DropboxConfig(SourceConfig):
         default=True,
         title="Mirror Sharing Members",
         description=(
-            "Read each file's sharing members so the file is retrievable by the same "
-            "people who can open it in Dropbox. Costs one extra API call per file. When "
-            "false, permissions are left unknown and documents stay invisible until an "
-            "administrator grants access at the project level."
+            "Read sharing members so each file is retrievable by the same people who can "
+            "open it in Dropbox. Members are read once per shared folder and reused for "
+            "everything inside it, so the cost is one call per shared folder rather than "
+            "one per file. When false, permissions are left unknown and documents stay "
+            "invisible until an administrator grants access at the project level."
+        ),
+    )
+
+    expand_team_groups: bool = Field(
+        default=True,
+        title="Expand Dropbox Groups",
+        description=(
+            "Resolve the members of Dropbox groups named in a file's sharing members, so "
+            "a folder shared with a group is retrievable by the people in that group "
+            "rather than by nobody. Requires a Dropbox Business team token with "
+            "groups.read; on a personal account the calls are skipped after the first "
+            "refusal and group grants stay unmatched."
         ),
     )
 

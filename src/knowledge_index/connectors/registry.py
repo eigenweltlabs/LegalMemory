@@ -287,12 +287,18 @@ CATALOG: tuple[ConnectorSpec, ...] = (
         module=f"{SOURCES}.dropbox",
         class_name="DropboxSource",
         mirrors_acls=True,
+        incremental=True,
         supports_scoping=True,
         oauth_provider="dropbox",
         notes=(
-            "Mirrors per-file sharing members and groups. Outstanding invitations are "
-            "not access and are not mirrored; a file whose members cannot be read "
-            "stays fail-closed."
+            "Mirrors sharing members once per shared folder and reuses them for the "
+            "files inside; a file shared on its own is read individually. Dropbox "
+            "groups are expanded into their members through the team API, which a "
+            "personal account does not have. Outstanding invitations are not access "
+            "and are not mirrored; traverse-only members confer no read. A file whose "
+            "members cannot be read stays fail-closed. Syncs incrementally from "
+            "Dropbox's listing cursors, but a sharing change on a parent folder "
+            "rewrites no file, so permissions refresh on the periodic full crawl."
         ),
     ),
     ConnectorSpec(
@@ -341,7 +347,7 @@ BY_NAME: dict[str, ConnectorSpec] = {spec.short_name: spec for spec in CATALOG}
 # These are the launch connectors currently being worked through end to end. The others
 # remain registered and testable through code, but the operator catalog shows them as
 # unavailable so nobody mistakes implementation presence for launch readiness.
-UI_AVAILABLE = {"sharepoint_online", "google_drive", "onedrive", "clio"}
+UI_AVAILABLE = {"sharepoint_online", "google_drive", "onedrive", "clio", "dropbox"}
 
 
 @dataclass(frozen=True)

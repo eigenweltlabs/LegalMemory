@@ -155,28 +155,63 @@ def drive_permissions_to_access(permissions: list[dict[str, Any]]) -> AccessCont
 # ---------------------------------------------------------------------------- Dropbox
 
 
+DROPBOX_READ_ACCESS_TYPES = frozenset({"owner", "editor", "viewer", "viewer_no_comment"})
+
+
+def _dropbox_confers_read(member: dict[str, Any]) -> bool:
+    """Whether one membership entry actually grants read.
+
+    An allowlist, not a denylist. Dropbox's ``traverse`` level lets a member see that a
+    folder exists on their way to something below it *without* being able to open what
+    is inside, and ``no_access`` is an explicit removal. Both used to pass a
+    "not no_access" test, which mirrored people into a matter's grants who cannot open
+    a single document in it.
+
+    A missing ``access_type`` is treated as read: every payload Dropbox documents carries
+    one, so its absence means an unrecognised shape rather than a restriction, and the
+    caller has already decided this member is on the object.
+    """
+    tag = _clean((member.get("access_type") or {}).get(".tag"))
+    return tag in DROPBOX_READ_ACCESS_TYPES if tag else True
+
+
 def dropbox_members_to_access(
     users: list[dict[str, Any]] | None,
     groups: list[dict[str, Any]] | None,
     invitees: list[dict[str, Any]] | None = None,
+    *,
+    owner_email: str = "",
 ) -> AccessControl | None:
-    """Translate Dropbox ``sharing/list_file_members`` output.
+    """Translate Dropbox ``sharing/list_file_members`` or ``list_folder_members`` output.
+
+    Both endpoints return the same three collections, so one translation serves the
+    per-file read and the far cheaper per-shared-folder read.
 
     Invitees are ignored: an outstanding invitation is not access, and mirroring it
-    would grant on the strength of an email someone typed.
+    would grant on the strength of an email someone typed. ``owner_email`` is the
+    authorizing account, added because a firm's own connection must not lose sight of
+    files it can plainly open — Dropbox omits the owner from a folder's member list in
+    some shapes, and an empty viewer list is an assertion that nobody may read.
     """
     if users is None and groups is None:
         return None
     viewers: list[str] = []
     for member in users or []:
         email = _clean((member.get("user") or {}).get("email"))
-        if email and _clean(member.get("access_type", {}).get(".tag") or "viewer") != "no_access":
+        if email and _dropbox_confers_read(member):
             viewers.append(f"user:{email}")
     for member in groups or []:
+        if not _dropbox_confers_read(member):
+            continue
         group = member.get("group") or {}
+        # The id is preferred: group names are renameable and non-unique, and the
+        # principals layer binds either form to the source it came from.
         identifier = _clean(group.get("group_id")) or _clean(group.get("group_name"))
         if identifier:
             viewers.append(f"group:dropbox:{identifier}")
+    owner = _clean(owner_email)
+    if owner:
+        viewers.append(f"user:{owner}")
     del invitees
     return AccessControl(viewers=sorted(set(viewers)), is_public=False)
 

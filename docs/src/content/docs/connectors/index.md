@@ -12,7 +12,8 @@ has the provider-console steps.
 The connectors that can be connected from the console:
 [SharePoint Online](/connectors/sharepoint-online/),
 [OneDrive](/connectors/onedrive/), [Google Drive](/connectors/google-drive/),
-[Clio](/connectors/clio/), and [local folders](/connectors/local-folders/).
+[Dropbox](/connectors/dropbox/), [Clio](/connectors/clio/), and
+[local folders](/connectors/local-folders/).
 
 Everything else in the catalog is greyed out and cannot be connected. For
 customer-specific DMS integrations there is a
@@ -50,7 +51,8 @@ connection.
 
 ## Scoping what is synced
 
-Connectors that support scoping (SharePoint, OneDrive, Google Drive, Clio) let
+Connectors that support scoping (SharePoint, OneDrive, Google Drive, Dropbox,
+Clio) let
 you pick subtree roots (sites, libraries, folders, or matters) in a tree picker
 that browses the real source after authorization. Scoping is
 proportionality: index the estate, not the birthday-party photos.
