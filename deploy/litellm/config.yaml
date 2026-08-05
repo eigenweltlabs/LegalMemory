@@ -34,14 +34,17 @@ model_list:
       # stays under the cap instead of relying on refusals.
       #
       # THESE VALUES MUST MATCH THE PROVIDER BEHIND KI_EMBEDDING_UPSTREAM.
-      # Active: OpenAI text-embedding-3-small (3,000 RPM / 1M TPM account limit).
-      # On the Gemini Embedding 2 swap (20,000 RPM / 20M TPM measured on this
-      # account), flip to the commented pair in the same commit as the .env
-      # model change:
-      #   rpm: 18000
-      #   tpm: 18000000
-      rpm: 2800
-      tpm: 950000
+      # Active: gemini/gemini-embedding-2 (20,000 RPM / 20M TPM measured on this
+      # account), held one notch under the account ceiling.
+      #
+      # This is the half of the swap that was missed. The .env moved to Gemini
+      # while these stayed at the OpenAI text-embedding-3-small pair (3,000 RPM /
+      # 1M TPM), so the index stage ran against a ceiling seven times lower than
+      # the account it was actually calling. The instruction above -- flip these in
+      # the same commit as the .env model change -- is here because splitting the
+      # two is silent: nothing fails, the stage just runs slow.
+      rpm: 18000
+      tpm: 18000000
 
 general_settings:
   master_key: os.environ/LITELLM_MASTER_KEY

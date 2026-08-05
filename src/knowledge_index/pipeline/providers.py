@@ -178,19 +178,33 @@ _DEAD_ACCOUNT_MARKERS = (
 def embed_text(text: str, config: AppConfig) -> list[float]:
     model = config.retrieval.embedding_model
     base = gateway_url(config)
+    expected = config.retrieval.embedding_dimensions
     response = _post_to_gateway(
         f"{base}/v1/embeddings",
         model=model,
         base=base,
         headers=_headers(),
-        json={"model": model, "input": [text]},
+        # The width is stated, not hoped for. The check below used to be the only
+        # place the index's width appeared, so the width a model happened to return
+        # was the width the index got. That held only while the upstream's native
+        # size matched: OpenAI text-embedding-3-small returns 1536 natively, so
+        # nothing had to ask for it. Repointing the same alias at
+        # gemini/gemini-embedding-2 — same alias, same 1536-wide index, 417k chunks
+        # already written — started returning that model's native 3072 and
+        # quarantined every document that reached the last stage of the pipeline.
+        #
+        # Matryoshka models (Gemini Embedding, text-embedding-3-*) truncate to a
+        # requested width, so asking for the width we validate makes the two agree by
+        # construction. LiteLLM's drop_params removes the field for a provider with no
+        # equivalent, which fails the check below as it should: a model that cannot
+        # produce the index's width must not silently write into it.
+        json={"model": model, "input": [text], "dimensions": expected},
         timeout=120,
     )
     response.raise_for_status()
     body = response.json()
     _record_usage(response, body, model, call="embedding")
     vector = list(body["data"][0]["embedding"])
-    expected = config.retrieval.embedding_dimensions
     if len(vector) != expected:
         raise ModelOutputInvalid(
             f"embedding model returned {len(vector)} dimensions; index expects {expected}"
