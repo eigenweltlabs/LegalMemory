@@ -199,18 +199,32 @@ def _routes(
         ),
     }
     if group_members is not None:
+        # ``groups/members/list`` returns members, a cursor and has_more — and nothing
+        # naming the group, which is why the display name has to come from the sharing
+        # payload instead. Each member carries the team standing Dropbox reports.
         routes[f"POST {GROUP_MEMBERS}"] = Recorded(
             {
-                "group_info": {"group_id": LITIGATION_GROUP, "group_name": "Litigation"},
                 "members": [
-                    {"profile": {"team_member_id": f"tm:{email}", "email": email},
-                     "access_type": {".tag": "member"}}
+                    _team_member(email) if isinstance(email, str) else _team_member(*email)
                     for email in group_members
                 ],
+                "cursor": "",
                 "has_more": False,
             }
         )
     return routes
+
+
+def _team_member(email: str, status: str = "active") -> dict:
+    return {
+        "profile": {
+            "team_member_id": f"tm:{email}",
+            "email": email,
+            "email_verified": True,
+            "status": {".tag": status},
+        },
+        "access_type": {".tag": "member"},
+    }
 
 
 def _scan(routes: dict, tmp_path, *, config: dict | None = None, roots: list | None = None):
@@ -374,32 +388,38 @@ def test_an_outstanding_invitation_is_not_access(tmp_path):
     assert f"user:{OUTSIDER}" not in _principals(observations, "Schmidt.txt")
 
 
-def test_a_traverse_only_member_gets_no_read(tmp_path):
-    """Dropbox's traverse level lets somebody see a folder exists on the way to
-    something below it. It confers no read, and mirroring it as one puts a person in a
-    matter's grants who cannot open a single document in it."""
+@pytest.mark.parametrize("level", ["owner", "editor", "viewer", "viewer_no_comment"])
+def test_every_documented_access_level_confers_read(tmp_path, level):
+    """All four tags of Dropbox's ``AccessLevel`` mean the member can open the file.
+
+    Pinned as a set: dropping one silently removes real people from a matter's grants,
+    which reads as a permissions bug long after the change that caused it.
+    """
     observations, _m, _c, _cursor = _scan(
-        _routes(folder_users=[_member(PARTNER), _member(REFERENDAR, "traverse")]), tmp_path
+        _routes(folder_users=[_member(REFERENDAR, level)], folder_groups=[]), tmp_path
     )
-    assert f"user:{PARTNER}" in _principals(observations, "Schmidt.txt")
-    assert f"user:{REFERENDAR}" not in _principals(observations, "Schmidt.txt")
+    assert f"user:{REFERENDAR}" in _principals(observations, "Schmidt.txt")
 
 
-def test_a_no_access_member_gets_no_read(tmp_path):
+def test_an_access_level_this_code_does_not_know_confers_nothing(tmp_path):
+    """``AccessLevel`` is an open union, so Dropbox can add a tag at any time.
+
+    Guessing that an unrecognised level grants read is the guess that leaks across a
+    matter boundary. The opposite error — a genuinely new read level going unmirrored
+    until this code learns it — is the direction the rest of the permission layer
+    already fails in.
+    """
     observations, _m, _c, _cursor = _scan(
-        _routes(folder_users=[_member(PARTNER), _member(REFERENDAR, "no_access")]), tmp_path
+        _routes(
+            folder_users=[_member(PARTNER), _member(REFERENDAR, "some_future_level")],
+            folder_groups=[_group_member(access="some_future_level")],
+        ),
+        tmp_path,
     )
-    assert f"user:{REFERENDAR}" not in _principals(observations, "Schmidt.txt")
-
-
-def test_a_traverse_only_group_gets_no_read(tmp_path):
-    observations, _m, _c, _cursor = _scan(
-        _routes(folder_groups=[_group_member(access="traverse")]), tmp_path
-    )
-    assert not any(
-        principal.startswith("group:")
-        for principal in _principals(observations, "Schmidt.txt")
-    )
+    principals = _principals(observations, "Schmidt.txt")
+    assert f"user:{PARTNER}" in principals
+    assert f"user:{REFERENDAR}" not in principals
+    assert not any(principal.startswith("group:") for principal in principals)
 
 
 def test_a_file_shared_on_its_own_is_read_individually(tmp_path):
@@ -461,18 +481,37 @@ def test_a_dropbox_group_is_expanded_into_its_members(tmp_path):
     ]
 
 
+@pytest.mark.parametrize("status", ["invited", "suspended", "removed"])
+def test_a_group_member_who_is_not_an_active_teammate_is_not_mirrored(tmp_path, status):
+    """Dropbox lists everybody in a group whatever their standing with the team.
+
+    Somebody invited has not joined yet; somebody suspended or removed has left. Neither
+    can open anything, and mirroring them is how a departed colleague keeps reading the
+    firm's matters through a group nobody thought to take them out of. It is the same
+    rule as "an invitation is not access", one level up.
+    """
+    _observations, memberships, _client, _cursor = _scan(
+        _routes(group_members=[PARTNER, (REFERENDAR, status)]), tmp_path
+    )
+    assert [row["member_id"] for row in memberships] == [PARTNER]
+
+
+def test_the_group_name_comes_from_the_sharing_payload_that_named_it(tmp_path):
+    """The members listing does not identify the group it was asked about, so the name
+    has to be carried from the ACL that referenced it."""
+    _observations, memberships, _client, _cursor = _scan(
+        _routes(group_members=[PARTNER]), tmp_path
+    )
+    assert [row["group_name"] for row in memberships] == ["Litigation"]
+
+
 def test_group_expansion_pages_through_a_large_group(tmp_path):
     routes = _routes(group_members=[PARTNER])
     routes[f'POST {GROUP_MEMBERS} | "group_id": "{LITIGATION_GROUP}"'] = Recorded(
-        {
-            "group_info": {"group_id": LITIGATION_GROUP, "group_name": "Litigation"},
-            "members": [{"profile": {"email": PARTNER}}],
-            "cursor": "grp-2",
-            "has_more": True,
-        }
+        {"members": [_team_member(PARTNER)], "cursor": "grp-2", "has_more": True}
     )
-    routes[f'POST {API}/team/groups/members/list/continue'] = Recorded(
-        {"members": [{"profile": {"email": REFERENDAR}}], "has_more": False}
+    routes[f"POST {API}/team/groups/members/list/continue"] = Recorded(
+        {"members": [_team_member(REFERENDAR)], "cursor": "", "has_more": False}
     )
     _observations, memberships, _client, _cursor = _scan(routes, tmp_path)
     assert {row["member_id"] for row in memberships} == {PARTNER, REFERENDAR}

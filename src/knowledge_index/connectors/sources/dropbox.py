@@ -35,12 +35,13 @@ Reference (Dropbox HTTP API v2):
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
 import httpx
 from tenacity import retry, stop_after_attempt
 
-from knowledge_index.connectors.acl import dropbox_members_to_access
+from knowledge_index.connectors.acl import dropbox_member_is_active, dropbox_members_to_access
 from knowledge_index.connectors.base import BaseSource
 from knowledge_index.connectors.configs import DropboxConfig
 from knowledge_index.connectors.cursors.dropbox import DropboxCursor
@@ -90,6 +91,19 @@ DOWNLOAD = f"{CONTENT}/files/download"
 
 # The account root. Dropbox names it with an empty string, not "/".
 ACCOUNT_ROOT = ""
+
+# Dropbox accepts a revision in place of a path, but only in this exact shape: the
+# documented pattern for a read path is `rev:[0-9a-f]{9,}`. Anything else has to fall
+# back to the path, because a malformed reference is rejected outright and would cost
+# the document rather than merely costing the revision pin.
+_REV_REFERENCE = re.compile(r"^[0-9a-f]{9,}$")
+
+
+def _revision_reference(rev: str | None) -> str:
+    """``rev:<rev>`` when the revision is usable as a read path, else empty."""
+    cleaned = str(rev or "").strip()
+    return f"rev:{cleaned}" if _REV_REFERENCE.match(cleaned) else ""
+
 
 # Arguments every listing is opened with. They have to be identical between
 # get_latest_cursor, list_folder and the cursor's later continue calls: a Dropbox cursor
@@ -144,6 +158,8 @@ class DropboxSource(BaseSource):
     _folder_access: Dict[str, Optional[AccessControl]]
     # Dropbox group principals ("dropbox:<group_id>") seen in this run's ACLs.
     _tracked_groups: set
+    # Group id -> display name, learned from the sharing payloads that named them.
+    _group_names: Dict[str, str]
     # Set once the team API refuses us, so a personal account does not pay a rejected
     # call per group for the rest of the run.
     _team_api_available: bool
@@ -165,6 +181,7 @@ class DropboxSource(BaseSource):
         instance._expand_team_groups = config.expand_team_groups
         instance._folder_access = {}
         instance._tracked_groups = set()
+        instance._group_names = {}
         instance._team_api_available = True
         instance._owner_email = ""
         return instance
@@ -223,16 +240,25 @@ class DropboxSource(BaseSource):
 
     # -------------------------------------------------------------------------- access
 
-    def _track_groups(self, access: Optional[AccessControl]) -> None:
+    def _track_groups(self, access: Optional[AccessControl], groups: list | None = None) -> None:
         """Remember every Dropbox group a mirrored ACL grants read to.
 
         The grant on its own is unusable: nobody signs in to this appliance as a Dropbox
         group id. The tracked set is expanded into user memberships after the scan and
         persisted in the cursor so a delta run still knows what to expand.
+
+        The display names are kept here too, because this payload is the only place they
+        appear — the team API's member listing does not name the group it was asked about.
         """
         for viewer in (access.viewers if access else None) or []:
             if viewer.startswith("group:dropbox:"):
                 self._tracked_groups.add(viewer[len("group:") :])
+        for member in groups or []:
+            group = member.get("group") or {}
+            group_id = str(group.get("group_id") or "").strip().casefold()
+            name = group.get("group_name")
+            if group_id and name:
+                self._group_names[group_id] = str(name)
 
     async def _members(self, url: str, args: Dict[str, Any], continue_url: str) -> Dict[str, list]:
         """Collect the users and groups of a sharing endpoint across its pages."""
@@ -275,10 +301,11 @@ class DropboxSource(BaseSource):
                 "the files inside stay fail-closed for this run"
             )
             access = None
+            members = {"groups": []}
         # Cached either way: a folder that refused once will refuse for every file in it,
         # and retrying per file turns one failure into hundreds.
         self._folder_access[shared_folder_id] = access
-        self._track_groups(access)
+        self._track_groups(access, members["groups"])
         return access
 
     async def _file_access(self, entry: Dict) -> Optional[AccessControl]:
@@ -308,7 +335,7 @@ class DropboxSource(BaseSource):
                 access = dropbox_members_to_access(
                     members["users"], members["groups"], owner_email=self._owner_email
                 )
-                self._track_groups(access)
+                self._track_groups(access, members["groups"])
                 return access
             except SourceAuthError:
                 raise
@@ -350,10 +377,15 @@ class DropboxSource(BaseSource):
                 yield membership
 
     async def _expand_group(self, group_id: str) -> AsyncGenerator[MembershipTuple, None]:
-        """Yield one membership per member of a Dropbox group."""
+        """Yield one membership per *active* member of a Dropbox group.
+
+        The name comes from the sharing payload that named the group, not from this
+        response: ``groups/members/list`` returns members, a cursor and ``has_more``, and
+        nothing that identifies the group back to the caller.
+        """
         args: Dict[str, Any] = {"group": {".tag": "group_id", "group_id": group_id}}
-        url, continue_url = GROUPS_MEMBERS_LIST, GROUPS_MEMBERS_LIST_CONTINUE
-        group_name: Optional[str] = None
+        url = GROUPS_MEMBERS_LIST
+        group_name = self._group_names.get(group_id)
         while True:
             try:
                 data = await self._post(url, args)
@@ -367,8 +399,12 @@ class DropboxSource(BaseSource):
                 )
                 self._team_api_available = False
                 return
-            group_name = group_name or (data.get("group_info") or {}).get("group_name")
             for member in data.get("members") or []:
+                if not dropbox_member_is_active(member):
+                    # Invited, suspended or removed. Listed in the group, but unable to
+                    # open anything — mirroring them would keep a departed colleague
+                    # reading the firm's matters.
+                    continue
                 email = str((member.get("profile") or {}).get("email") or "").strip().casefold()
                 if not email:
                     continue
@@ -380,7 +416,7 @@ class DropboxSource(BaseSource):
                 )
             if not data.get("has_more"):
                 return
-            url, args = continue_url, {"cursor": data.get("cursor")}
+            url, args = GROUPS_MEMBERS_LIST_CONTINUE, {"cursor": data.get("cursor")}
 
     # ------------------------------------------------------------------------ download
 
@@ -392,7 +428,7 @@ class DropboxSource(BaseSource):
         stage the new bytes under the old revision's version token, and the index would
         hold content it believes it has already processed.
         """
-        reference = f"rev:{entity.rev}" if entity.rev else entity.path_lower
+        reference = _revision_reference(entity.rev) or entity.path_lower
         token = await self.auth.get_token()
         headers = {
             "Authorization": f"Bearer {token}",

@@ -67,12 +67,20 @@ them:
 3. **Neither** — the file is private to the account, and the authorizing
    account is its viewer.
 
-Three rules apply throughout:
+Four rules apply throughout:
 
-- **Read access only.** Dropbox's `traverse` level lets somebody see that a
-  folder exists on their way to something below it. It confers no read and is
-  not mirrored, and neither is `no_access`.
+- **Known access levels only.** Dropbox's `AccessLevel` has four values —
+  `owner`, `editor`, `viewer`, `viewer_no_comment` — and all four confer read.
+  The union is open, so a level Dropbox adds later arrives as a tag this
+  connector has not been told the meaning of; those are not mirrored. The cost
+  is that a genuinely new read level goes unmirrored until the connector learns
+  it, which is the safe direction to be wrong in.
 - **An invitation is not access.** Outstanding invitees are never mirrored.
+- **Only active teammates count.** A group lists its members whatever their
+  standing with the team. Members who are `invited` (not yet joined),
+  `suspended` or `removed` cannot open anything and are not mirrored, so a
+  departed colleague does not keep reading through a group they were never
+  removed from.
 - **Unknown is not empty.** A members read that fails leaves the file's
   permissions *unknown*, which fails closed and is reported as a capability
   gap. An empty grant list would instead assert that nobody may read the file,
@@ -112,9 +120,10 @@ Four behaviours are worth knowing when reading a sync report:
   ones.
 - **Deletions are resolved from a path map.** Dropbox reports a removal as a
   path with no file id, while the index is keyed by file id, so the connector
-  records which id it indexed at each path. Deleting a folder tombstones
-  everything that was under it. Past 50,000 tracked paths the map is traded for
-  a full crawl, which tombstones by diff instead.
+  records which id it indexed at each path. Deleting a folder is not guaranteed
+  to produce an entry per child, so the removal of a folder tombstones every
+  indexed path beneath it. Past 50,000 tracked paths the map is traded for a
+  full crawl, which tombstones by diff instead.
 - **A rename is not a deletion.** Dropbox reports it as a removal at the old
   path plus the file at its new one, with the same id on both sides; the
   removal is suppressed and the document keeps its identity and its history.

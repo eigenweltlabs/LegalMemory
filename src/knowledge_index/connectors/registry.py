@@ -294,9 +294,10 @@ CATALOG: tuple[ConnectorSpec, ...] = (
             "Mirrors sharing members once per shared folder and reuses them for the "
             "files inside; a file shared on its own is read individually. Dropbox "
             "groups are expanded into their members through the team API, which a "
-            "personal account does not have. Outstanding invitations are not access "
-            "and are not mirrored; traverse-only members confer no read. A file whose "
-            "members cannot be read stays fail-closed. Syncs incrementally from "
+            "personal account does not have. Outstanding invitations are not access, "
+            "nor are group members who are invited, suspended or removed from the team; "
+            "an access level outside Dropbox's four documented ones confers no read. A "
+            "file whose members cannot be read stays fail-closed. Syncs incrementally from "
             "Dropbox's listing cursors, but a sharing change on a parent folder "
             "rewrites no file, so permissions refresh on the periodic full crawl."
         ),

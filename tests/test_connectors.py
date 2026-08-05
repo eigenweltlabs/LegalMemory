@@ -799,7 +799,11 @@ DROPBOX_USERS = [
         "user": {"account_id": "a2", "email": "referendar@kanzlei.de"},
     },
     {
-        "access_type": {".tag": "no_access"},
+        # Dropbox's AccessLevel is an open union — owner, editor, viewer and
+        # viewer_no_comment are the documented tags, and anything else is a level this
+        # code has not been told the meaning of. It must not be read as conferring
+        # access.
+        "access_type": {".tag": "some_future_level"},
         "user": {"account_id": "a3", "email": "ehemalig@kanzlei.de"},
     },
 ]
