@@ -315,16 +315,27 @@ providers:
         nothing that writes — and press Submit at the bottom, which is a separate step
         from ticking the boxes. account_info.read is required, not optional: every sync
         opens with users/get_current_account, so a token without it fails on the first
-        call and the connection looks dead rather than under-scoped. Add the team scope
-        groups.read to have Dropbox groups expanded into their members; it needs a
-        Dropbox Business team and is simply unavailable on a personal account.
+        call and the connection looks dead rather than under-scoped. On a Dropbox
+        Business team also tick the team scopes — team_info.read, team_data.member,
+        team_data.content.read, files.team_metadata.read, members.read and groups.read —
+        so the token can act over the team space and expand Dropbox groups; they are
+        unavailable on a personal account. Leave the OpenID scopes (openid, profile,
+        email) off: the console itself says they cannot coexist with team scopes, and
+        nothing here uses them.
       secret: >-
         Settings → App key and App secret ("Show"). The App key is the client id and the
         App secret is the client secret.
-      account: Sign in as the account whose Dropbox should be indexed.
+      account: >-
+        Sign in as the account whose Dropbox should be indexed — on a Dropbox Business
+        team, as a team admin: team scopes make Dropbox issue a team-wide token, and
+        only an admin's authorization yields one that can act over the team space.
+        After authorizing, the app's Development teams counter (Settings tab) should
+        read 1/5; at 0/5 the team never linked and every team call is refused.
       note: >-
         Permissions ticked after a token was issued do not apply to that token. Change
-        the Permissions tab first, then authorize here.
+        the Permissions tab first, then authorize here. With team scopes ticked the
+        console's "Generate access token" button disappears; a team token only comes
+        from this OAuth flow.
 
   box:
     oauth_type: with_refresh

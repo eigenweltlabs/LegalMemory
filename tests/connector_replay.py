@@ -81,12 +81,27 @@ class ReplayClient:
         # folder listing and a Dropbox path walk both put the interesting part there. The
         # full call is kept alongside the bare URL so assertions can reach it.
         self.calls: list[str] = []
+        # Headers are recorded in parallel with ``calls`` rather than folded into the
+        # match string. Route patterns match on substrings, and every request carries an
+        # ``Authorization: Bearer …`` header, so folding them in would let a header value
+        # satisfy a clause that was written about a URL or a body.
+        self.headers: list[dict[str, str]] = []
         self.closed = False
 
     # -- matching -----------------------------------------------------------
 
-    def _match(self, method: str, url: str, params: Any = None, json_body: Any = None) -> Recorded:
+    def _match(
+        self,
+        method: str,
+        url: str,
+        params: Any = None,
+        json_body: Any = None,
+        headers: Any = None,
+    ) -> Recorded:
         self.requests.append((method.upper(), url))
+        # Index-aligned with ``calls`` below, so an assertion that finds a call can read
+        # the headers that went with it.
+        self.headers.append(dict(headers or {}))
         call = " ".join(
             part
             for part in (
@@ -123,9 +138,14 @@ class ReplayClient:
         return entries[-1]
 
     def _response(
-        self, method: str, url: str, params: Any = None, json_body: Any = None
+        self,
+        method: str,
+        url: str,
+        params: Any = None,
+        json_body: Any = None,
+        headers: Any = None,
     ) -> httpx.Response:
-        recorded = self._match(method, url, params, json_body)
+        recorded = self._match(method, url, params, json_body, headers)
         request = httpx.Request(method.upper(), url if url.startswith("http") else f"https://x/{url}")
         if recorded.content is not None:
             return httpx.Response(
@@ -138,7 +158,9 @@ class ReplayClient:
     # -- HttpClient surface -------------------------------------------------
 
     async def request(self, method: str, url: str, **kwargs) -> httpx.Response:
-        return self._response(method, url, kwargs.get("params"), kwargs.get("json"))
+        return self._response(
+            method, url, kwargs.get("params"), kwargs.get("json"), kwargs.get("headers")
+        )
 
     async def get(self, url: str, **kwargs) -> httpx.Response:
         return await self.request("GET", url, **kwargs)
@@ -160,7 +182,9 @@ class ReplayClient:
 
     @asynccontextmanager
     async def stream(self, method: str, url: str, **kwargs):
-        response = self._response(method, url, kwargs.get("params"), kwargs.get("json"))
+        response = self._response(
+            method, url, kwargs.get("params"), kwargs.get("json"), kwargs.get("headers")
+        )
         # aiter_bytes on a non-streamed Response works because the body is already read.
         yield response
 
@@ -178,6 +202,31 @@ class ReplayClient:
 
     def call_count(self, needle: str) -> int:
         return sum(1 for call in self.calls if needle in call)
+
+    def headers_for(self, needle: str) -> list[dict[str, str]]:
+        """The headers of every call matching ``needle``, in the order they were sent."""
+        return [
+            headers for call, headers in zip(self.calls, self.headers) if needle in call
+        ]
+
+    def header_for(self, needle: str, name: str) -> str | None:
+        """One header of the first call matching ``needle``, looked up case-insensitively.
+
+        ``None`` distinguishes "the connector did not send this header" from an empty
+        value, which is the distinction the team-token tests turn on. Raises if nothing
+        matched, so a renamed endpoint fails the assertion instead of silently passing it.
+        """
+        matches = self.headers_for(needle)
+        if not matches:
+            raise AssertionError(
+                f"no recorded call matching {needle!r}\ncalls:\n  "
+                + "\n  ".join(self.calls)
+            )
+        wanted = name.casefold()
+        for key, value in matches[0].items():
+            if key.casefold() == wanted:
+                return value
+        return None
 
 
 def build(

@@ -125,6 +125,31 @@ class DropboxConfig(SourceConfig):
         ),
     )
 
+    index_team_space: bool = Field(
+        default=True,
+        title="Index The Team Space",
+        description=(
+            "With a Dropbox Business team token, index the team's shared space — the team "
+            "folders everyone works out of — rather than the home directory of the single "
+            "member the token acts as. The team space is what a firm means by its file "
+            "server. Turn it off to index only that member's own Dropbox. A user token "
+            "can reach nothing but its own account, so this does not apply to one."
+        ),
+    )
+
+    act_as_email: str = Field(
+        default="",
+        title="Act As Member",
+        description=(
+            "Email address of the Dropbox Business team member this connection acts as. "
+            "Leave blank to act as the team admin who authorized the token. A team token "
+            "cannot read a file without naming a member to read it as, so this decides "
+            "whose view of the estate is indexed: whose home directory when the team "
+            "space is off, and whose access to the team folders when it is on. Ignored "
+            "by a user token."
+        ),
+    )
+
 
 class GmailConfig(SourceConfig):
     """Gmail configuration schema."""

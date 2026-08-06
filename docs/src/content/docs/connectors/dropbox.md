@@ -16,6 +16,7 @@ members are read once and applied to everything inside it.
 | Permission mirror | Yes, per shared folder, plus per-file shares |
 | Group expansion | Dropbox Business team groups |
 | Token type | Refresh token |
+| Team support | Dropbox Business team tokens, indexing the shared team space |
 
 ## Register the app in the Dropbox App Console
 
@@ -25,26 +26,62 @@ Create the app from the account that owns the estate, at
 1. **Create app** → **Scoped access** → access type **Full Dropbox**. An
    App-folder app can only ever see one directory it created for itself.
 2. **Permissions** tab: tick `account_info.read`, `files.metadata.read`,
-   `files.content.read` and `sharing.read`. For group expansion also tick
-   `groups.read`, which is a team scope and needs a Dropbox Business team.
-   Press **Submit** at the bottom — that is a separate step from ticking the
-   boxes.
+   `files.content.read` and `sharing.read`. On a Dropbox Business team — the
+   normal case for a firm — also tick the team scopes: `team_info.read`,
+   `team_data.member`, `team_data.content.read`, `files.team_metadata.read`,
+   `members.read` and `groups.read`. Press **Submit** at the bottom — that is
+   a separate step from ticking the boxes.
 
    `account_info.read` is not optional: every sync opens with
    `users/get_current_account`, both to validate the credential and to learn
    the owner's address, which is what makes an unshared file readable by the
    account that authorized the connection. Without it the first call fails and
    the connection looks dead rather than under-scoped.
+
+   The OpenID scopes (`openid`, `profile`, `email`) cannot coexist with team
+   scopes — the console says so itself. Leave them off; this connector does
+   not use them.
 3. **Settings** → **OAuth 2** → **Redirect URIs**: add the URI shown in the
    setup modal.
 4. **Settings** → **App key and App secret**: the App key is the client id, the
    App secret is the client secret.
 
-On a Dropbox Business team a team admin has to approve the app before it can be
-installed.
-
 Permissions ticked *after* a token was issued do not apply to that token.
 Change the Permissions tab first, then authorize.
+
+## Dropbox Business teams
+
+Dropbox has two kinds of credential, and which one an app produces is decided
+by its scopes, not by anything this appliance sends: an app with team scopes
+authorized by a team admin yields a **team token**, anything else a **user
+token**. They are not interchangeable. A user token is refused by every
+`/2/team/*` route regardless of what was ticked, and a team token cannot touch
+a file until it names the team member it acts as. The connector probes
+`team/get_info` once per run and handles both:
+
+- **Team token.** The connection acts as the admin who authorized it (or the
+  member named in **Act As Member**), resolved through
+  `team/token/get_authenticated_admin` — and reads the team's shared space,
+  the team folders a firm actually works out of, by pointing every file
+  request at the team's root namespace. Group expansion uses the team
+  directory natively.
+- **User token.** Exactly the behaviour described elsewhere on this page: the
+  authorizing account's own estate, group expansion only as far as the token
+  can reach.
+
+Two things follow for a team app:
+
+- The **Generate access token** button disappears from the App Console once
+  team scopes are ticked. A team token can only come from the OAuth flow,
+  authorized by a **team admin**; authorize from the setup modal as usual.
+- After the admin authorizes, the app's **Development teams** counter on the
+  Settings tab should read 1/5. At 0/5 the team never linked, and every
+  `/2/team/*` call will be refused no matter the scopes.
+
+Re-authorizing a connection with the other kind of token, changing the acting
+member, or toggling the team space all cause the next sync to crawl rather
+than resume: the stored change cursors describe an estate the new identity is
+not looking at.
 
 ## Connect
 
@@ -59,6 +96,8 @@ selection syncs the whole account.
 | Exclude Path | empty | Path fragment to skip, for example `/archiv`. Matched case-insensitively against the lowercase path. |
 | Mirror Sharing Members | on | Read sharing members and mirror them as grants. Off leaves permissions unknown, and documents stay invisible until an administrator grants access at project level. |
 | Expand Dropbox Groups | on | Resolve Dropbox group members through the team API, so a folder shared with a group is reachable by the people in it. |
+| Index The Team Space | on | With a team token, index the team's shared space — the team folders — rather than the home directory of the member the token acts as. Ignored by a user token. |
+| Act As Member | empty | The team member whose access a team token uses, by email address. Blank acts as the admin who authorized the token, with admin reach over the team space; a named member reaches what that member can reach. Ignored by a user token. |
 
 ## How permissions are resolved
 

@@ -556,6 +556,264 @@ def test_folder_members_paginate(tmp_path):
     assert {f"user:{PARTNER}", f"user:{REFERENDAR}"} <= _principals(observations, "Schmidt.txt")
 
 
+# ----------------------------------------------------------------------- team tokens
+#
+# Dropbox has two credential kinds, not two scope sets. Every /2/team/ route is
+# auth="team" in the published spec and every file and sharing route defaults to
+# auth="user": a user token is refused by the former outright, and a team token is
+# refused by the latter unless a Dropbox-API-Select-* header names the member to act
+# as. Every customer running Dropbox Business authorizes as a team, so the team path
+# is the normal one, and the header discipline is what these tests pin down — with the
+# harness recording headers out-of-band precisely so a Bearer token can never satisfy
+# a route clause by accident.
+
+TEAM_INFO_URL = f"{API}/team/get_info"
+AUTH_ADMIN = f"{API}/team/token/get_authenticated_admin"
+MEMBERS_LIST = f"{API}/team/members/list"
+
+SELECT_USER = "Dropbox-API-Select-User"
+SELECT_ADMIN = "Dropbox-API-Select-Admin"
+PATH_ROOT = "Dropbox-API-Path-Root"
+
+ADMIN_ID = "dbmid:kanzlei-admin"
+TEAM_ROOT_NS = "ns-team-root"
+HOME_NS = "ns-home"
+
+
+def _directory_member(
+    email: str, member_id: str | None = None, *, role: str = "member_only",
+    status: str = "active",
+) -> dict:
+    """One ``team/members/list`` entry: a profile plus the member's AdminTier."""
+    return {
+        "profile": {
+            "team_member_id": member_id or f"dbmid:{email}",
+            "email": email,
+            "status": {".tag": status},
+        },
+        "role": {".tag": role},
+    }
+
+
+def _team_routes(
+    *, root_ns: str = TEAM_ROOT_NS, home_ns: str = HOME_NS, members: list | None = None,
+    **kwargs,
+) -> dict[str, Recorded]:
+    """The same estate, reached through a Dropbox Business team token."""
+    routes = _routes(**kwargs)
+    routes[f"POST {TEAM_INFO_URL}"] = Recorded({"name": "Kanzlei", "num_licensed_users": 3})
+    routes[f"POST {AUTH_ADMIN}"] = Recorded(
+        {"admin_profile": {"team_member_id": ADMIN_ID, "email": OWNER,
+                           "status": {".tag": "active"}}}
+    )
+    routes[f"POST {MEMBERS_LIST}"] = Recorded(
+        {"members": members or [_directory_member(OWNER, ADMIN_ID, role="team_admin")],
+         "has_more": False}
+    )
+    routes[f"POST {ACCOUNT}"] = Recorded(
+        {
+            "account_id": "dbid:kanzlei",
+            "name": {"display_name": "Kanzlei"},
+            "email": OWNER,
+            "account_type": {".tag": "business"},
+            # Tagged "user" deliberately: that is what a real team member's account
+            # answered in live testing. The namespaces differing is what means there is
+            # a shared team space, not the tag.
+            "root_info": {".tag": "user", "root_namespace_id": root_ns,
+                          "home_namespace_id": home_ns},
+        }
+    )
+    return routes
+
+
+def _refused_probe() -> Recorded:
+    """What a user token gets from every /2/team/ route — HTTP 400, verified live,
+    not the 401 one might expect."""
+    return Recorded(
+        {"error_summary": "features/user_auth_not_allowed"}, status=400
+    )
+
+
+def test_a_team_token_acts_as_the_authenticated_admin_over_the_team_space(tmp_path):
+    """The normal customer path: a team app, authorized by an admin.
+
+    Every user-auth route — the cursor mint, the listing, the sharing reads, the
+    download on the content host — must name the member to act as and the namespace to
+    act in, or Dropbox refuses it ("this API function operates on a single Dropbox
+    account"). The Path-Root pointing at the shared team space is what makes the team
+    folders — the actual file server — the thing that gets indexed, rather than one
+    member's home directory.
+    """
+    observations, _memberships, client, _cursor = _scan(_team_routes(), tmp_path)
+
+    assert "Schmidt.txt" in {row.name for row in observations}
+    path_root = {".tag": "root", "root": TEAM_ROOT_NS}
+    for needle in (f"POST {LATEST}", f"POST {LIST} ", f"POST {FOLDER_MEMBERS}",
+                   f"POST {DOWNLOAD}"):
+        assert client.header_for(needle, SELECT_ADMIN) == ADMIN_ID, needle
+        assert json.loads(client.header_for(needle, PATH_ROOT)) == path_root, needle
+    # Probed once, not once per request.
+    assert client.call_count(f"POST {TEAM_INFO_URL}") == 1
+
+
+def test_team_routes_never_carry_a_select_header(tmp_path):
+    """The header split runs both ways: a team route with a Select header is refused
+    (HTTP 400, verified live), so attaching the headers uniformly would break exactly
+    the group expansion team mode exists to serve."""
+    _observations, memberships, client, _cursor = _scan(
+        _team_routes(group_members=[PARTNER]), tmp_path
+    )
+
+    assert [row["member_id"] for row in memberships] == [PARTNER]
+    for url in (TEAM_INFO_URL, AUTH_ADMIN, GROUP_MEMBERS):
+        for header in (SELECT_USER, SELECT_ADMIN, PATH_ROOT):
+            assert client.header_for(f"POST {url}", header) is None, (url, header)
+
+
+def test_a_user_token_keeps_the_old_single_header_requests(tmp_path):
+    """The user-token path must survive unchanged: the probe's refusal is a mode
+    decision, not an error, and no Select or Path-Root header may appear anywhere."""
+    routes = _routes()
+    routes[f"POST {TEAM_INFO_URL}"] = _refused_probe()
+
+    observations, _memberships, client, _cursor = _scan(routes, tmp_path)
+
+    assert {row.name for row in observations} == {"Schmidt.txt", "Klageschrift.txt",
+                                                  "Steuer.txt"}
+    for needle in (f"POST {LIST} ", f"POST {DOWNLOAD}", f"POST {ACCOUNT}"):
+        for header in (SELECT_USER, SELECT_ADMIN, PATH_ROOT):
+            assert client.header_for(needle, header) is None, (needle, header)
+
+
+def test_act_as_selects_that_member_rather_than_the_admin(tmp_path):
+    """An operator can pin the connection to one member's view. That member is selected
+    with Select-User — their access, not admin reach — and the admin resolution is not
+    even consulted."""
+    routes = _team_routes(members=[
+        _directory_member(OWNER, ADMIN_ID, role="team_admin"),
+        _directory_member(PARTNER, "dbmid:partnerin"),
+    ])
+
+    _observations, _memberships, client, _cursor = _scan(
+        routes, tmp_path, config={"act_as_email": PARTNER}
+    )
+
+    assert client.header_for(f"POST {LIST} ", SELECT_USER) == "dbmid:partnerin"
+    assert client.header_for(f"POST {LIST} ", SELECT_ADMIN) is None
+    # A plain member still reads the shared team space — the folders they can reach.
+    assert json.loads(client.header_for(f"POST {LIST} ", PATH_ROOT))["root"] == TEAM_ROOT_NS
+    assert not client.called(AUTH_ADMIN)
+
+
+def test_a_wrong_act_as_address_is_refused_rather_than_substituted(tmp_path):
+    """Nobody by that address on the team. Silently falling back to the admin would
+    index an estate the operator explicitly did not ask for."""
+    routes = _team_routes(members=[_directory_member(OWNER, ADMIN_ID, role="team_admin")])
+    connector, _client = build(
+        "dropbox", routes, staging=tmp_path, config={"act_as_email": OUTSIDER}
+    )
+    try:
+        with pytest.raises(SourceAuthError):
+            list(connector.full_scan())
+    finally:
+        connector.close()
+
+
+@pytest.mark.parametrize("status", ["suspended", "removed"])
+def test_acting_as_an_inactive_member_is_refused(tmp_path, status):
+    """A suspended member's estate is reachable by nobody in Dropbox; indexing as them
+    would assert grants no caller can exercise there."""
+    routes = _team_routes(members=[
+        _directory_member(OWNER, ADMIN_ID, role="team_admin"),
+        _directory_member(PARTNER, "dbmid:partnerin", status=status),
+    ])
+    connector, _client = build(
+        "dropbox", routes, staging=tmp_path, config={"act_as_email": PARTNER}
+    )
+    try:
+        with pytest.raises(SourceAuthError):
+            list(connector.full_scan())
+    finally:
+        connector.close()
+
+
+def test_admin_resolution_falls_back_to_the_member_list(tmp_path):
+    """``get_authenticated_admin`` is the direct answer, but a token that cannot call
+    it still has a directory to search: the first active admin tier serves, and a
+    member_only entry — not an admin tier — must never be selected as one."""
+    routes = _team_routes(members=[
+        _directory_member(REFERENDAR, "dbmid:referendar"),  # member_only: not eligible
+        _directory_member(OWNER, ADMIN_ID, role="user_management_admin"),
+    ])
+    routes[f"POST {AUTH_ADMIN}"] = Recorded({"error_summary": "conflict/"}, status=409)
+
+    _observations, _memberships, client, _cursor = _scan(routes, tmp_path)
+
+    assert client.header_for(f"POST {LIST} ", SELECT_ADMIN) == ADMIN_ID
+
+
+def test_the_team_space_toggle_off_reads_the_members_own_home(tmp_path):
+    """With the team space off there is nothing Select-Admin buys: the member's home is
+    read as them, in their home namespace, with no Path-Root override."""
+    _observations, _memberships, client, _cursor = _scan(
+        _team_routes(), tmp_path, config={"index_team_space": False}
+    )
+
+    assert client.header_for(f"POST {LIST} ", SELECT_USER) == ADMIN_ID
+    assert client.header_for(f"POST {LIST} ", SELECT_ADMIN) is None
+    assert client.header_for(f"POST {LIST} ", PATH_ROOT) is None
+
+
+def test_no_path_root_is_sent_when_the_team_has_no_separate_team_space(tmp_path):
+    """``root_info`` cannot be trusted by tag — a live team member answered tagged
+    "user" — so the namespaces themselves decide. Equal namespaces mean the member's
+    home is the root and a Path-Root override would be redundant at best."""
+    routes = _team_routes(root_ns="ns-same", home_ns="ns-same")
+
+    _observations, _memberships, client, _cursor = _scan(routes, tmp_path)
+
+    assert client.header_for(f"POST {LIST} ", SELECT_ADMIN) == ADMIN_ID
+    assert client.header_for(f"POST {LIST} ", PATH_ROOT) is None
+
+
+def test_one_unreadable_group_does_not_stop_the_rest_in_team_mode(tmp_path):
+    """A team token has proven the team API answers, so one group that cannot be read —
+    deleted mid-run, say — is that group's loss alone. Only a user token's refusal is
+    permanent enough to stop paying for."""
+    routes = _team_routes(
+        folder_groups=[_group_member("g:a"), _group_member("g:b")],
+    )
+    routes[f'POST {GROUP_MEMBERS} | "g:a"'] = Recorded(
+        {"error_summary": "conflict/"}, status=409
+    )
+    routes[f'POST {GROUP_MEMBERS} | "g:b"'] = Recorded(
+        {"members": [_team_member(PARTNER)], "cursor": "", "has_more": False}
+    )
+
+    _observations, memberships, client, _cursor = _scan(routes, tmp_path)
+
+    assert {row["member_id"] for row in memberships} == {PARTNER}
+    assert client.call_count(f"POST {GROUP_MEMBERS}") == 2
+
+
+def test_a_token_swap_forces_a_crawl_rather_than_resuming_the_cursor(tmp_path):
+    """A cursor minted as one identity describes that identity's estate. Re-authorizing
+    the connection with a team token (or changing the acting member) must crawl, not
+    resume a delta over paths mapped for somebody else's view."""
+    user_routes = _routes()
+    user_routes[f"POST {TEAM_INFO_URL}"] = _refused_probe()
+    cursor = _synced_cursor(user_routes, tmp_path)
+    assert cursor["acting_identity"] == "user"
+
+    # Same stored cursor, now a team token. No continue route is recorded: resuming
+    # the drain would fail loudly rather than pass by accident.
+    batch, client, state = _drain(_team_routes(), tmp_path, cursor)
+
+    assert client.call_count(f"POST {LIST} ") == 1
+    assert not client.called(CONTINUE)
+    assert _cursor_data(state)["acting_identity"] == f"team:{ADMIN_ID}:root"
+
+
 # ------------------------------------------------------------------- sync race conditions
 
 

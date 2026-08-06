@@ -64,6 +64,15 @@ class DropboxCursor(BaseCursor):
         ),
     )
 
+    acting_identity: str = Field(
+        default="",
+        description=(
+            "The identity the estate was read as — token kind, acting team member and "
+            "namespace. A change means the stored cursors and path map describe a "
+            "different estate, so the next run crawls instead of resuming."
+        ),
+    )
+
     full_sync_required: bool = Field(
         default=True,
         description="Whether the next run must crawl instead of draining the delta feed.",
