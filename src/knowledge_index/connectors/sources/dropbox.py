@@ -823,6 +823,9 @@ class DropboxSource(BaseSource):
                 return
 
             observed_ids: set = set()
+            # File id -> the path this batch observed it at, for retiring the paths a
+            # rename or move left behind.
+            observed_paths: Dict[str, str] = {}
             deleted_ids: List[str] = []
             breadcrumbs = [
                 Breadcrumb(
@@ -863,6 +866,7 @@ class DropboxSource(BaseSource):
                         file_id = str(getattr(entity, "id", "") or "")
                         path = str(getattr(entity, "path_lower", "") or "")
                         observed_ids.add(file_id)
+                        observed_paths[file_id] = path.casefold()
                         schema.remember_path(path, file_id)
                         changes += 1
                         yield entity
@@ -885,7 +889,17 @@ class DropboxSource(BaseSource):
                 )
             # One pass over the map rather than one per deletion: a folder removal can
             # carry thousands of ids, and the map holds up to fifty thousand paths.
-            for path in [path for path, tracked in schema.path_ids.items() if tracked in removed]:
+            # A path is retired when its id was removed — and also when its id was
+            # observed at a *different* path, which is what a rename or move leaves
+            # behind (verified live: the old path arrives only as a deleted entry, which
+            # the suppression above rightly ignores). Keeping it would let a later
+            # deletion of the old parent folder sweep up the moved document's id and
+            # tombstone a document that still exists.
+            for path in [
+                path
+                for path, tracked in schema.path_ids.items()
+                if tracked in removed or observed_paths.get(tracked, path) != path
+            ]:
                 schema.forget_path(path)
 
             schema.update_root_cursor(root, cursor)

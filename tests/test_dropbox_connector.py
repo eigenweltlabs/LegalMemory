@@ -920,6 +920,41 @@ def test_a_rename_does_not_tombstone_the_document_it_renamed(tmp_path):
     assert _cursor_data(state)["path_ids"]["/mandate/schmidt-2026.txt"] == "id:schmidt"
 
 
+def test_a_move_retires_the_old_path_so_deleting_its_folder_later_spares_the_document(
+    tmp_path,
+):
+    """A move is a rename across folders, and it arrives the same way (verified live):
+    a deleted entry at the old path, the same id at the new one. The suppression above
+    rightly ignores the deleted entry — but the *map* must not keep the old path bound
+    to the id. If it did, deleting the now-emptied source folder in some later batch
+    would sweep the moved document's id along with it, tombstoning a document that
+    still exists at its new home."""
+    routes = _routes()
+    cursor = _synced_cursor(routes, tmp_path)
+
+    moved = _file("id:schmidt", "Schmidt.txt", "/archiv/schmidt.txt")
+    routes[f'POST {CONTINUE} | "cursor-1"'] = Recorded(
+        {"entries": [_deleted("/mandate/schmidt.txt", "Schmidt.txt"), moved],
+         "cursor": "cursor-2", "has_more": False}
+    )
+    batch, _client, state = _drain(routes, tmp_path, cursor)
+
+    assert batch.deleted_external_ids == []
+    data = _cursor_data(state)
+    assert data["path_ids"]["/archiv/schmidt.txt"] == "id:schmidt"
+    assert "/mandate/schmidt.txt" not in data["path_ids"]
+
+    # The emptied source folder goes later. Its remaining occupant is tombstoned; the
+    # document that moved out of it is not.
+    routes[f'POST {CONTINUE} | "cursor-2"'] = Recorded(
+        {"entries": [_deleted("/mandate", "Mandate")], "has_more": False}
+    )
+    batch, _client, _state = _drain(routes, tmp_path, data)
+
+    assert "id:klage" in batch.deleted_external_ids
+    assert "id:schmidt" not in batch.deleted_external_ids
+
+
 def test_deleting_a_folder_tombstones_everything_that_was_under_it(tmp_path):
     """Dropbox emits one deleted entry for the folder and none for its contents. Taking
     that literally would leave a removed matter searchable in full."""
