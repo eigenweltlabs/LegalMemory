@@ -671,15 +671,17 @@ function ConnectorSettingsSection({ source, onChanged, onAct }) {
     {fields.loading && !meta && <div className="quiet-row"><RefreshCw size={15} /> Loading settings…</div>}
     {fields.error && <div className="form-error">Could not load settings: {fields.error.message}</div>}
     {meta && conf && <>
-      {editable.filter((field) => field.type === "boolean").map((field) =>
-        <label className="toggle-row" key={field.name}><span><strong>{field.title || field.name}</strong>{field.description && <small>{field.description}</small>}</span><input type="checkbox" checked={Boolean(conf[field.name])} onChange={(event) => setValue(field.name, event.target.checked)} /></label>)}
-      {editable.filter((field) => field.type !== "boolean").map((field) =>
-        <label key={field.name}>{field.title || field.name}
-          {field.type === "list"
-            ? <textarea className="mono" rows={3} value={conf[field.name] ?? ""} onChange={(event) => setValue(field.name, event.target.value)} />
-            : <input type={field.type === "integer" ? "number" : "text"} className="mono" value={conf[field.name] ?? ""} onChange={(event) => setValue(field.name, event.target.value)} />}
-          {field.description && <small>{field.description}</small>}
-        </label>)}
+      <div className="drawer-settings">
+        {editable.filter((field) => field.type === "boolean").map((field) =>
+          <label className="toggle-row" key={field.name}><span><strong>{field.title || field.name}</strong>{field.description && <small>{field.description}</small>}</span><input type="checkbox" checked={Boolean(conf[field.name])} onChange={(event) => setValue(field.name, event.target.checked)} /></label>)}
+        {editable.filter((field) => field.type !== "boolean").map((field) =>
+          <label key={field.name}>{field.title || field.name}
+            {field.type === "list"
+              ? <textarea className="mono" rows={3} value={conf[field.name] ?? ""} onChange={(event) => setValue(field.name, event.target.value)} />
+              : <input type={field.type === "integer" ? "number" : "text"} className="mono" value={conf[field.name] ?? ""} onChange={(event) => setValue(field.name, event.target.value)} />}
+            {field.description && <small>{field.description}</small>}
+          </label>)}
+      </div>
       {error && <div className="form-error">{error}</div>}
       {note && <div className="form-note">{note}</div>}
       <button className="secondary-button small drawer-action" onClick={save} disabled={busy || source.status === "pending_auth"}>{busy ? "Saving…" : "Save settings"}</button>
