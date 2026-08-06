@@ -55,11 +55,16 @@ from knowledge_index.connectors.entities.dropbox import (
     DropboxFolderEntity,
 )
 from knowledge_index.connectors.http_helpers import raise_for_status
+from knowledge_index.sync.base import UnsupportedOperation
 from knowledge_index.connectors.retry import (
     retry_if_rate_limit_or_timeout,
     wait_rate_limit_with_backoff,
 )
-from knowledge_index.connectors.runtime.errors import FileSkippedException, SourceAuthError
+from knowledge_index.connectors.runtime.errors import (
+    FileSkippedException,
+    SourceAuthError,
+    SourceError,
+)
 from knowledge_index.connectors.runtime.files import FileService
 from knowledge_index.connectors.runtime.http import HttpClient
 from knowledge_index.connectors.runtime.logging import ContextualLogger
@@ -307,7 +312,19 @@ class DropboxSource(BaseSource):
             return
         try:
             await self._post(TEAM_GET_INFO, None)
-        except Exception:
+        except SourceAuthError:
+            # 401: this credential cannot use team routes. (A credential that is dead
+            # outright fails the very next call too, so nothing is masked here.)
+            self._team_mode = False
+            return
+        except SourceError as e:
+            # Only Dropbox's own refusal means "user token". Anything else — a timeout,
+            # a rate limit that outlived its retries, a 5xx — proves nothing about the
+            # token's kind, and answering "user" to it would drop the member header and
+            # quietly read the wrong estate (or, on a team token, fail every subsequent
+            # call with the single-account refusal). Verified live under rate limiting.
+            if "user_auth_not_allowed" not in str(e).casefold():
+                raise
             self._team_mode = False
             return
         self._team_mode = True
@@ -655,8 +672,35 @@ class DropboxSource(BaseSource):
             return False
         return self._exclude_path in (path_lower or "").casefold()
 
+    @staticmethod
+    def _path_breadcrumbs(entry: Dict[str, Any]) -> List[Breadcrumb]:
+        """One breadcrumb per real ancestor folder, from the entry's own display path.
+
+        The account is not a folder. Standing it in as the only breadcrumb recorded
+        every file as ``<member display name>/<file>`` wherever it actually lived —
+        which collapses the folder hierarchy, collides same-named files from different
+        folders onto one recorded path, and shows lawyers a provenance that does not
+        exist in Dropbox. The entry's ``path_display`` is where Dropbox states the real
+        ancestry, so the breadcrumbs are cut from it.
+        """
+        display = str(entry.get("path_display") or entry.get("path_lower") or "").strip("/")
+        ancestors = display.split("/")[:-1] if display else []
+        crumbs: List[Breadcrumb] = []
+        prefix: List[str] = []
+        for part in ancestors:
+            prefix.append(part)
+            crumbs.append(
+                Breadcrumb(
+                    # Stable per path, casefolded like every Dropbox path comparison.
+                    entity_id="path:/" + "/".join(prefix).casefold(),
+                    name=part,
+                    entity_type="DropboxFolderEntity",
+                )
+            )
+        return crumbs
+
     async def _emit_file(
-        self, entry: Dict, breadcrumbs: List[Breadcrumb], files: FileService
+        self, entry: Dict, files: FileService
     ) -> AsyncGenerator[BaseEntity, None]:
         """Turn one ``list_folder`` file entry into a staged, permission-carrying entity."""
         if not entry.get("is_downloadable", True):
@@ -669,7 +713,9 @@ class DropboxSource(BaseSource):
         if self._excluded(entry.get("path_lower")):
             return
 
-        entity = DropboxFileEntity.from_api(entry, breadcrumbs=breadcrumbs, download_url=DOWNLOAD)
+        entity = DropboxFileEntity.from_api(
+            entry, breadcrumbs=self._path_breadcrumbs(entry), download_url=DOWNLOAD
+        )
         entity.access = await self._file_access(entry)
 
         try:
@@ -716,7 +762,6 @@ class DropboxSource(BaseSource):
     async def _crawl_root(
         self,
         root: str,
-        account_breadcrumb: Breadcrumb,
         files: FileService,
         schema: DropboxCursor,
     ) -> AsyncGenerator[BaseEntity, None]:
@@ -735,7 +780,6 @@ class DropboxSource(BaseSource):
                 "the next sync will crawl this root again"
             )
 
-        breadcrumbs = [account_breadcrumb]
         try:
             async for entry in self._paginate(
                 LIST_FOLDER, _listing_args(root), LIST_FOLDER_CONTINUE
@@ -744,9 +788,11 @@ class DropboxSource(BaseSource):
                 if tag == "folder":
                     if self._excluded(entry.get("path_lower")):
                         continue
-                    yield DropboxFolderEntity.from_api(entry, breadcrumbs=breadcrumbs)
+                    yield DropboxFolderEntity.from_api(
+                        entry, breadcrumbs=self._path_breadcrumbs(entry)
+                    )
                 elif tag == "file":
-                    async for entity in self._emit_file(entry, breadcrumbs, files):
+                    async for entity in self._emit_file(entry, files):
                         schema.remember_path(
                             str(getattr(entity, "path_lower", "") or ""),
                             str(getattr(entity, "id", "") or ""),
@@ -776,11 +822,6 @@ class DropboxSource(BaseSource):
         """Crawl each root and seed the cursor the next delta run resumes from."""
         account = await self._account()
         yield account
-        account_breadcrumb = Breadcrumb(
-            entity_id=account.account_id,
-            name=account.display_name,
-            entity_type="DropboxAccountEntity",
-        )
 
         # A crawl re-establishes the whole picture, so last run's cursors and paths are
         # superseded rather than merged. Merging would leave a path map describing files
@@ -790,7 +831,7 @@ class DropboxSource(BaseSource):
 
         count = 0
         for root in roots:
-            async for entity in self._crawl_root(root, account_breadcrumb, files, schema):
+            async for entity in self._crawl_root(root, files, schema):
                 count += 1
                 yield entity
 
@@ -827,13 +868,6 @@ class DropboxSource(BaseSource):
             # rename or move left behind.
             observed_paths: Dict[str, str] = {}
             deleted_ids: List[str] = []
-            breadcrumbs = [
-                Breadcrumb(
-                    entity_id="dropbox",
-                    name="Dropbox",
-                    entity_type="DropboxAccountEntity",
-                )
-            ]
 
             while True:
                 try:
@@ -862,7 +896,7 @@ class DropboxSource(BaseSource):
                         continue
                     if tag != "file":
                         continue
-                    async for entity in self._emit_file(entry, breadcrumbs, files):
+                    async for entity in self._emit_file(entry, files):
                         file_id = str(getattr(entity, "id", "") or "")
                         path = str(getattr(entity, "path_lower", "") or "")
                         observed_ids.add(file_id)
@@ -929,6 +963,7 @@ class DropboxSource(BaseSource):
         assert files is not None, "FileService is required for Dropbox"
         await self._ensure_identity()
 
+        had_prior_state = bool(cursor is not None and cursor.loaded_from_db)
         schema = DropboxCursor(**(cursor.data if cursor else {}))
         self._tracked_groups.update(str(group) for group in schema.tracked_groups)
 
@@ -950,6 +985,19 @@ class DropboxSource(BaseSource):
 
         scope = f"TARGETED ({len(selected)} folder roots) " if selected else ""
         if schema.needs_full_sync() or schema.needs_periodic_full_sync():
+            if had_prior_state:
+                # Refuse rather than crawl inside the engine's delta frame. Only the
+                # engine's own full scan reconciles what a crawl did NOT observe —
+                # crawling here left documents from the previous estate indexed and
+                # retrievable after a narrowing (act-as member changed, team space
+                # toggled off), reported the run as "incremental", and starved the
+                # ACL-staleness clock. The engine catches this and re-runs the sync
+                # in its full-scan frame.
+                raise UnsupportedOperation(
+                    "the stored dropbox cursor no longer describes this estate "
+                    "(scope, acting member, namespace or cursor validity changed); "
+                    "a full crawl with tombstone reconciliation is required"
+                )
             self.logger.info(f"Sync strategy: {scope}FULL")
             generator = self._full_sync(schema, roots, files)
         else:

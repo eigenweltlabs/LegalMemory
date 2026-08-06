@@ -53,9 +53,14 @@ VALIDATE_ROUTES: dict[str, dict[str, Recorded]] = {
         )
     },
     "dropbox": {
+        # The refusal a personal account answers the team probe with. Only this exact
+        # refusal means "user token"; an unrecorded route would abort the run.
+        "POST https://api.dropboxapi.com/2/team/get_info": Recorded(
+            {"error_summary": "features/user_auth_not_allowed"}, status=400
+        ),
         "POST https://api.dropboxapi.com/2/users/get_current_account": Recorded(
             {"account_id": "dbid:1"}
-        )
+        ),
     },
     "box": {"GET https://api.box.com/2.0/users/me": Recorded({"id": "1"})},
     "notion": {"GET https://api.notion.com/v1/users/me": Recorded({"id": "user-1"})},
@@ -1534,6 +1539,9 @@ def _dropbox_routes() -> dict[str, Recorded]:
     ]
     neu_entries = [_dropbox_file("id:neu-1", "Klageschrift.txt", "/mandate/neu/klageschrift.txt")]
     return {
+        "POST https://api.dropboxapi.com/2/team/get_info": Recorded(
+            {"error_summary": "features/user_auth_not_allowed"}, status=400
+        ),
         "POST https://api.dropboxapi.com/2/users/get_current_account": Recorded(
             {"account_id": "dbid:1", "name": {"display_name": "Kanzlei"}}
         ),

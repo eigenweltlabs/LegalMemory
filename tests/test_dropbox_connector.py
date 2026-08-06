@@ -32,7 +32,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from knowledge_index.connectors.cursors.dropbox import DropboxCursor
-from knowledge_index.connectors.runtime.errors import SourceAuthError
+from knowledge_index.connectors.runtime.errors import SourceAuthError, SourceError
 from knowledge_index.connectors.runtime.types import NodeSelectionData
 from knowledge_index.db.models import (
     Blob,
@@ -45,6 +45,7 @@ from knowledge_index.db.models import (
 )
 from knowledge_index.permissions import AccessService
 from knowledge_index.sync import SyncEngine
+from knowledge_index.sync.base import UnsupportedOperation
 from tests.connector_replay import Recorded, build
 
 API = "https://api.dropboxapi.com/2"
@@ -163,6 +164,11 @@ def _routes(
 ) -> dict[str, Recorded]:
     """A complete Dropbox account, with the sharing knobs each test needs to turn."""
     routes: dict[str, Recorded] = {
+        # A personal account's answer to the team probe: the genuine refusal, not an
+        # unrecorded route. The probe treats only this refusal as "user token" — any
+        # other failure is an error, so a fixture that simply omitted the route would
+        # abort every scan.
+        f"POST {TEAM_INFO_URL}": _refused_probe(),
         f"POST {ACCOUNT}": Recorded(
             {
                 "account_id": "dbid:kanzlei",
@@ -272,6 +278,35 @@ def test_the_whole_account_is_read_in_one_recursive_listing(tmp_path):
     assert "Kanzlei" not in {row.name for row in observations}
 
 
+def test_the_recorded_path_is_the_files_real_ancestry(tmp_path):
+    """The recorded path must be where the file lives in Dropbox, folder by folder.
+
+    Breadcrumbing every file with the *account* instead recorded the whole estate as
+    ``<member display name>/<file>`` — one flat fake folder, colliding same-named files
+    from different matters and showing lawyers a provenance that does not exist.
+    """
+    observations, _memberships, _client, _cursor = _scan(_routes(), tmp_path)
+
+    assert {row.path for row in observations} == {
+        "mandate/Schmidt.txt",
+        "mandate/klage/Klageschrift.txt",
+        "privat/Steuer.txt",
+    }
+
+
+def test_the_delta_records_the_same_real_ancestry_as_the_crawl(tmp_path):
+    """The change feed stamped its own fake root ("Dropbox/<file>"), so one estate wore
+    two different path prefixes depending on which pass observed a file last."""
+    neu = _file("id:neu", "Nachtrag.txt", "/mandate/nachtrag.txt", rev="ffff11112222")
+    routes = _routes()
+    routes[f'POST {CONTINUE} | "cursor-1"'] = Recorded({"entries": [neu], "has_more": False})
+    cursor = _synced_cursor(routes, tmp_path)
+
+    batch, _client, _state = _drain(routes, tmp_path, cursor)
+
+    assert [row.path for row in batch.observations] == ["mandate/Nachtrag.txt"]
+
+
 def test_pagination_follows_the_continue_cursor(tmp_path):
     routes = _routes(entries=[ESTATE[0], SCHMIDT])
     routes[f'POST {LIST} | "path": "", "recursive": true'] = Recorded(
@@ -341,7 +376,13 @@ def test_dead_credentials_surface_as_an_auth_error_not_an_empty_sync(tmp_path):
     """The engine tombstones on an empty scan, so a 401 must never look like one."""
     connector, _client = build(
         "dropbox",
-        {f"POST {ACCOUNT}": Recorded({"error_summary": "invalid_access_token/"}, status=401)},
+        {
+            # A dead credential is dead on every route, the team probe included.
+            f"POST {TEAM_INFO_URL}": Recorded(
+                {"error_summary": "invalid_access_token/"}, status=401
+            ),
+            f"POST {ACCOUNT}": Recorded({"error_summary": "invalid_access_token/"}, status=401),
+        },
         staging=tmp_path,
     )
     try:
@@ -796,22 +837,83 @@ def test_one_unreadable_group_does_not_stop_the_rest_in_team_mode(tmp_path):
     assert client.call_count(f"POST {GROUP_MEMBERS}") == 2
 
 
-def test_a_token_swap_forces_a_crawl_rather_than_resuming_the_cursor(tmp_path):
+def test_a_failed_team_probe_is_not_mistaken_for_a_user_token(tmp_path):
+    """Only Dropbox's own ``user_auth_not_allowed`` refusal means "user token". A probe
+    that fails for any other reason — here a 500, live it was a rate limit that
+    outlived its retries — proves nothing about the token's kind; answering "user"
+    dropped the member header and failed every subsequent call with the
+    single-account refusal (observed live, 2026-08-06)."""
+    routes = _routes()
+    routes[f"POST {TEAM_INFO_URL}"] = Recorded({"error_summary": "internal_error/"}, status=500)
+
+    connector, _client = build("dropbox", routes, staging=tmp_path)
+    try:
+        with pytest.raises(SourceError):
+            list(connector.full_scan())
+    finally:
+        connector.close()
+
+
+def test_a_token_swap_refuses_the_delta_instead_of_crawling_inside_it(tmp_path):
     """A cursor minted as one identity describes that identity's estate. Re-authorizing
-    the connection with a team token (or changing the acting member) must crawl, not
-    resume a delta over paths mapped for somebody else's view."""
+    the connection with a team token (or changing the acting member) must not resume a
+    delta over paths mapped for somebody else's view — and it must not crawl *inside*
+    the delta frame either: only the engine's own full scan tombstones what a crawl did
+    not observe, so a crawl smuggled through ``changes()`` left documents from the old
+    estate indexed and retrievable. The connector refuses; the engine crawls."""
     user_routes = _routes()
     user_routes[f"POST {TEAM_INFO_URL}"] = _refused_probe()
     cursor = _synced_cursor(user_routes, tmp_path)
     assert cursor["acting_identity"] == "user"
 
-    # Same stored cursor, now a team token. No continue route is recorded: resuming
-    # the drain would fail loudly rather than pass by accident.
-    batch, client, state = _drain(_team_routes(), tmp_path, cursor)
-
-    assert client.call_count(f"POST {LIST} ") == 1
+    connector, client = build("dropbox", _team_routes(), staging=tmp_path, cursor_data=cursor)
+    try:
+        with pytest.raises(UnsupportedOperation):
+            connector.changes(None)
+    finally:
+        connector.close()
+    assert not client.called(f"POST {LIST} ")
     assert not client.called(CONTINUE)
-    assert _cursor_data(state)["acting_identity"] == f"team:{ADMIN_ID}:root"
+
+
+def test_a_token_swap_reaches_the_engines_full_frame(session: Session, tmp_path):
+    """The other half of the refusal: through the engine, the same swap lands in the
+    full-scan frame — reported as such — rather than dying on the refusal."""
+    user_routes = _routes(group_members=[])
+    user_routes[f"POST {TEAM_INFO_URL}"] = _refused_probe()
+    source = _source(session)
+    _sync(session, source, user_routes, tmp_path)
+    assert _cursor_data(source.cursor)["acting_identity"] == "user"
+
+    result = _sync_delta(session, source, _team_routes(group_members=[]), tmp_path)
+
+    assert result.mode == "full"
+    assert _cursor_data(source.cursor)["acting_identity"] == f"team:{ADMIN_ID}:root"
+
+
+def test_narrowing_the_estate_removes_what_it_no_longer_reaches(session: Session, tmp_path):
+    """The retrieval-safety half of the same contract, verified end to end: after the
+    acting identity changes, documents of the previous estate that the new one does not
+    contain must stop being retrievable — not linger indexed until the daily ACL crawl."""
+    user_routes = _routes(group_members=[])
+    user_routes[f"POST {TEAM_INFO_URL}"] = _refused_probe()
+    source = _source(session)
+    _sync(session, source, user_routes, tmp_path)
+
+    # The team token's view holds one of the three documents the user token saw.
+    narrowed = _team_routes(group_members=[], entries=[SCHMIDT])
+    result = _sync_delta(session, source, narrowed, tmp_path)
+    assert result.mode == "full"
+
+    rows = {
+        row.external_id: row.deleted_at
+        for row in session.scalars(
+            select(SourceObject).where(SourceObject.source_id == source.id)
+        )
+    }
+    assert rows["id:schmidt"] is None
+    assert rows["id:klage"] is not None
+    assert rows["id:privat"] is not None
 
 
 # ------------------------------------------------------------------- sync race conditions
