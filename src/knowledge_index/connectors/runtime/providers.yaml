@@ -310,9 +310,14 @@ providers:
       scope_label: App permissions
       scope_location: >-
         This appliance sends no scope parameter to Dropbox: the token receives whatever
-        the app's own Permissions tab declares. Tick files.metadata.read,
-        files.content.read and sharing.read there — read-only, nothing that writes — and
-        press Submit at the bottom, which is a separate step from ticking the boxes.
+        the app's own Permissions tab declares. Tick account_info.read,
+        files.metadata.read, files.content.read and sharing.read there — read-only,
+        nothing that writes — and press Submit at the bottom, which is a separate step
+        from ticking the boxes. account_info.read is required, not optional: every sync
+        opens with users/get_current_account, so a token without it fails on the first
+        call and the connection looks dead rather than under-scoped. Add the team scope
+        groups.read to have Dropbox groups expanded into their members; it needs a
+        Dropbox Business team and is simply unavailable on a personal account.
       secret: >-
         Settings → App key and App secret ("Show"). The App key is the client id and the
         App secret is the client secret.

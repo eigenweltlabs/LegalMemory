@@ -24,9 +24,17 @@ Create the app from the account that owns the estate, at
 
 1. **Create app** → **Scoped access** → access type **Full Dropbox**. An
    App-folder app can only ever see one directory it created for itself.
-2. **Permissions** tab: tick `files.metadata.read`, `files.content.read` and
-   `sharing.read`. For group expansion also tick `groups.read`. Press
-   **Submit** at the bottom — that is a separate step from ticking the boxes.
+2. **Permissions** tab: tick `account_info.read`, `files.metadata.read`,
+   `files.content.read` and `sharing.read`. For group expansion also tick
+   `groups.read`, which is a team scope and needs a Dropbox Business team.
+   Press **Submit** at the bottom — that is a separate step from ticking the
+   boxes.
+
+   `account_info.read` is not optional: every sync opens with
+   `users/get_current_account`, both to validate the credential and to learn
+   the owner's address, which is what makes an unshared file readable by the
+   account that authorized the connection. Without it the first call fails and
+   the connection looks dead rather than under-scoped.
 3. **Settings** → **OAuth 2** → **Redirect URIs**: add the URI shown in the
    setup modal.
 4. **Settings** → **App key and App secret**: the App key is the client id, the
