@@ -1986,6 +1986,80 @@ def create_app(
                 ),
             }
 
+    @app.put("/api/sources/{source_id}/config")
+    def set_source_config(source_id: str, payload: dict, request: Request) -> dict:
+        """Change a connection's connector settings after it was created.
+
+        Until this endpoint existed the settings a connector declares — which member a
+        Dropbox team token acts as, whether the team space is indexed, an excluded path
+        — were writable only at creation, so exercising them meant deleting a working
+        connection and authorizing again. The estate a changed setting describes is
+        re-read by the next sync: connectors detect that their cursor no longer matches
+        the estate and refuse the delta, which sends the engine through its full-scan
+        frame — the one that also tombstones what the new settings no longer reach.
+        """
+        resolve_identity(request, admin=True)
+        from pydantic import ValidationError
+
+        from knowledge_index.connectors import get as get_connector
+        from knowledge_index.connectors.runtime.errors import SourceError
+
+        if not isinstance(payload, dict) or not payload:
+            raise HTTPException(status_code=422, detail="a non-empty settings object is required")
+        with session_factory() as session:
+            source = session.get(Source, source_id)
+            if source is None:
+                raise HTTPException(status_code=404, detail="source not found")
+            try:
+                spec = get_connector(source.kind)
+            except SourceError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+            config_class = getattr(spec.load(), "config_class", None)
+            if config_class is None:
+                raise HTTPException(
+                    status_code=422, detail=f"{spec.label} has no connector settings"
+                )
+            editable = set(config_class.model_fields)
+            unknown = sorted(set(payload) - editable)
+            if unknown:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"unknown settings for {spec.label}: {', '.join(unknown)}",
+                )
+            config = dict(source.config or {})
+            connector_config = dict(config.get("connector") or {})
+            changed: list[str] = []
+            for key, value in payload.items():
+                # Empty means "back to the connector's default", exactly as an untouched
+                # field at creation would have.
+                if value in (None, ""):
+                    if key in connector_config:
+                        connector_config.pop(key)
+                        changed.append(key)
+                elif connector_config.get(key) != value:
+                    connector_config[key] = value
+                    changed.append(key)
+            try:
+                config_class.model_validate(
+                    {k: v for k, v in connector_config.items() if k in editable}
+                )
+            except ValidationError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+            config["connector"] = connector_config
+            source.config = config
+            session.commit()
+            return {
+                "source_id": source.id,
+                "changed": sorted(changed),
+                "config": {k: v for k, v in connector_config.items() if k in editable},
+                "note": (
+                    "Settings saved. The next sync re-reads the estate under them and "
+                    "removes what they no longer reach."
+                    if changed
+                    else "Settings unchanged."
+                ),
+            }
+
     @app.get("/api/sources")
     def list_sources(request: Request) -> list[dict]:
         identity = resolve_identity(request)
@@ -2057,6 +2131,24 @@ def create_app(
                     raise HTTPException(
                         status_code=422,
                         detail=f"{spec.label} needs the firm's own OAuth client id and secret",
+                    )
+                # Catch the classic paste mistake at the form instead of after the whole
+                # browser handshake: a provider-issued access token in the secret field
+                # survives every step until the code exchange, which then fails with a
+                # provider error naming neither the field nor the fix. No OAuth client
+                # secret is hundreds of characters long, and Dropbox's generated tokens
+                # wear an "sl." prefix.
+                secret = str(secret_values["client_secret"]).strip()
+                if secret.startswith("sl.") or len(secret) > 128:
+                    raise HTTPException(
+                        status_code=422,
+                        detail=(
+                            f"That looks like an access token, not an OAuth client "
+                            f"secret. {spec.label} wants the short app secret from the "
+                            "provider's app console (shown next to the client id) — "
+                            "tokens are obtained automatically during authorization "
+                            "and are never pasted here."
+                        ),
                     )
                 # Defers the Source to the callback: see this endpoint's docstring.
                 oauth_provider = spec.oauth_provider
@@ -4461,6 +4553,9 @@ def _source_payload(session: Session, source: Source, config: AppConfig) -> dict
         # both are things an operator has to be able to see without reading the database.
         "scope": _source_scope(source),
         "mirrors_acls": _source_mirrors_acls(source),
+        # The connector settings an administrator may edit after creation — only the
+        # schema-declared ones, never the scope bookkeeping stored beside them.
+        "connector_settings": _source_connector_settings(source),
         "last_sync_at": source.last_sync_at.isoformat() if source.last_sync_at else None,
         "last_full_sync_at": (
             source.last_full_sync_at.isoformat() if source.last_full_sync_at else None
@@ -5010,6 +5105,27 @@ def _reject_unconfirmed_broad_grant(spec, payload: "SourceCreate") -> None:
                 "is intended."
             ),
         )
+
+
+def _source_connector_settings(source) -> dict | None:
+    """The schema-declared connector settings currently stored on this connection.
+
+    ``None`` for source kinds without a config schema. Scope bookkeeping (``roots``,
+    ``scope_decided``) lives in the same dict but is owned by the scope endpoint, so it
+    is filtered out rather than offered for editing.
+    """
+    from knowledge_index.connectors import get as get_connector
+    from knowledge_index.connectors.runtime.errors import SourceError
+
+    try:
+        spec = get_connector(source.kind)
+    except SourceError:
+        return None
+    config_class = getattr(spec.load(), "config_class", None)
+    if config_class is None:
+        return None
+    stored = dict((source.config or {}).get("connector") or {})
+    return {name: stored[name] for name in config_class.model_fields if name in stored}
 
 
 def _source_mirrors_acls(source) -> bool | None:
