@@ -44,7 +44,10 @@ Create the app from the account that owns the estate, at
 3. **Settings** → **OAuth 2** → **Redirect URIs**: add the URI shown in the
    setup modal.
 4. **Settings** → **App key and App secret**: the App key is the client id, the
-   App secret is the client secret.
+   App secret is the client secret. The **Generate access token** button on the
+   same page mints a developer token this appliance never uses — an `sl.…`
+   token pasted as the client secret is refused at the form rather than
+   surfacing as a cryptic provider error after the browser handshake.
 
 Permissions ticked *after* a token was issued do not apply to that token.
 Change the Permissions tab first, then authorize.
@@ -79,9 +82,15 @@ Two things follow for a team app:
   `/2/team/*` call will be refused no matter the scopes.
 
 Re-authorizing a connection with the other kind of token, changing the acting
-member, or toggling the team space all cause the next sync to crawl rather
-than resume: the stored change cursors describe an estate the new identity is
-not looking at.
+member, or toggling the team space all cause the next sync to run as a **full
+scan** rather than a delta resume: the stored change cursors describe an estate
+the new identity is not looking at. That scan also reconciles removals —
+documents the new identity cannot reach are removed, through the same
+deletion-confirmation guard that protects against any suspiciously large
+deletion. A narrowing that empties the estate outright is therefore held for
+confirmation first, visible on the connection as a pending deletion, and
+confirmations accumulate on subsequent full scans (at least one every
+`security.acl_refresh_hours`).
 
 ## Connect
 
@@ -98,6 +107,11 @@ selection syncs the whole account.
 | Expand Dropbox Groups | on | Resolve Dropbox group members through the team API, so a folder shared with a group is reachable by the people in it. |
 | Index The Team Space | on | With a team token, index the team's shared space — the team folders — rather than the home directory of the member the token acts as. Ignored by a user token. |
 | Act As Member | empty | The team member whose access a team token uses, by email address. Blank acts as the admin who authorized the token, with admin reach over the team space; a named member reaches what that member can reach. Ignored by a user token. |
+
+These settings are editable after creation, under **Connector settings** in the
+connection's details. A saved change applies on the next sync, which runs as a
+full scan and removes what the new settings no longer reach; clearing a field
+returns it to its default.
 
 ## How permissions are resolved
 
