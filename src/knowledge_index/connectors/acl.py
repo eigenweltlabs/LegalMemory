@@ -155,28 +155,90 @@ def drive_permissions_to_access(permissions: list[dict[str, Any]]) -> AccessCont
 # ---------------------------------------------------------------------------- Dropbox
 
 
+# Dropbox's ``AccessLevel``, in full: owner, editor, viewer, viewer_no_comment. All four
+# confer read, so this set is the whole documented union — but the union is *open*, so a
+# level Dropbox adds later arrives as a tag this does not know.
+DROPBOX_READ_ACCESS_TYPES = frozenset({"owner", "editor", "viewer", "viewer_no_comment"})
+
+# A team member appears in a group's membership whatever their standing with the team.
+# Only ``active`` means they can actually sign in and open anything; ``invited`` has not
+# joined yet and ``suspended``/``removed`` no longer belong. Mirroring those is the same
+# mistake as mirroring an outstanding folder invitation, and it is the one that keeps a
+# departed colleague reading a firm's matters through a group they were never taken out of.
+DROPBOX_ACTIVE_MEMBER_STATUS = "active"
+
+
+def _dropbox_confers_read(member: dict[str, Any]) -> bool:
+    """Whether one membership entry actually grants read.
+
+    An allowlist, not a denylist, because ``AccessLevel`` is an open union: an unknown
+    tag is a level this code has never been told the meaning of, and guessing that it
+    confers read is the guess that leaks. The cost of the allowlist is the opposite
+    error — a genuinely new read level would go unmirrored and its holders would see
+    nothing until this set is updated — which is the direction the rest of this module
+    already fails in.
+
+    A missing ``access_type`` is treated as read. The field is required by the API, so
+    its absence means a payload shape we do not recognise rather than a restriction, and
+    the caller has already established that this member is on the object.
+    """
+    access_type = member.get("access_type")
+    if access_type is None:
+        return True
+    tag = _clean(access_type.get(".tag"))
+    return tag in DROPBOX_READ_ACCESS_TYPES if tag else True
+
+
+def dropbox_member_is_active(member: dict[str, Any]) -> bool:
+    """Whether a team member's standing lets them reach anything at all.
+
+    Applied to group expansion, where Dropbox reports every member of a group regardless
+    of whether they still belong to the team.
+    """
+    status = (member.get("profile") or {}).get("status")
+    if status is None:
+        # Required by the API; absent means an unrecognised shape, not a departure.
+        return True
+    return _clean(status.get(".tag")) in {"", DROPBOX_ACTIVE_MEMBER_STATUS}
+
+
 def dropbox_members_to_access(
     users: list[dict[str, Any]] | None,
     groups: list[dict[str, Any]] | None,
     invitees: list[dict[str, Any]] | None = None,
+    *,
+    owner_email: str = "",
 ) -> AccessControl | None:
-    """Translate Dropbox ``sharing/list_file_members`` output.
+    """Translate Dropbox ``sharing/list_file_members`` or ``list_folder_members`` output.
+
+    Both endpoints return the same three collections, so one translation serves the
+    per-file read and the far cheaper per-shared-folder read.
 
     Invitees are ignored: an outstanding invitation is not access, and mirroring it
-    would grant on the strength of an email someone typed.
+    would grant on the strength of an email someone typed. ``owner_email`` is the
+    authorizing account, added because a firm's own connection must not lose sight of
+    files it can plainly open — Dropbox omits the owner from a folder's member list in
+    some shapes, and an empty viewer list is an assertion that nobody may read.
     """
     if users is None and groups is None:
         return None
     viewers: list[str] = []
     for member in users or []:
         email = _clean((member.get("user") or {}).get("email"))
-        if email and _clean(member.get("access_type", {}).get(".tag") or "viewer") != "no_access":
+        if email and _dropbox_confers_read(member):
             viewers.append(f"user:{email}")
     for member in groups or []:
+        if not _dropbox_confers_read(member):
+            continue
         group = member.get("group") or {}
+        # The id is preferred: group names are renameable and non-unique, and the
+        # principals layer binds either form to the source it came from.
         identifier = _clean(group.get("group_id")) or _clean(group.get("group_name"))
         if identifier:
             viewers.append(f"group:dropbox:{identifier}")
+    owner = _clean(owner_email)
+    if owner:
+        viewers.append(f"user:{owner}")
     del invitees
     return AccessControl(viewers=sorted(set(viewers)), is_public=False)
 

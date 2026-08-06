@@ -469,3 +469,31 @@ def test_the_sweep_removes_lapsed_handshakes_and_spares_live_ones(
     with factory() as session:
         remaining = session.scalars(select(PendingSourceAuthorization)).all()
     assert [row.state for row in remaining] == ["state-live"]
+
+
+# ------------------------------------------------------- the pasted-token paste mistake
+
+
+def test_an_access_token_pasted_as_the_client_secret_is_refused_at_the_form(
+    app_client, factory
+) -> None:
+    """A provider-issued token in the secret field survives every step until the code
+    exchange, which then fails with a provider error naming neither the field nor the
+    fix — after the operator has authorized in the browser. The shape is decidable at
+    submission, so it is decided there."""
+    body = {**CONNECT_BODY, "kind": "dropbox", "client_secret": "sl.u." + "A" * 1150}
+    response = app_client.post("/api/sources", json=body, headers=ADMIN_HEADERS)
+
+    assert response.status_code == 422
+    assert "access token" in response.json()["detail"]
+    assert _counts(factory) == {"sources": 0, "credentials": 0, "pending": 0}
+
+
+def test_an_implausibly_long_client_secret_is_refused(app_client, factory) -> None:
+    """No OAuth client secret is hundreds of characters; a value that long is a pasted
+    token or certificate whatever it starts with."""
+    body = {**CONNECT_BODY, "client_secret": "x" * 200}
+    response = app_client.post("/api/sources", json=body, headers=ADMIN_HEADERS)
+
+    assert response.status_code == 422
+    assert _counts(factory) == {"sources": 0, "credentials": 0, "pending": 0}

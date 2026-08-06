@@ -105,10 +105,48 @@ class DropboxConfig(SourceConfig):
         default=True,
         title="Mirror Sharing Members",
         description=(
-            "Read each file's sharing members so the file is retrievable by the same "
-            "people who can open it in Dropbox. Costs one extra API call per file. When "
-            "false, permissions are left unknown and documents stay invisible until an "
-            "administrator grants access at the project level."
+            "Read sharing members so each file is retrievable by the same people who can "
+            "open it in Dropbox. Members are read once per shared folder and reused for "
+            "everything inside it, so the cost is one call per shared folder rather than "
+            "one per file. When false, permissions are left unknown and documents stay "
+            "invisible until an administrator grants access at the project level."
+        ),
+    )
+
+    expand_team_groups: bool = Field(
+        default=True,
+        title="Expand Dropbox Groups",
+        description=(
+            "Resolve the members of Dropbox groups named in a file's sharing members, so "
+            "a folder shared with a group is retrievable by the people in that group "
+            "rather than by nobody. Requires a Dropbox Business team token with "
+            "groups.read; on a personal account the calls are skipped after the first "
+            "refusal and group grants stay unmatched."
+        ),
+    )
+
+    index_team_space: bool = Field(
+        default=True,
+        title="Index The Team Space",
+        description=(
+            "With a Dropbox Business team token, index the team's shared space — the team "
+            "folders everyone works out of — rather than the home directory of the single "
+            "member the token acts as. The team space is what a firm means by its file "
+            "server. Turn it off to index only that member's own Dropbox. A user token "
+            "can reach nothing but its own account, so this does not apply to one."
+        ),
+    )
+
+    act_as_email: str = Field(
+        default="",
+        title="Act As Member",
+        description=(
+            "Email address of the Dropbox Business team member this connection acts as. "
+            "Leave blank to act as the team admin who authorized the token. A team token "
+            "cannot read a file without naming a member to read it as, so this decides "
+            "whose view of the estate is indexed: whose home directory when the team "
+            "space is off, and whose access to the team folders when it is on. Ignored "
+            "by a user token."
         ),
     )
 

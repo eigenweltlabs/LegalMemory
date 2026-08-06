@@ -41,6 +41,7 @@ CONTENT_TOKENS = (
 )
 
 CONTAINER_TOKENS = (
+    "account",
     "drive",
     "site",
     "matter",

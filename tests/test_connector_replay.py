@@ -53,9 +53,14 @@ VALIDATE_ROUTES: dict[str, dict[str, Recorded]] = {
         )
     },
     "dropbox": {
+        # The refusal a personal account answers the team probe with. Only this exact
+        # refusal means "user token"; an unrecorded route would abort the run.
+        "POST https://api.dropboxapi.com/2/team/get_info": Recorded(
+            {"error_summary": "features/user_auth_not_allowed"}, status=400
+        ),
         "POST https://api.dropboxapi.com/2/users/get_current_account": Recorded(
             {"account_id": "dbid:1"}
-        )
+        ),
     },
     "box": {"GET https://api.box.com/2.0/users/me": Recorded({"id": "1"})},
     "notion": {"GET https://api.notion.com/v1/users/me": Recorded({"id": "user-1"})},
@@ -1534,10 +1539,31 @@ def _dropbox_routes() -> dict[str, Recorded]:
     ]
     neu_entries = [_dropbox_file("id:neu-1", "Klageschrift.txt", "/mandate/neu/klageschrift.txt")]
     return {
+        "POST https://api.dropboxapi.com/2/team/get_info": Recorded(
+            {"error_summary": "features/user_auth_not_allowed"}, status=400
+        ),
         "POST https://api.dropboxapi.com/2/users/get_current_account": Recorded(
             {"account_id": "dbid:1", "name": {"display_name": "Kanzlei"}}
         ),
-        f'POST {DROPBOX_LIST} | "path": "", ': Recorded({"entries": root_entries}),
+        # The body clause matters: without it this key is shorter than the list_folder
+        # key plus its own body clause, and the harness would serve a folder listing to
+        # the cursor call because the URL is a prefix of it.
+        'POST https://api.dropboxapi.com/2/files/list_folder/get_latest_cursor | "recursive": true': Recorded(
+            {"cursor": "cursor-latest"}
+        ),
+        # An unscoped sync walks the account root recursively, exactly as a selected
+        # root does — one listing, not a folder-by-folder walk.
+        f'POST {DROPBOX_LIST} | "path": "", "recursive": true': Recorded(
+            {
+                "entries": root_entries
+                + mandate_entries
+                + neu_entries
+                + [_dropbox_file("id:steuer", "Steuer.txt", "/privat/steuer.txt")]
+            }
+        ),
+        f'POST {DROPBOX_LIST} | "path": "", "recursive": false': Recorded(
+            {"entries": root_entries}
+        ),
         f'POST {DROPBOX_LIST} | "path": "/mandate", "recursive": false': Recorded(
             {"entries": mandate_entries}
         ),

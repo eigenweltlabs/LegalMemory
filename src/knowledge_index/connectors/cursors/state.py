@@ -31,7 +31,7 @@ class SyncCursor:
         """
         self.sync_id = sync_id
         self.cursor_schema = cursor_schema
-        self._loaded_from_db = cursor_data is not None
+        self._loaded_from_db = cursor_data is not None and bool(cursor_data)
 
         # Instantiate typed cursor if schema provided
         if cursor_schema:

@@ -588,6 +588,8 @@ function SourceDrawer({ source, entry, journey, admin, navigate, busyFor, onAct,
           </> : <p className="muted-copy">{entry ? `${entry.name} syncs as a whole — it has no folder tree to scope to.` : admin ? "This source type syncs as a whole." : "Folder scoping is managed by an administrator."}</p>}
         </section>
 
+        {admin && source.connector_settings != null && <ConnectorSettingsSection source={source} onChanged={onChanged} onAct={onAct} />}
+
         <section className="drawer-section">
           <h3>Change detection</h3>
           {source.event_delivery?.status === "active" ? <>
@@ -615,6 +617,77 @@ function SourceDrawer({ source, entry, journey, admin, navigate, busyFor, onAct,
       </aside>
     </div>
   );
+}
+
+// Connector settings were only writable at creation, so changing which member a team
+// token acts as — or turning the team space off — meant deleting a working connection
+// and authorizing again. This section edits them in place; the next sync re-reads the
+// estate under the new settings and removes what they no longer reach.
+function ConnectorSettingsSection({ source, onChanged, onAct }) {
+  const fields = useApi(`/api/connectors/${source.kind}/fields`, [source.kind]);
+  const [conf, setConf] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [note, setNote] = useState("");
+  const meta = fields.data;
+  // Scope-superseded fields are owned by the folder picker; editing them here would
+  // fight it.
+  const editable = (meta?.config_fields || []).filter((field) => field.superseded_by !== "folder_picker");
+
+  useEffect(() => {
+    if (!meta) return;
+    const stored = source.connector_settings || {};
+    setConf(Object.fromEntries(editable.map((field) => {
+      const value = stored[field.name] ?? field.default;
+      return [field.name, field.type === "list" ? (Array.isArray(value) ? value : []).join("\n") : value ?? ""];
+    })));
+  }, [meta]); // eslint-disable-line
+
+  if (!fields.error && editable.length === 0) return null;
+
+  const setValue = (name, value) => setConf((current) => ({ ...current, [name]: value }));
+  const save = async () => {
+    setBusy(true); setError(""); setNote("");
+    try {
+      const payload = editable.reduce((acc, field) => {
+        const value = conf?.[field.name];
+        if (field.type === "boolean") return { ...acc, [field.name]: Boolean(value) };
+        if (field.type === "list") return { ...acc, [field.name]: String(value ?? "").split("\n").map((line) => line.trim()).filter(Boolean) };
+        if (field.type === "integer") return { ...acc, [field.name]: String(value ?? "").trim() === "" ? "" : Number(value) };
+        return { ...acc, [field.name]: value ?? "" };
+      }, {});
+      const result = await api(`/api/sources/${source.id}/config`, { method: "PUT", body: JSON.stringify(payload) });
+      setNote(result.note);
+      onChanged();
+      // A saved change is inert until a sync reads the estate under it, so offer the
+      // sync the same way a saved scope does: by running it.
+      if (result.changed?.length) onAct("sync", source);
+    } catch (caught) { setError(caught.message); }
+    setBusy(false);
+  };
+
+  return <section className="drawer-section">
+    <h3>Connector settings</h3>
+    {fields.loading && !meta && <div className="quiet-row"><RefreshCw size={15} /> Loading settings…</div>}
+    {fields.error && <div className="form-error">Could not load settings: {fields.error.message}</div>}
+    {meta && conf && <>
+      <div className="drawer-settings">
+        {editable.filter((field) => field.type === "boolean").map((field) =>
+          <label className="toggle-row" key={field.name}><span><strong>{field.title || field.name}</strong>{field.description && <small>{field.description}</small>}</span><input type="checkbox" checked={Boolean(conf[field.name])} onChange={(event) => setValue(field.name, event.target.checked)} /></label>)}
+        {editable.filter((field) => field.type !== "boolean").map((field) =>
+          <label key={field.name}>{field.title || field.name}
+            {field.type === "list"
+              ? <textarea className="mono" rows={3} value={conf[field.name] ?? ""} onChange={(event) => setValue(field.name, event.target.value)} />
+              : <input type={field.type === "integer" ? "number" : "text"} className="mono" value={conf[field.name] ?? ""} onChange={(event) => setValue(field.name, event.target.value)} />}
+            {field.description && <small>{field.description}</small>}
+          </label>)}
+      </div>
+      {error && <div className="form-error">{error}</div>}
+      {note && <div className="form-note">{note}</div>}
+      <button className="secondary-button small drawer-action" onClick={save} disabled={busy || source.status === "pending_auth"}>{busy ? "Saving…" : "Save settings"}</button>
+      <p className="muted-copy drawer-note">A saved change applies on the next sync, which re-reads the estate under it and <b>removes what the new settings no longer reach</b>.</p>
+    </>}
+  </section>;
 }
 
 function scopeSummary(result) {

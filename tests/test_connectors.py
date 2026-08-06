@@ -671,6 +671,7 @@ def test_catalog_only_enables_the_launch_connectors():
         "google_drive",
         "onedrive",
         "clio",
+        "dropbox",
     }
     assert entries["teams"]["connectable"] is False
     assert entries["slack"]["connectable"] is False
@@ -798,7 +799,11 @@ DROPBOX_USERS = [
         "user": {"account_id": "a2", "email": "referendar@kanzlei.de"},
     },
     {
-        "access_type": {".tag": "no_access"},
+        # Dropbox's AccessLevel is an open union — owner, editor, viewer and
+        # viewer_no_comment are the documented tags, and anything else is a level this
+        # code has not been told the meaning of. It must not be read as conferring
+        # access.
+        "access_type": {".tag": "some_future_level"},
         "user": {"account_id": "a3", "email": "ehemalig@kanzlei.de"},
     },
 ]
@@ -1577,39 +1582,44 @@ DROPBOX_ENTRY = {
 }
 
 
+# The same document seen the two ways Dropbox presents a shared file: on its own
+# account, and inheriting from the shared folder it sits in.
+DROPBOX_EXPLICIT_ENTRY = {**DROPBOX_ENTRY, "has_explicit_shared_members": True}
+DROPBOX_INHERITED_ENTRY = {
+    **DROPBOX_ENTRY,
+    "sharing_info": {"read_only": True, "parent_shared_folder_id": "sf:mandate"},
+}
+
+
 def _dropbox(*, fail=False, mirror=True):
     calls: list[str] = []
 
     async def handler(url, json_data=None):
         calls.append(url)
-        if url.endswith("/files/list_folder"):
-            return {"entries": [DROPBOX_ENTRY], "has_more": False}
         if url.endswith("/sharing/list_file_members"):
-            assert json_data == {"file": "id:abc123"}
-            if fail:
-                raise _forbidden(url)
-            return {
-                "users": DROPBOX_USERS,
-                "groups": DROPBOX_GROUPS,
-                "invitees": DROPBOX_INVITEES,
-            }
-        raise AssertionError(f"unexpected Dropbox call: {url}")
+            assert json_data == {"file": "id:abc123", "include_inherited": True}
+        elif url.endswith("/sharing/list_folder_members"):
+            assert json_data == {"shared_folder_id": "sf:mandate"}
+        else:
+            raise AssertionError(f"unexpected Dropbox call: {url}")
+        if fail:
+            raise _forbidden(url)
+        return {
+            "users": DROPBOX_USERS,
+            "groups": DROPBOX_GROUPS,
+            "invitees": DROPBOX_INVITEES,
+        }
 
     source = _build(
         DropboxSource, DropboxConfig(mirror_permissions=mirror), "_post", handler
     )
-
-    async def _no_download(file_entity, files):
-        return file_entity
-
-    source._download_file = _no_download
     return source, calls
 
 
-def test_dropbox_mirrors_sharing_members():
+def test_dropbox_mirrors_the_members_of_a_file_shared_on_its_own():
     source, calls = _dropbox()
-    (file_entity,) = _collect(source._generate_file_entities([], "", None))
-    assert file_entity.access.viewers == [
+    access = asyncio.run(source._file_access(DROPBOX_EXPLICIT_ENTRY))
+    assert access.viewers == [
         "group:dropbox:g:lit",
         "user:anwalt@kanzlei.de",
         "user:referendar@kanzlei.de",
@@ -1617,19 +1627,34 @@ def test_dropbox_mirrors_sharing_members():
     assert any(url.endswith("/sharing/list_file_members") for url in calls)
 
 
-def test_dropbox_member_failure_leaves_access_unknown_and_still_yields_the_file():
+def test_dropbox_mirrors_the_parent_shared_folders_members_onto_a_file_inside_it():
+    """The shape a file server actually produces: one folder read, reused for its files."""
+    source, calls = _dropbox()
+    first = asyncio.run(source._file_access(DROPBOX_INHERITED_ENTRY))
+    second = asyncio.run(source._file_access(DROPBOX_INHERITED_ENTRY))
+
+    assert first.viewers == second.viewers == [
+        "group:dropbox:g:lit",
+        "user:anwalt@kanzlei.de",
+        "user:referendar@kanzlei.de",
+    ]
+    # Read once and cached; a matter folder must not cost one call per document.
+    assert [url for url in calls if url.endswith("/sharing/list_folder_members")] == [
+        "https://api.dropboxapi.com/2/sharing/list_folder_members"
+    ]
+
+
+def test_dropbox_member_failure_leaves_access_unknown_not_empty():
     source, _calls = _dropbox(fail=True)
-    (file_entity,) = _collect(source._generate_file_entities([], "", None))
-    assert file_entity.name == "Kaufvertrag.pdf"
-    assert file_entity.access is None
-    assert translate_access(file_entity.access) is None
+    access = asyncio.run(source._file_access(DROPBOX_EXPLICIT_ENTRY))
+    assert access is None
+    assert translate_access(access) is None
 
 
 def test_dropbox_skips_the_extra_member_call_when_mirroring_is_off():
     source, calls = _dropbox(mirror=False)
-    (file_entity,) = _collect(source._generate_file_entities([], "", None))
-    assert file_entity.access is None
-    assert not [url for url in calls if url.endswith("/sharing/list_file_members")]
+    assert asyncio.run(source._file_access(DROPBOX_EXPLICIT_ENTRY)) is None
+    assert calls == []
 
 
 # --- Box -----------------------------------------------------------------------------

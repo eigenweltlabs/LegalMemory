@@ -363,21 +363,33 @@ class ConnectorAdapter:
             files=self._files,
             node_selections=self._node_selections or None,
         )
-        while True:
+        try:
+            while True:
+                try:
+                    entity = self._runner.run(_anext(agen))
+                except StopAsyncIteration:
+                    return
+                except FileSkippedException as exc:
+                    # One unconvertible object must never abort a firm's whole sync.
+                    if self._logger:
+                        self._logger.debug(f"skipped {exc.filename}: {exc.reason}")
+                    continue
+                if is_deletion(entity):
+                    external_id = entity_external_id(entity)
+                    yield None, external_id
+                    continue
+                yield self._observation(entity), None
+        finally:
+            # Shut the connector's generator down on the loop that owns it. A caller that
+            # stops early — an aborted run, an engine that raised — otherwise leaves it
+            # suspended for the garbage collector to finalize on some other thread, so a
+            # connector's own cleanup never runs and the checkpoint it had established
+            # (a delta token, a resume cursor) is lost. On the normal path the generator
+            # is already exhausted and this is a no-op.
             try:
-                entity = self._runner.run(_anext(agen))
-            except StopAsyncIteration:
-                return
-            except FileSkippedException as exc:
-                # One unconvertible object must never abort a firm's whole sync.
-                if self._logger:
-                    self._logger.debug(f"skipped {exc.filename}: {exc.reason}")
-                continue
-            if is_deletion(entity):
-                external_id = entity_external_id(entity)
-                yield None, external_id
-                continue
-            yield self._observation(entity), None
+                self._runner.run(agen.aclose())
+            except Exception:  # noqa: BLE001 - teardown must not mask a sync failure
+                pass
 
     def _observation(self, entity: Any) -> SourceObjectObservation | None:
         external_id = entity_external_id(entity)

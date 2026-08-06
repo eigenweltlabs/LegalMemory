@@ -2,12 +2,20 @@
 
 from __future__ import annotations
 
+import mimetypes
+import os
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from pydantic import computed_field
 
 from knowledge_index.connectors.entities._field import IndexField
-from knowledge_index.connectors.entities._base import BaseEntity, Breadcrumb, FileEntity
+from knowledge_index.connectors.entities._base import (
+    BaseEntity,
+    Breadcrumb,
+    DeletionEntity,
+    FileEntity,
+)
 
 
 class DropboxAccountEntity(BaseEntity):
@@ -255,9 +263,103 @@ class DropboxFileEntity(FileEntity):
     has_explicit_shared_members: Optional[bool] = IndexField(
         None, description="Whether file has explicit shared members", embeddable=False
     )
+    parent_shared_folder_id: Optional[str] = IndexField(
+        None,
+        description="Shared folder this file inherits its members from, if any",
+        embeddable=False,
+    )
 
     @computed_field(return_type=str)
     def web_url(self) -> str:
         """Web URL that opens the file in Dropbox."""
         path = self.path_display or ""
         return f"https://www.dropbox.com/home{path}"
+
+    @computed_field(return_type=Optional[str])
+    def version(self) -> Optional[str]:
+        """Dropbox's ``rev`` presented under the name the platform looks for.
+
+        ``entity_version_token`` reads ``etag``/``ctag``/``version``, so without this the
+        connector reported no version at all: content was staged under "noversion" and
+        the engine had no cheap way to tell an unchanged file from a changed one. ``rev``
+        is exactly the server-side token those fields mean — it changes on every content
+        write and on nothing else.
+        """
+        return self.rev
+
+    @classmethod
+    def from_api(
+        cls, data: Dict[str, Any], *, breadcrumbs: list[Breadcrumb], download_url: str
+    ) -> DropboxFileEntity:
+        """Build from a Dropbox ``files/list_folder`` entry with ``.tag == 'file'``."""
+        path_lower = data.get("path_lower") or ""
+        sharing_info = data.get("sharing_info") or {}
+        name = data.get("name") or "Unknown File"
+        mime_type = mimetypes.guess_type(name)[0]
+        if mime_type and "/" in mime_type:
+            file_type = mime_type.split("/")[0]
+        else:
+            extension = os.path.splitext(name)[1].lower().lstrip(".")
+            file_type = extension or "file"
+
+        return cls(
+            id=data.get("id") or f"file-{path_lower}",
+            breadcrumbs=breadcrumbs,
+            name=name,
+            url=download_url,
+            size=data.get("size") or 0,
+            file_type=file_type,
+            mime_type=mime_type or "application/octet-stream",
+            local_path=None,
+            path_lower=path_lower,
+            path_display=data.get("path_display"),
+            rev=data.get("rev"),
+            client_modified=_parse_timestamp(data.get("client_modified")),
+            server_modified=_parse_timestamp(data.get("server_modified")),
+            is_downloadable=data.get("is_downloadable", True),
+            content_hash=data.get("content_hash"),
+            sharing_info=sharing_info,
+            has_explicit_shared_members=data.get("has_explicit_shared_members"),
+            parent_shared_folder_id=sharing_info.get("parent_shared_folder_id"),
+        )
+
+
+class DropboxFileDeletionEntity(DeletionEntity):
+    """A file the delta feed reported as removed.
+
+    Dropbox reports a removal as a path with no id, so the connector resolves it back to
+    the id it indexed before yielding this. Without that resolution a deleted document
+    stays searchable until the next full crawl.
+    """
+
+    deletes_entity_class = DropboxFileEntity
+
+    file_id: str = IndexField(
+        ...,
+        description="Dropbox file ID that was removed",
+        is_entity_id=True,
+    )
+    name: str = IndexField(
+        ...,
+        description="Name of the removed file, when the feed reported one",
+        is_name=True,
+        embeddable=False,
+    )
+    path_lower: Optional[str] = IndexField(
+        None, description="Path the removal was reported at", embeddable=False
+    )
+
+
+def _parse_timestamp(value: Any) -> Optional[datetime]:
+    """Parse a Dropbox ISO-8601 timestamp, tolerating shapes we did not expect.
+
+    A file whose timestamp cannot be read is still worth indexing, so this never raises.
+    """
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        return value
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
