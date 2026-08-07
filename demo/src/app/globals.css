@@ -5,6 +5,17 @@
 
 @custom-variant dark (&:is(.dark *));
 
+/* Too small for three columns: a phone in portrait, or a phone in landscape,
+   which has the width for columns and none of the height. Kept identical to
+   COMPACT_MEDIA in src/lib/use-compact.ts, which is the same query for the few
+   decisions CSS cannot make. Written in min/max rather than range syntax so it
+   holds on the iOS versions a firm's phones actually run. */
+@custom-variant compact {
+  @media (max-width: 767.98px), (max-width: 1023.98px) and (max-height: 599.98px) {
+    @slot;
+  }
+}
+
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
@@ -192,6 +203,16 @@
     /* The app fills the viewport and scrolls inside its panels. A page-level
        scrollbar here would move the whole three-column layout. */
     overflow: hidden;
+    /* `height: 100%` resolves against a containing block a mobile browser sizes
+       as if its toolbars were hidden, so the composer ends up under the address
+       bar with no page scroll to reach it. `dvh` is the visible viewport, and
+       with nothing here scrolling the page it does not move around either.
+       Paired with `interactive-widget=resizes-content` in layout.tsx, which is
+       what makes the keyboard shorten the app rather than cover it. */
+    height: 100dvh;
+    /* No rubber-band on a surface that does not scroll, and no pull-to-refresh
+       above a chat somebody is scrolling back through. */
+    overscroll-behavior: none;
   }
   html {
     @apply font-sans;
@@ -256,6 +277,45 @@
   }
   &::-webkit-scrollbar-track {
     background: transparent;
+  }
+}
+
+/* =============================================================================
+   One pane at a time, on a screen that fits one.
+
+   The three panels are a split view on a desktop and a set of tabs on a phone,
+   and it is the same three panels either way: they are laid on top of each
+   other and all but one is hidden, rather than the layout being rebuilt for the
+   narrow case. That is the whole reason this is CSS and not a second React
+   tree — a phone rotating into landscape, or a window crossing the breakpoint,
+   would otherwise remount the chat and throw the conversation away.
+
+   `visibility` rather than `display`, because a hidden pane keeps its layout:
+   the tree stays scrolled where it was, the virtualizer keeps its measurements,
+   and the transcript does not jump to the top every time somebody looks at a
+   document. A visibility-hidden subtree is already out of the tab order and out
+   of the accessibility tree, so nothing behind the active tab is reachable.
+
+   The panels are the library's own elements — the group renders each child into
+   a flex item it owns — so they are addressed by the data-slot names our
+   wrappers in components/ui/resizable.tsx put on them. Unlayered, so a utility
+   class on a panel cannot put it back in the flex row.
+   ============================================================================= */
+@media (max-width: 767.98px), (max-width: 1023.98px) and (max-height: 599.98px) {
+  [data-slot="resizable-panel-group"] {
+    position: relative;
+  }
+  [data-slot="resizable-panel"] {
+    position: absolute;
+    inset: 0;
+    visibility: hidden;
+  }
+  [data-slot="resizable-panel"][data-active] {
+    visibility: visible;
+  }
+  /* Nothing to drag when there is no split. */
+  [data-slot="resizable-handle"] {
+    display: none;
   }
 }
 

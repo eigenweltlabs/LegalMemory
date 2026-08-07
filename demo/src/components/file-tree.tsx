@@ -5,6 +5,7 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { ChevronRight, Loader2, Search, X } from "lucide-react";
 
 import type { TreeFile, TreeFolder, TreePage, TreeRoot } from "@/lib/appliance";
+import { useCompact } from "@/lib/use-compact";
 import { cn } from "@/lib/utils";
 import { FileGlyph } from "./file-glyph";
 
@@ -24,7 +25,12 @@ import { FileGlyph } from "./file-glyph";
  */
 
 const PAGE_SIZE = 200;
+// Thirty pixels is a dense list to read with a mouse and a hard target to hit
+// with a thumb. The virtualizer measures what it renders, but its estimate has
+// to be the height being rendered or a reveal scrolls to the wrong place in a
+// folder of ten thousand files.
 const ROW_HEIGHT = 30;
+const TOUCH_ROW_HEIGHT = 40;
 const INDENT = 15;
 
 type NodeKey = string;
@@ -75,6 +81,8 @@ interface FileTreeProps {
 }
 
 export function FileTree({ selected, onSelect, onReady }: FileTreeProps) {
+  const compact = useCompact();
+  const rowHeight = compact ? TOUCH_ROW_HEIGHT : ROW_HEIGHT;
   const [roots, setRoots] = useState<TreeRoot[] | null>(null);
   const [rootsError, setRootsError] = useState<string | null>(null);
   const [open, setOpen] = useState<Set<NodeKey>>(new Set());
@@ -372,10 +380,16 @@ export function FileTree({ selected, onSelect, onReady }: FileTreeProps) {
   const virtualizer = useVirtualizer({
     count: rows.length,
     getScrollElement: () => scrollRef.current,
-    estimateSize: () => ROW_HEIGHT,
+    estimateSize: () => rowHeight,
     overscan: 14,
     getItemKey: (index) => rows[index].key,
   });
+
+  // Rows change height when the screen crosses into touch sizing, and every
+  // measurement above the viewport is now wrong by ten pixels each.
+  useEffect(() => {
+    virtualizer.measure();
+  }, [rowHeight, virtualizer]);
 
   // Scroll a revealed file into view once its row is in the list.
   //
@@ -418,7 +432,11 @@ export function FileTree({ selected, onSelect, onReady }: FileTreeProps) {
             placeholder="Search filenames"
             aria-label="Search filenames"
             className={cn(
-              "h-8 w-full rounded-lg border bg-[var(--lm-paper-2)] pr-7 pl-8 text-[13px]",
+              "h-8 w-full rounded-lg border bg-[var(--lm-paper-2)] pr-9 pl-8 text-[13px]",
+              // Sixteen pixels on a phone is not a type choice: Safari zooms
+              // into any field it is asked to focus below it, and comes back
+              // out somewhere else in the tree.
+              "compact:h-10 compact:text-[16px]",
               "placeholder:text-[var(--lm-muted-3)]",
               "focus:border-[rgba(233,87,0,0.4)] focus:bg-background focus:ring-2 focus:ring-[var(--ring)] focus:outline-none",
               "transition-[background-color,border-color] duration-[var(--lm-dur-fast)]",
@@ -429,7 +447,7 @@ export function FileTree({ selected, onSelect, onReady }: FileTreeProps) {
               type="button"
               onClick={() => setQuery("")}
               aria-label="Clear search"
-              className="absolute top-1/2 right-2 -translate-y-1/2 text-[var(--lm-muted-3)] hover:text-foreground"
+              className="compact:p-2.5 absolute top-1/2 right-1 -translate-y-1/2 p-1.5 text-[var(--lm-muted-3)] hover:text-foreground"
             >
               <X className="size-3.5" />
             </button>
@@ -451,6 +469,7 @@ export function FileTree({ selected, onSelect, onReady }: FileTreeProps) {
               >
                 <TreeRow
                   row={row}
+                  height={rowHeight}
                   selectedId={selected?.source_object_id ?? null}
                   onToggle={toggle}
                   onSelect={onSelect}
@@ -470,6 +489,7 @@ export function FileTree({ selected, onSelect, onReady }: FileTreeProps) {
 
 interface TreeRowProps {
   row: Row;
+  height: number;
   selectedId: string | null;
   showPath: boolean;
   onToggle: (sourceId: string, path: string) => void;
@@ -477,14 +497,22 @@ interface TreeRowProps {
   onLoadMore: (sourceId: string, path: string, offset: number) => void;
 }
 
-function TreeRow({ row, selectedId, showPath, onToggle, onSelect, onLoadMore }: TreeRowProps) {
-  const pad = { paddingLeft: 10 + row.depth * INDENT };
+function TreeRow({
+  row,
+  height,
+  selectedId,
+  showPath,
+  onToggle,
+  onSelect,
+  onLoadMore,
+}: TreeRowProps) {
+  const pad = { height, paddingLeft: 10 + row.depth * INDENT };
 
   if (row.kind === "status") {
     return (
       <div
         style={pad}
-        className="flex h-[30px] items-center gap-2 pr-3 text-[12px] text-[var(--lm-muted-3)]"
+        className="flex items-center gap-2 pr-3 text-[12px] text-[var(--lm-muted-3)]"
       >
         {row.spinning && <Loader2 className="size-3 animate-spin" />}
         <span className="truncate">{row.label}</span>
@@ -498,7 +526,7 @@ function TreeRow({ row, selectedId, showPath, onToggle, onSelect, onLoadMore }: 
         type="button"
         style={pad}
         onClick={() => onLoadMore(row.sourceId, row.path, row.loaded)}
-        className="flex h-[30px] w-full items-center pr-3 text-left text-[12px] text-[var(--lm-orange)] hover:underline"
+        className="flex w-full items-center pr-3 text-left text-[12px] text-[var(--lm-orange)] hover:underline"
       >
         {/* The count is the honest version of an infinite scroll: a folder with
             nine thousand more files in it should say so. */}
@@ -518,7 +546,7 @@ function TreeRow({ row, selectedId, showPath, onToggle, onSelect, onLoadMore }: 
         data-root={row.root.source_id}
         aria-expanded={row.open}
         onClick={() => onToggle(row.root.source_id, "")}
-        className="group flex h-[30px] w-full items-center gap-1.5 pr-3 text-left hover:bg-[var(--lm-paper-2)]"
+        className="group flex w-full items-center gap-1.5 pr-3 text-left hover:bg-[var(--lm-paper-2)]"
       >
         <ChevronRight
           className={cn(
@@ -544,7 +572,7 @@ function TreeRow({ row, selectedId, showPath, onToggle, onSelect, onLoadMore }: 
         data-folder={row.folder.path}
         aria-expanded={row.open}
         onClick={() => onToggle(row.sourceId, row.folder.path)}
-        className="group flex h-[30px] w-full items-center gap-1.5 pr-3 text-left hover:bg-[var(--lm-paper-2)]"
+        className="group flex w-full items-center gap-1.5 pr-3 text-left hover:bg-[var(--lm-paper-2)]"
       >
         <ChevronRight
           className={cn(
@@ -553,7 +581,10 @@ function TreeRow({ row, selectedId, showPath, onToggle, onSelect, onLoadMore }: 
           )}
         />
         <span className="truncate text-[13px] text-foreground">{row.folder.name}</span>
-        <span className="lm-mono ml-auto shrink-0 text-[10px] text-[var(--lm-muted-3)] opacity-0 tabular-nums group-hover:opacity-100">
+        {/* Kept for a pointer, shown outright without one: there is no hover on
+            a touch screen, and a count nobody can reveal is a count nobody
+            has. */}
+        <span className="lm-mono compact:opacity-100 ml-auto shrink-0 text-[10px] text-[var(--lm-muted-3)] opacity-0 tabular-nums group-hover:opacity-100">
           {row.folder.files.toLocaleString()}
         </span>
       </button>
@@ -569,7 +600,7 @@ function TreeRow({ row, selectedId, showPath, onToggle, onSelect, onLoadMore }: 
       onClick={() => onSelect(row.file)}
       title={row.file.path}
       className={cn(
-        "group relative flex h-[30px] w-full items-center gap-1.5 pr-3 text-left",
+        "group relative flex w-full items-center gap-1.5 pr-3 text-left",
         "transition-colors duration-[var(--lm-dur-fast)]",
         active ? "bg-[rgba(233,87,0,0.08)]" : "hover:bg-[var(--lm-paper-2)]",
       )}
@@ -591,8 +622,10 @@ function TreeRow({ row, selectedId, showPath, onToggle, onSelect, onLoadMore }: 
       >
         {row.file.name}
       </span>
+      {/* The path is context for the name; on a narrow screen it takes less of
+          the row, because the name is the part being read and tapped. */}
       {showPath && (
-        <span className="lm-mono ml-auto max-w-[45%] shrink-0 truncate pl-2 text-[10px] text-[var(--lm-muted-3)]">
+        <span className="lm-mono compact:max-w-[36%] ml-auto max-w-[45%] shrink-0 truncate pl-2 text-[10px] text-[var(--lm-muted-3)]">
           {row.file.path}
         </span>
       )}

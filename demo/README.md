@@ -79,6 +79,16 @@ text the appliance extracted at insertion — labelled as such, with the origina
 click away, because a preview that silently substitutes extracted text for a
 signed PDF is worse than no preview.
 
+**On a phone** the same three panels become tabs. They are not a second layout:
+the panels are laid over each other and all but one is hidden in CSS
+(`src/app/globals.css`, one media query, matched by `src/lib/use-compact.ts` for
+the few decisions styling cannot make). Nothing is rebuilt when the breakpoint is
+crossed, which is the point — a phone turned sideways would otherwise remount the
+chat and throw the conversation away. Selecting a document brings its tab
+forward, closing it goes back where the document was opened from, and a Word file
+is reflowed to the width of the screen rather than laid out at the width of a
+page.
+
 ## Configuration
 
 | Variable | Default | |

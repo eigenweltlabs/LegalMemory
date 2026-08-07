@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { AlertCircle, Download, FileQuestion, Loader2, X } from "lucide-react";
 
 import type { TreeFile } from "@/lib/appliance";
+import { useCompact } from "@/lib/use-compact";
 import { cn } from "@/lib/utils";
 import { EmlPreview } from "./eml-preview";
 import { PptxPreview } from "./pptx-preview";
@@ -76,9 +77,15 @@ export function DocumentPreview({ file, onClose }: { file: TreeFile; onClose: ()
 
 function PreviewHeader({ file, onClose }: { file: TreeFile; onClose: () => void }) {
   const href = `/api/preview?document_id=${encodeURIComponent(file.document_id)}&version_id=${encodeURIComponent(file.version_id)}`;
+  // Both are icons in a row with a filename that wants every pixel, so on a
+  // phone they grow into targets rather than the 24-pixel squares a pointer is
+  // happy with.
+  const action =
+    "flex-none rounded-lg border px-2.5 py-1.5 compact:px-3 compact:py-2.5 text-[var(--lm-muted-2)] transition-colors duration-[var(--lm-dur-fast)] hover:border-[rgba(233,87,0,0.35)] hover:text-[var(--lm-orange)]";
+
   return (
-    <header className="flex-none border-b px-5 pt-4 pb-3.5">
-      <div className="flex items-start gap-3">
+    <header className="compact:px-4 flex-none border-b px-5 pt-4 pb-3.5">
+      <div className="compact:gap-2 flex items-start gap-3">
         <FileGlyph mime={file.mime_type} name={file.name} className="mt-[3px] size-4" />
         <div className="min-w-0 flex-1">
           <h2 className="font-emphasis truncate text-[15px]">{file.title || file.name}</h2>
@@ -86,12 +93,7 @@ function PreviewHeader({ file, onClose }: { file: TreeFile; onClose: () => void 
             {file.path}
           </p>
         </div>
-        <a
-          href={href}
-          download={file.name}
-          className="flex-none rounded-lg border px-2.5 py-1.5 text-[var(--lm-muted-2)] transition-colors duration-[var(--lm-dur-fast)] hover:border-[rgba(233,87,0,0.35)] hover:text-[var(--lm-orange)]"
-          title="Download the original"
-        >
+        <a href={href} download={file.name} className={action} title="Download the original">
           <Download className="size-3.5" />
         </a>
         <button
@@ -99,7 +101,7 @@ function PreviewHeader({ file, onClose }: { file: TreeFile; onClose: () => void 
           onClick={onClose}
           title="Close the preview"
           aria-label="Close the preview"
-          className="flex-none rounded-lg border px-2.5 py-1.5 text-[var(--lm-muted-2)] transition-colors duration-[var(--lm-dur-fast)] hover:border-[rgba(233,87,0,0.35)] hover:text-[var(--lm-orange)]"
+          className={action}
         >
           <X className="size-3.5" />
         </button>
@@ -135,7 +137,7 @@ function PreviewBody({ file }: { file: TreeFile }) {
       return <iframe src={src} title={file.name} className="h-full w-full border-0 bg-white" />;
     case "image":
       return (
-        <div className="flex min-h-full items-center justify-center p-6">
+        <div className="compact:p-3 flex min-h-full items-center justify-center p-6">
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img src={src} alt={file.name} className="max-h-full max-w-full object-contain shadow-sm" />
         </div>
@@ -201,6 +203,7 @@ function DocxPreview({ src }: { src: string }) {
   const host = useRef<HTMLDivElement>(null);
   const { status, buffer, error } = useBytes(src);
   const [rendering, setRendering] = useState(false);
+  const compact = useCompact();
 
   useEffect(() => {
     if (status !== "ready" || !buffer || !host.current) return;
@@ -214,8 +217,14 @@ function DocxPreview({ src }: { src: string }) {
         renderAsync(buffer, target, undefined, {
           className: "docx",
           inWrapper: true,
-          ignoreWidth: false,
-          ignoreHeight: false,
+          // A Word page is 21 centimetres wide and a phone is seven. Laid out
+          // at its own width it becomes a document you read by dragging
+          // sideways a line at a time, so on a small screen the text is
+          // reflowed to the pane instead — and the page height has to go with
+          // it, or the extra lines that reflowing produces are simply clipped
+          // at the bottom of a page that is still A4 tall.
+          ignoreWidth: compact,
+          ignoreHeight: compact,
           // Word's own numbering and fonts, so a numbered contract keeps its
           // clause numbers — which is most of what makes a preview citable.
           experimental: true,
@@ -229,12 +238,12 @@ function DocxPreview({ src }: { src: string }) {
       cancelled = true;
       target.replaceChildren();
     };
-  }, [buffer, status]);
+  }, [buffer, compact, status]);
 
   if (status === "loading") return <Busy label="Loading document" />;
   if (status === "error") return <Failed message={error} />;
   return (
-    <div className="p-6">
+    <div className="compact:p-3 p-6">
       {rendering && <Busy label="Laying out" />}
       <div ref={host} className="docx-host [&_.docx-wrapper]:!bg-transparent [&_.docx-wrapper]:!p-0 [&_section.docx]:!mb-6 [&_section.docx]:!shadow-sm" />
     </div>
@@ -297,7 +306,7 @@ function SheetPreview({ src, name }: { src: string; name: string }) {
           ))}
         </div>
       )}
-      <div className="lm-scroll min-h-0 flex-1 overflow-auto p-5">
+      <div className="lm-scroll compact:p-3 min-h-0 flex-1 overflow-auto p-5">
         <div
           className={cn(
             "w-fit min-w-full overflow-hidden rounded-xl border bg-background",
@@ -330,8 +339,8 @@ function TextPreview({ src }: { src: string }) {
   if (error) return <Failed message={error} />;
   if (text === null) return <Busy label="Loading" />;
   return (
-    <div className="p-5">
-      <pre className="lm-mono rounded-xl border bg-background p-5 text-[12px] leading-[1.65] whitespace-pre-wrap">
+    <div className="compact:p-3 p-5">
+      <pre className="lm-mono compact:p-4 rounded-xl border bg-background p-5 text-[12px] leading-[1.65] whitespace-pre-wrap">
         {text}
       </pre>
     </div>
@@ -373,7 +382,7 @@ function ConvertedText({ file, fallbackNotice }: { file: TreeFile; fallbackNotic
   if (!state) return <Busy label="Loading text" />;
 
   return (
-    <div className="p-5">
+    <div className="compact:p-3 p-5">
       <div className="mb-3 flex items-center gap-2 rounded-lg border border-[rgba(233,87,0,0.22)] bg-[rgba(233,87,0,0.05)] px-3 py-2">
         <FileQuestion className="size-3.5 shrink-0 text-[var(--lm-orange)]" />
         <p className="text-[12px] text-[var(--lm-fg2)]">
@@ -384,7 +393,7 @@ function ConvertedText({ file, fallbackNotice }: { file: TreeFile; fallbackNotic
           above to see the file itself.
         </p>
       </div>
-      <pre className="rounded-xl border bg-background p-5 text-[13px] leading-[1.7] whitespace-pre-wrap">
+      <pre className="compact:p-4 rounded-xl border bg-background p-5 text-[13px] leading-[1.7] whitespace-pre-wrap">
         {state.text || "This document has no extracted text."}
       </pre>
       {state.more && (

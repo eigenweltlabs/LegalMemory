@@ -40,19 +40,25 @@ export function McpModal({ authEnabled }: { authEnabled: boolean }) {
       <DialogTrigger asChild>
         <button
           type="button"
+          // The label is the whole point of the button on a desktop and is the
+          // widest thing in the bar on a phone, where the plug says it well
+          // enough to be worth a tap.
+          aria-label="Test with MCP"
           className={cn(
-            "flex items-center gap-1.5 rounded-full border border-white/15 bg-white/5 px-3 py-[5px]",
+            "flex items-center gap-1.5 rounded-full border border-white/15 bg-white/5 px-2.5 py-[7px] sm:px-3 sm:py-[5px]",
             "font-mono text-[10.5px] tracking-[0.11em] text-white/70 uppercase",
             "transition-colors duration-[var(--lm-dur-fast)]",
             "hover:border-[rgba(233,87,0,0.5)] hover:text-[var(--lm-orange-hi)]",
           )}
         >
           <Plug className="size-3" aria-hidden />
-          Test with MCP
+          <span className="hidden sm:inline">Test with MCP</span>
         </button>
       </DialogTrigger>
 
-      <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-xl">
+      {/* `dvh`, because `vh` on a phone is measured against a viewport with the
+          address bar hidden — which it is not, so the dialog runs off-screen. */}
+      <DialogContent className="max-h-[85dvh] overflow-y-auto sm:max-w-xl">
         <DialogHeader>
           <DialogTitle className="text-[17px] tracking-[-0.035em]">
             Connect your own tools
@@ -196,7 +202,9 @@ function CopyRow({ value, multiline }: { value: string; multiline?: boolean }) {
       <code
         className={cn(
           "lm-mono min-w-0 flex-1 text-[11.5px] leading-[1.6] text-[var(--lm-ink-900)]",
-          multiline ? "whitespace-pre-wrap" : "truncate",
+          // A URL is one long word: on a phone `pre-wrap` alone keeps it on one
+          // line and pushes the copy button off the card.
+          multiline ? "break-words whitespace-pre-wrap" : "truncate",
         )}
       >
         {value}
