@@ -190,15 +190,20 @@ const ThreadWelcome: FC = () => <WelcomeHeading />;
 /**
  * Openers, phrased as the questions this appliance is actually good at.
  *
- * Three, and each one exercises a different path: a semantic search over
- * contents, a relation traversal, and the matter list. Somebody opening the
- * demo cold clicks one of these, and what they get back should be the argument
- * for the product rather than a chat greeting.
+ * Each one exercises a different path: a semantic search over contents, a
+ * relation traversal, the matter list, an entity-to-mandate traversal with
+ * disambiguation, a cross-matter practice-research synthesis, and the
+ * engagement history. Somebody opening the demo cold clicks one of these, and
+ * what they get back should be the argument for the product rather than a
+ * chat greeting.
  */
 const STARTERS = [
   "What pre-money valuation did we nail down for the Novabridge Series B round?",
   "Which outside firm drafted Luminos's first markup on the deal?",
   "Who is Carolyn Voss?",
+  "In which mandates is Sarah Castellano involved?",
+  "Have we dealt with Series A financing rounds? What issues surfaced during them?",
+  "Who have we worked with most recently?",
 ];
 
 const ThreadSuggestions: FC = () => {
