@@ -180,3 +180,50 @@ def test_traversal_resolves_document_edges_back_to_authorized_sources(
         )
         assert all(edge["citations"] for edge in visible)
         assert all(citation["source_objects"] for edge in visible for citation in edge["citations"])
+
+
+def test_search_hit_carries_the_whole_chunk_not_a_window() -> None:
+    """The tool payload is the chunk; the 320-char window is console decoration.
+
+    Chunks are chosen by semantic similarity and ``_excerpt`` cut them by the position
+    of the first literal query term, so the two criteria disagreed: a correctly
+    retrieved chunk could be represented by an irrelevant third of itself, and the
+    reranker then rated the document on that third.
+    """
+    from knowledge_index.retrieval import _MAX_HIT_TEXT_CHARS, SearchHit, _excerpt, _hit_text
+
+    chunk = (
+        "Silverpine has been represented throughout by Ashford & Cromdale Consulting LLP, "
+        "with Catherine Aldridge serving as lead partner. "
+        + ("filler sentence to push the answer well past any 320-character window. " * 8)
+        + "Saxonbrook has been represented by Pinnacle Law Group LLP."
+    )
+    assert len(chunk) > 320  # the case the window used to lose
+
+    hit = SearchHit(
+        project_id=None, document_id="d", version_id="v", matter_id="m",
+        title="Internal Negotiation Summary Memorandum", doc_type=None,
+        version_status="final", score=0.5,
+        text=_hit_text(chunk), excerpt=_excerpt(chunk, {"silverpine"}),
+    )
+
+    payload = hit.as_dict()
+    assert payload["text"] == chunk  # whole chunk, verbatim
+    assert "Pinnacle Law Group LLP" in payload["text"]  # the part a window dropped
+    assert "excerpt" not in payload  # display-only, never the model's payload
+    # The window still works, and still would have missed the answer.
+    assert len(hit.excerpt) < len(chunk)
+    assert "Pinnacle Law Group LLP" not in hit.excerpt
+
+
+def test_hit_text_flags_a_pathological_chunk_instead_of_trimming_silently() -> None:
+    """Splitting cannot always hit its target; a caller must be able to tell."""
+    from knowledge_index.retrieval import _MAX_HIT_TEXT_CHARS, _hit_text
+
+    ordinary = "x" * (_MAX_HIT_TEXT_CHARS - 1)
+    assert _hit_text(ordinary) == ordinary  # untouched, as almost every chunk is
+
+    oversized = "y" * (_MAX_HIT_TEXT_CHARS + 5000)
+    out = _hit_text(oversized)
+    assert len(out) < len(oversized)
+    assert "chunk truncated" in out and "get_document" in out

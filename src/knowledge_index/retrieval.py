@@ -40,6 +40,10 @@ from knowledge_index.retrieval_types import SearchFilters
 # must not force a second round for a page that one round could have filled.
 _VERIFY_BATCH_MIN = 24
 
+#: Backstop on a single hit's chunk text. Set well above the p95 chunk (~1200 chars) so
+#: it never fires on a normally-split chunk; it exists for the unsplittable outliers.
+_MAX_HIT_TEXT_CHARS = 4000
+
 
 @dataclass
 class SearchHit:
@@ -51,6 +55,10 @@ class SearchHit:
     doc_type: str | None  # ontology node id
     version_status: str
     score: float
+    #: The whole matched chunk. Callers rank and answer from this.
+    text: str
+    #: A short window of ``text`` for human-facing display only (the console quotes it).
+    #: Never the payload a model reasons over — see ``as_dict``.
     excerpt: str
     doc_type_label: str | None = None  # human label resolved from the ontology
     source_paths: list[str] = field(default_factory=list)
@@ -58,6 +66,15 @@ class SearchHit:
     citations: list[dict] = field(default_factory=list)
 
     def as_dict(self) -> dict:
+        """The tool-facing hit: the whole chunk, not a window of it.
+
+        This used to send ``excerpt`` — 320 characters positioned by the first literal
+        occurrence of any query term. Chunks are selected *semantically* and were being
+        cut *lexically*, so the two criteria disagreed and a correctly-retrieved chunk
+        could be shown by an irrelevant third of itself. The chunk is already the
+        retrieval unit and is sized to stand alone (~1k chars); re-cutting it only
+        discarded the reason it was retrieved.
+        """
         return {
             "document_id": self.document_id,
             "project_id": self.project_id,
@@ -68,7 +85,7 @@ class SearchHit:
             "doc_type_label": self.doc_type_label,
             "version_status": self.version_status,
             "score": round(self.score, 6),
-            "excerpt": self.excerpt,
+            "text": self.text,
             "source_paths": self.source_paths,
             "matched_identifiers": self.matched_identifiers,
             "citations": self.citations,
@@ -1226,6 +1243,7 @@ class RetrievalService:
             doc_type_label=doc_type_label,
             version_status=version.status,
             score=score,
+            text=_hit_text(str(source.get("text") or "")),
             excerpt=_excerpt(str(source.get("text") or ""), query_terms),
             source_paths=[item.path for item in authorized_sources],
             matched_identifiers=matched_identifiers or [],
@@ -1290,8 +1308,12 @@ class RetrievalService:
             return hits
         candidates = hits[:20]
         by_version = {hit.version_id: hit for hit in candidates}
+        # The whole chunk, not the display window: this rater decides the final order,
+        # so judging it on 320 lexically-positioned characters was the worst possible
+        # place to truncate — a passage could be demoted for lacking content that was
+        # present in the chunk and simply outside the window.
         listing = "\n".join(
-            f"[{hit.version_id}] {hit.title or ''}: {hit.excerpt}" for hit in candidates
+            f"[{hit.version_id}] {hit.title or ''}: {hit.text}" for hit in candidates
         )
         result = chat_json(
             self.config.retrieval.rerank_model,
@@ -1581,8 +1603,33 @@ def _lexical_score(query: set[str], document: set[str]) -> float:
 
 
 def _excerpt(text: str, terms: set[str], length: int = 320) -> str:
+    """A short display window, for the console only.
+
+    Anchored on the earliest literal occurrence of any query term, which is fine for
+    "show the user roughly where this matched" and wrong for "give a model what it
+    needs to answer" — that is what ``SearchHit.text`` is for.
+    """
     lowered = text.casefold()
     positions = [lowered.find(term) for term in terms if lowered.find(term) >= 0]
     start = max(0, (min(positions) if positions else 0) - 80)
     excerpt = text[start : start + length].strip()
     return ("…" if start else "") + excerpt + ("…" if start + length < len(text) else "")
+
+
+def _hit_text(text: str) -> str:
+    """The whole chunk, with a backstop against a pathological one.
+
+    Chunking targets ``ingest.chunk_chars`` (1200) and the corpus sits at ~1000 average
+    / ~1200 at p95, so this returns the chunk untouched in almost every case: twenty
+    hits is ~20k characters, which is nothing against a modern context window. The cap
+    exists only because chunk splitting cannot always hit its target — an unsplittable
+    table has been seen at ~15k characters — and twenty of those would be 300k. When it
+    does fire it says so rather than trimming silently, because a caller that cannot
+    tell a complete passage from a cut one will quote the cut one as if it were whole.
+    """
+    if len(text) <= _MAX_HIT_TEXT_CHARS:
+        return text
+    return text[:_MAX_HIT_TEXT_CHARS].rstrip() + (
+        f"\n[chunk truncated at {_MAX_HIT_TEXT_CHARS} of {len(text)} characters — "
+        "call get_document for the full text]"
+    )

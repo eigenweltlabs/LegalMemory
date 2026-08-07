@@ -47,7 +47,7 @@ Follow this order. Most wrong answers come from skipping a step, not from a bad 
 
 1. **Search broadly once.** One search_semantic with no filters, to find out where the answer lives.
 2. **Narrow to the matter.** The hits carry matter_id. Once you know which matter the question is about, search again with that matter_id — a filtered search is the difference between the firm's documents and this matter's documents, and it is what makes an answer about "the Hargrove acquisition" actually about Hargrove. Use search_filter with the matter_id and no query to see everything in it.
-3. **Read what you found.** Do not answer from search excerpts. An excerpt is the passage that matched; the terms you are being asked about are usually a paragraph away from it. get_document the candidates.
+3. **Read what you found.** A hit carries the whole chunk that matched, which is one passage of a document, not the document. What you are asked about is often in a different passage — a memorandum names counsel for both sides in one paragraph and the deal terms twenty pages later. Treat a hit as evidence the document is relevant, then get_document the candidates before you answer from them.
 4. **Traverse before you conclude.** Call find_related_documents on the documents you are relying on. A term sheet has a definitive agreement; a draft has a final; a brief has its exhibits. Those links are stored with evidence and a search will not recover them.
 
 Step 4 matters most when you are about to say something is *absent*. "The agreement is not in the index" is a strong claim, and traversing the relations of what you did find is how you check it rather than assume it.
@@ -265,7 +265,7 @@ def run_classic_rag(
         "n_results": len(hits), "surfaced_paths": sorted(retrieved),
     }]
     context = "\n\n".join(
-        f"[{hit.title or hit.doc_type} — {', '.join(hit.source_paths)}]\n{hit.excerpt}"
+        f"[{hit.title or hit.doc_type} — {', '.join(hit.source_paths)}]\n{hit.text}"
         for hit in hits
     )
     usage: dict = {}

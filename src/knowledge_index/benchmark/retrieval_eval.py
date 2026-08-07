@@ -128,9 +128,8 @@ def run_queries(
 
     ``answer_in_context@k`` is the passage-level auxiliary: for gold that carries a
     verified answer, was the answer string present in the *text* of the top-k hits?
-    Document-level metrics stay primary (a hit's excerpt is a snippet, so this reads
-    conservatively) — the column exists to expose configs that find the right
-    document via the wrong content.
+    Document-level metrics stay primary — the column exists to expose configs that find
+    the right document via the wrong content.
     """
     def _score_one(item: dict) -> dict:
         principals = set(item["principals"])
@@ -141,19 +140,20 @@ def run_queries(
         latency = (time.monotonic() - started) * 1000
         ranked_covers = [set(hit.source_paths) & gold_paths for hit in hits]
         answer = _WS.sub(" ", (item.get("meta") or {}).get("answer", "")).strip().casefold()
-        # NOTE: `excerpt` is a ~320-char window anchored on a query term, not the
-        # chunk text — so this measures whether the snippet happened to frame the
-        # answer, and a config returning several chunks per document gets several
-        # windows per document. Diagnostic only; deliberately not a headline column.
+        # Reads the hit's full chunk. It used to read the 320-char display window, which
+        # measured whether the snippet happened to frame the answer rather than whether
+        # the retrieved passage contained it — the metric moved when the windowing
+        # heuristic moved. Still only the top chunk per document, so it stays
+        # conservative for gold whose answer sits in a different passage.
         seen_documents: set[str] = set()
         answer_at = {k: False for k in ks}
         if answer:
             for rank, hit in enumerate(hits, start=1):
                 key = getattr(hit, "document_id", None) or ",".join(hit.source_paths)
-                if key in seen_documents:  # one window per document, not per chunk
+                if key in seen_documents:  # highest-ranked chunk per document
                     continue
                 seen_documents.add(key)
-                if answer in _WS.sub(" ", getattr(hit, "excerpt", "") or "").casefold():
+                if answer in _WS.sub(" ", getattr(hit, "text", "") or "").casefold():
                     for k in ks:
                         if rank <= k:
                             answer_at[k] = True
