@@ -21,6 +21,23 @@ from knowledge_index.config import AppConfig
 _REQUEST_TIMEOUT_SECONDS = 900
 
 
+class ProviderRefused(RuntimeError):
+    """The provider blocked the completion; no answer was ever generated.
+
+    A safety filter returns HTTP 200 with ``content: null`` and no tool calls, so
+    without this the harness records an empty answer and the judge scores it wrong —
+    a provider policy decision arriving in the results as a quality measurement. On a
+    legal corpus that is a systematic bias, not noise: the filter fires on medical
+    injury, harassment and criminal matters, so the questions it eats are a specific
+    slice of the estate rather than a random one.
+    """
+
+    def __init__(self, finish_reason: str, model: str) -> None:
+        self.finish_reason = finish_reason
+        self.model = model
+        super().__init__(f"{model} refused to answer (finish_reason={finish_reason!r})")
+
+
 def complete(
     config: AppConfig,
     model: str,
@@ -87,6 +104,12 @@ def complete(
             continue
         response.raise_for_status()
         body = response.json()
+        choice = (body.get("choices") or [{}])[0]
+        finish_reason = choice.get("finish_reason")
+        if finish_reason == "content_filter":
+            # Raised, not returned: the caller has nothing to work with, and letting a
+            # null message through would be scored as a wrong answer further up.
+            raise ProviderRefused(finish_reason, model)
         if usage_sink is not None:
             u = body.get("usage") or {}
             for key_name in ("prompt_tokens", "completion_tokens", "total_tokens"):

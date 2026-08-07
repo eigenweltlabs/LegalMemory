@@ -218,15 +218,28 @@ def apply_grading(runs: list[dict], gold: list[dict]) -> list[dict]:
 
 
 def aggregate_config(runs: list[dict]) -> dict:
-    """Mean the per-run scores of one config. Pure."""
+    """Mean the per-run scores of one config. Pure.
+
+    Runs the provider refused (``blocked``) are excluded from every rate: no answer was
+    generated, so scoring them as wrong would report a provider policy decision as a
+    system quality number. They are counted separately so a config whose questions were
+    half eaten by a safety filter cannot masquerade as a clean result.
+    """
+    attempted = len(runs)
+    if not attempted:
+        return {"queries": 0}
+    blocked = [run for run in runs if run.get("blocked")]
+    runs = [run for run in runs if not run.get("blocked")]
     n = len(runs)
     if not n:
-        return {"queries": 0}
+        return {"queries": attempted, "scored": 0, "blocked": len(blocked)}
     anchored = [run for run in runs if run.get("anchor", "none") != "none"]
     unanchored = [run for run in runs if run.get("anchor", "none") == "none"]
     successes = sum(1 for run in runs if run["success"])
     summary = {
-        "queries": n,
+        "queries": attempted,
+        "scored": n,
+        "blocked": len(blocked),
         "success_rate": round(successes / n, 4),
         "success_ci95": metrics.wilson_interval(successes, n),
         "context_recall": round(sum(run["context_recall"] for run in runs) / n, 4),
@@ -279,37 +292,72 @@ def _run_one(
     who = principal or item["principals"][0]
     primary, _ = metrics.graded_gold(item)
     started = time.monotonic()
-    with session_factory() as session:
-        service = RetrievalService(session, ablated)
-        if spec["mode"] == "oracle":
-            produced = agent.run_oracle(
-                item["query"],
-                agent.gold_document_texts(session, item["gold_paths"]),
-                ablated,
-                agent_model,
-                primary=primary,
-            )
-        elif spec["mode"] == "classic":
-            produced = agent.run_classic_rag(item["query"], who, service, ablated, agent_model)
-        else:
-            produced = agent.run_agentic(
-                item["query"],
-                who,
-                service,
-                ablated,
-                agent_model,
-                allowed_tools=set(spec["tools"]) if spec["tools"] is not None else None,
-                max_steps=max_steps,
-            )
+    try:
+        with session_factory() as session:
+            service = RetrievalService(session, ablated)
+            if spec["mode"] == "oracle":
+                produced = agent.run_oracle(
+                    item["query"],
+                    agent.gold_document_texts(session, item["gold_paths"]),
+                    ablated,
+                    agent_model,
+                    primary=primary,
+                )
+            elif spec["mode"] == "classic":
+                produced = agent.run_classic_rag(item["query"], who, service, ablated, agent_model)
+            else:
+                produced = agent.run_agentic(
+                    item["query"],
+                    who,
+                    service,
+                    ablated,
+                    agent_model,
+                    allowed_tools=set(spec["tools"]) if spec["tools"] is not None else None,
+                    max_steps=max_steps,
+                )
+    except gateway.ProviderRefused as refusal:
+        # The provider never produced an answer, so there is nothing to judge. Recorded
+        # and excluded from the rates rather than counted wrong — see aggregate_config.
+        return {
+            "id": item["id"],
+            "kind": item["kind"],
+            "anchor": (item.get("meta") or {}).get("anchor", "none"),
+            "config": config_name,
+            "query": item["query"],
+            "reference": (item.get("meta") or {}).get("answer"),
+            "answer": "",
+            "success": False,
+            "blocked": True,
+            "blocked_reason": refusal.finish_reason,
+            "blocked_model": refusal.model,
+            "context_recall": 0.0,
+            "gold_paths": item["gold_paths"],
+            "primary_paths": sorted(primary),
+            "retrieved_paths": [],
+            "tool_calls": 0,
+            "llm_calls": 0,
+            "trajectory": [],
+            "usage": {"agent": {}, "judge": {}, "total_tokens": 0},
+            "wall_seconds": round(time.monotonic() - started, 2),
+            "principal": who,
+        }
     recall = context_recall(produced.retrieved_paths, primary)
     judge_usage: dict = {}
     # Every gold item is a request the user made of the assistant, so success is
     # always "did it answer correctly" — judged against the verified gold answer.
     reference = (item.get("meta") or {}).get("answer", "")
-    success = judge_answer(
-        item["query"], produced.answer, reference, config, judge_model,
-        usage_sink=judge_usage,
-    )
+    blocked_judge = ""
+    try:
+        success = judge_answer(
+            item["query"], produced.answer, reference, config, judge_model,
+            usage_sink=judge_usage,
+        )
+    except gateway.ProviderRefused as refusal:
+        # The agent answered; the judge was refused. The run is unscoreable for the same
+        # reason a refused agent is, so it is blocked rather than counted wrong — the
+        # agent's own work (retrieval, tool calls, tokens) is still recorded below.
+        success = False
+        blocked_judge = refusal.finish_reason
     agent_tokens = produced.usage.get("total_tokens", 0)
     return {
         "id": item["id"],
@@ -320,6 +368,7 @@ def _run_one(
         "reference": (item.get("meta") or {}).get("answer"),
         "answer": produced.answer,
         "success": success,
+        **({"blocked": True, "blocked_reason": f"judge:{blocked_judge}"} if blocked_judge else {}),
         "context_recall": recall,
         "gold_paths": item["gold_paths"],
         "primary_paths": sorted(primary),
@@ -542,8 +591,12 @@ def render_agentic_markdown(report: dict) -> str:
             )
         low, high = row.get("success_ci95", [None, None])
         interval = f" [{low}, {high}]" if low is not None else ""
+        # n is the SCORED count, not the attempted one: rates below have blocked runs
+        # removed, and a bare success rate would otherwise hide a shrinking denominator.
+        scored = f" (n={row.get('scored')}"
+        scored += f", {row['blocked']} blocked)" if row.get("blocked") else ")"
         lines.append(
-            f"| {name} | {row.get('success_rate')}{interval} "
+            f"| {name} | {row.get('success_rate')}{interval}{scored} "
             f"| {row.get('anchored_accuracy', '—')} "
             f"| {row.get('unanchored_accuracy', '—')} | {row.get('any_gold_surfaced', '—')} "
             f"| {comparison} | {row.get('avg_tool_calls')} "

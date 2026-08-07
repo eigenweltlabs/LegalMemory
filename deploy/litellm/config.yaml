@@ -23,6 +23,15 @@ model_list:
   - model_name: os.environ/KI_EMBEDDING_MODEL
     litellm_params:
       model: os.environ/KI_EMBEDDING_UPSTREAM
+      # Required whenever KI_EMBEDDING_UPSTREAM is Gemini: gemini-embedding-2 returns
+      # 3072 dimensions by default, the index holds 1536, and embed_text sends no
+      # dimensions parameter of its own — so every query embed is rejected with
+      # "returned 3072 dimensions; index expects 1536" and the dense leg goes dark
+      # while the lexical legs keep answering. LiteLLM maps this to Gemini's
+      # output_dimensionality (Matryoshka truncation), which keeps queries in the same
+      # vector space the corpus was embedded in. Truncating to 1536 with a *different*
+      # model would satisfy the dimension check and silently rank against noise.
+      dimensions: 1536
       api_key: os.environ/KI_EMBEDDING_API_KEY
       input_cost_per_token: os.environ/KI_EMBEDDING_INPUT_COST_PER_TOKEN
       output_cost_per_token: 0.0
@@ -63,6 +72,13 @@ router_settings:
   num_retries: 0
 
 litellm_settings:
+  # Full, untruncated request/response traces. The spend log clips every message to
+  # MAX_STRING_LENGTH_PROMPT_IN_DB (~2.3k chars), which is fine for cost accounting and
+  # useless for "what was this model actually shown" — the clip lands mid tool-result
+  # and looks like real data, so a benchmark failure reads as a model mistake when the
+  # evidence was simply never kept. Langfuse keeps the whole thing.
+  success_callback: ["langfuse"]
+  failure_callback: ["langfuse"]
   # Qwen's reasoning responses for large documents can exceed four minutes.
   # The pipeline still bounds retries and stage attempts.
   request_timeout: 600

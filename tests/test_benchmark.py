@@ -821,6 +821,36 @@ def test_aggregate_config_splits_metrics_by_anchor() -> None:
     assert aggregate_config([]) == {"queries": 0}
 
 
+def test_aggregate_config_excludes_provider_refusals_from_every_rate() -> None:
+    """A blocked run is not a wrong answer: the provider never produced one.
+
+    Counting it as a failure reports a safety-filter decision as a quality score, and
+    on a legal corpus the filter eats a specific slice (medical injury, harassment,
+    criminal matters) rather than a random one — so it biases, not just adds noise.
+    """
+    from knowledge_index.benchmark.agentic_eval import aggregate_config
+
+    blocked = _run("none", False, 0.0)
+    blocked["blocked"] = True
+    runs = [_run("none", True, 1.0), _run("identifier", True, 1.0), blocked]
+
+    summary = aggregate_config(runs)
+    assert summary["queries"] == 3  # attempted
+    assert summary["scored"] == 2  # judged
+    assert summary["blocked"] == 1
+    # 2/2, not 2/3 — the refusal is out of the denominator entirely.
+    assert summary["success_rate"] == 1.0
+    assert summary["context_recall"] == 1.0
+    assert summary["any_gold_surfaced"] == 1.0
+    assert summary["total_tokens"] == 2000
+
+    # A config the provider refused outright reports no rates at all rather than 0.0,
+    # which would read as "answered everything wrong".
+    only_blocked = aggregate_config([blocked])
+    assert only_blocked == {"queries": 1, "scored": 0, "blocked": 1}
+    assert "success_rate" not in only_blocked
+
+
 def test_sample_gold_stratifies_across_anchors_and_configs_resolve() -> None:
     from knowledge_index.benchmark.agentic_eval import (
         AGENT_CONFIGS,
