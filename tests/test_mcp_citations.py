@@ -471,35 +471,36 @@ def test_mcp_query_tools_preserve_citations(factory, tmp_path) -> None:
         _assert_exact_citation(document["citations"][0])
 
         matters = _call_mcp(client, "list_matters")
-        _assert_exact_citation(matters[0]["citations"][0])
+        _assert_exact_citation(matters["results"][0]["citations"][0])
 
         edges = _call_mcp(
             client,
             "traverse",
             {"entity_type": "document", "entity_id": "document-1"},
         )
-        _assert_exact_citation(edges[0]["citations"][0])
+        _assert_exact_citation(edges["results"][0]["citations"][0])
 
         rollup = _call_mcp(client, "billing_rollup", {"matter_id": "matter-1"})
         _assert_exact_citation(rollup["citations"][0])
 
         invoices = _call_mcp(client, "list_invoices", {"matter_id": "matter-1"})
-        _assert_exact_citation(invoices[0]["citations"][0])
+        _assert_exact_citation(invoices["results"][0]["citations"][0])
 
         entities = _call_mcp(client, "resolve_entity", {"query": "Citation GmbH"})
-        _assert_exact_citation(entities[0]["citations"][0])
+        _assert_exact_citation(entities["results"][0]["citations"][0])
 
         decisions = _call_mcp(
             client,
             "search_decisions",
             {"query": "limits exposure"},
         )
-        _assert_exact_citation(decisions[0]["citations"][0])
+        _assert_exact_citation(decisions["results"][0]["citations"][0])
 
         scope = _call_mcp(client, "preview_search_scope")
         assert scope["project_ids"] == ["project-1"]
-        assert scope["document_ids"] == ["document-1"]
-        _assert_exact_citation(scope["citations"][0])
+        assert scope["document_count"] == 1
+        assert scope["documents"]["results"] == ["document-1"]
+        _assert_exact_citation(scope["documents"]["citations"][0])
 
 
 def test_mcp_document_reads_are_paginated_and_related_docs_are_discoverable(

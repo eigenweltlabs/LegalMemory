@@ -277,11 +277,17 @@ def billing_rollup(session: Session, matter_id: str) -> dict:
     }
 
 
-def resolve_entity(session: Session, needle: str) -> list[dict]:
-    """Resolve a name or identifier to clients/parties, including shared-identifier matches."""
+def resolve_entity(session: Session, needle: str, *, limit: int = 20) -> list[dict]:
+    """Resolve a name or identifier to clients/parties, including shared-identifier matches.
+
+    ``limit`` bounds each leg, so a paginating caller asks for the depth it needs
+    (offset + page + one probe row) instead of the fixed 20 that used to cap the
+    whole tool. Results are ordered so the same depth yields the same prefix.
+    """
     needle = (needle or "").strip()
     if not needle:
         return []
+    limit = max(1, limit)
     matches: dict[tuple[str, str], dict] = {}
 
     def _add(entity_type: str, entity, reason: str) -> None:
@@ -305,10 +311,18 @@ def resolve_entity(session: Session, needle: str) -> list[dict]:
             }
 
     for entity_type, model in (("client", Client), ("party", Party)):
-        for entity in session.scalars(select(model).where(model.name.ilike(f"%{needle}%")).limit(20)):
+        for entity in session.scalars(
+            select(model)
+            .where(model.name.ilike(f"%{needle}%"))
+            .order_by(model.name, model.id)
+            .limit(limit)
+        ):
             _add(entity_type, entity, "name")
     for identifier in session.scalars(
-        select(EntityIdentifier).where(EntityIdentifier.value.ilike(f"%{needle}%")).limit(20)
+        select(EntityIdentifier)
+        .where(EntityIdentifier.value.ilike(f"%{needle}%"))
+        .order_by(EntityIdentifier.value, EntityIdentifier.id)
+        .limit(limit)
     ):
         model = Client if identifier.entity_type == "client" else Party
         entity = session.get(model, identifier.entity_id)

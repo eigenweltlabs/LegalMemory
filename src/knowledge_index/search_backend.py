@@ -184,7 +184,17 @@ class OpenSearchIndex:
                 # range filter already excludes null-dated docs (a range query
                 # never matches a missing field), so bounded date searches drop
                 # them entirely — undated == not date-searchable, by design.
-                "sort": [{"doc_date": {"order": "desc", "missing": "_last"}}],
+                #
+                # document_version_id breaks doc_date ties. Without it the order
+                # among same-dated chunks is whatever the shards return, which
+                # differs between two calls — so an offset page could repeat a
+                # row the previous page already showed and skip one it did not.
+                # It is a total order over versions, which is the granularity
+                # the collapse downstream keeps anyway.
+                "sort": [
+                    {"doc_date": {"order": "desc", "missing": "_last"}},
+                    {"document_version_id": {"order": "asc"}},
+                ],
             }
             return self._run_search(body)
         return self._run_search(self._knn_body(query_vector, strict_filter, size))
@@ -488,7 +498,15 @@ class OpenSearchIndex:
 
 
 def _oversample(limit: int) -> int:
-    return min(max(limit * 5, 50), 500)
+    """Candidate depth to request per leg for a caller that wants ``limit`` hits.
+
+    The ceiling has to clear the deepest window a paginated caller can ask for
+    (``offset + limit``), not just the first page: fusion, collapse and the ACL
+    re-verify all shrink the candidate set, so a leg that stops at 500 chunks
+    cannot honestly answer whether a page at offset 400 exists. A first-page
+    search is unaffected — limit 8 still asks for 400, well under either cap.
+    """
+    return min(max(limit * 5, 50), 2500)
 
 
 # Words that open a question are capitalised by grammar, not because they name
