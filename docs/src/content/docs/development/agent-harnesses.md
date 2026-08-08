@@ -16,6 +16,16 @@ run, not from taste.
 
 ## The bridge
 
+A working reference implementation is in this repository at
+`integrations/agent-harness/legalmemory_mcp.py` — the JSON-RPC client, the
+provider schema sanitizer, the executor wrapper and the prompt section. What
+follows explains what it does and why, so you can port it rather than copy it.
+
+It expects two things of whatever harness hosts it, which are one-line patches
+in most: retry transient provider errors (429/503) inside the agent loop rather
+than failing the run, and tolerate a `None` text part when a reasoning model
+returns tool calls and no prose — both are certain over a long concurrent run.
+
 The MCP endpoint is stateless streamable-HTTP with JSON responses, so a bridge
 is a single POST per call — no session handshake, no SDK required.
 
