@@ -78,7 +78,7 @@ export const CHAT_TOOL_SCHEMAS = {
   },
   get_document: {
     inputSchema: z.object({
-      document_id: z.string().describe("From citations[].document.id in a search result."),
+      document_id: z.string().describe("From document_id on a search result row."),
       version_id: z.string().optional(),
       offset: z.number().int().min(0).optional().describe("Continue from content_page.next_offset."),
     }),

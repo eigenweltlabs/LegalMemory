@@ -178,5 +178,7 @@ def test_traversal_resolves_document_edges_back_to_authorized_sources(
             edge["kind"] == "references" and edge["to"]["id"] == litigation.id
             for edge in visible
         )
-        assert all(edge["citations"] for edge in visible)
-        assert all(citation["source_objects"] for edge in visible for citation in edge["citations"])
+        # Edges are collection rows: endpoints + provenance, no embedded
+        # citation records — those come from the item-level tools.
+        assert all("citations" not in edge for edge in visible)
+        assert all(edge["from"]["id"] and edge["to"]["id"] for edge in visible)

@@ -90,10 +90,13 @@ def create_mcp_server(
             "a document graph, call find_related_documents; do not rely on semantic similarity "
             "alone. Use get_document only to read text and download_document to copy the exact "
             "original binary into the client workspace. Results are restricted to the caller "
-            "identity. Every evidence-bearing result contains citations. Cite the exact "
-            "citations[].project.id (or explicitly say no project), citations[].document.id, "
-            "citations[].version.id, and citations[].source_objects[].id/path. Never make a "
-            "factual claim from a result without a non-empty citations array. "
+            "identity. LIST ROWS CARRY THE DOCUMENT'S METADATA, NOT ITS EVIDENCE RECORD: "
+            "search hits give you title, doc_type_label, doc_date, version_status, the "
+            "matched excerpt, matched_identifiers, score and source_paths, plus "
+            "document_id/version_id/matter_id. The exact citation record "
+            "(project, document-version, source objects) comes from get_document / "
+            "download_document on the item you rely on. Never make a factual claim about a "
+            "document's contents without having read it through one of those. "
             "EVERY LIST-SHAPED TOOL IS PAGINATED and returns {results, page} rather than a "
             "bare list; page.has_more=true means more matches exist, and the next page is "
             "the same call with offset=page.next_offset. One page is a sample, not an "
@@ -120,7 +123,9 @@ def create_mcp_server(
         description=(
             "List documents using exact legal metadata filters. Use before semantic search "
             "when the matter, document type, status, language, or date range is known. Each "
-            "hit includes exact project, document-version, and source-object citations. "
+            "hit carries the document's metadata (title, doc_type_label, doc_date, "
+            "matter_ref, parties with roles, identifiers, version_status, source_paths) "
+            "and ids; read a hit with get_document for its citation record. "
             "only_final=true restricts to authoritative final/executed versions; the default "
             "searches every version including drafts and redlines. identifier is an EXACT "
             "match on a legal identifier (case number, Aktenzeichen, HRB, statute ref). "
@@ -202,7 +207,9 @@ def create_mcp_server(
             "the user where an indexed document is. Hybrid semantic and lexical search over "
             "document chunks with ACL filtering before ranking. Prefer 5-8 focused results "
             "instead of repeated broad 20-result searches. Each hit includes exact project, "
-            "document-version, source-object, and matched-chunk citations. only_final=true "
+            "the document's metadata (title, doc_type_label, doc_date, matter_ref, parties "
+            "with roles, identifiers, version_status, excerpt, source_paths) and ids; "
+            "read a hit with get_document for its citation record. only_final=true "
             "restricts to authoritative final/executed versions; the default searches every "
             "version including drafts and redlines. identifier is an EXACT match on a legal "
             "identifier; party matches a resolved party_id or exact canonical name; chunk_kind "
@@ -478,7 +485,9 @@ def create_mcp_server(
             "'relationship traversal', 'what belongs with this document', or 'render a "
             "document graph'. Prefer this over repeated semantic searches. It returns stored "
             "document relations plus independently labeled shared-thread and shared-matter "
-            "context, graph-ready edges, and an exact citation for every visible document. "
+            "context and graph-ready edges; rows and edges carry document identity and the "
+            "provenance that established each relation - get_document on an endpoint "
+            "returns its citation record. "
             "Shared-matter context is not represented as an inferred legal reference. "
             "PAGINATION: related documents arrive in related_documents (stored relations "
             "first, then shared-matter/thread context) with a page block alongside — "
@@ -532,8 +541,9 @@ def create_mcp_server(
             "supersedes, annex_of, references, responds_to, and belongs_to_thread. For the "
             "common user request 'show/find all related documents' or a document graph, call "
             "find_related_documents instead because it resolves document endpoints and also "
-            "includes clearly labeled shared-matter/thread context. Each edge here includes "
-            "exact citations for both authorized endpoints. Only edges whose BOTH endpoints "
+            "includes clearly labeled shared-matter/thread context. Each edge carries its "
+            "endpoints and provenance; get_document on an endpoint returns its citation "
+            "record. Only edges whose BOTH endpoints "
             "you may see are returned, and the limit counts those — an edge hidden by access "
             "control does not consume a slot in your page."
             + _PAGINATION_CONTRACT
@@ -577,8 +587,11 @@ def create_mcp_server(
         title="Matters the caller can read",
         tags={"read"},
         description=(
-            "List matters that contain at least one version visible to the caller, including "
-            "the exact project and every authorized document-version/source-object citation. "
+            "List matters that contain at least one version visible to the caller. Each row "
+            "carries the matter's identity (title, reference numbers, practice area, kind) "
+            "and visible_versions — the COUNT of document versions you could cite. The "
+            "citations themselves are not in the listing: open the matter with search_filter "
+            "(or a document with get_document) to get them. "
             "practice_area filters by an Area of Law ontology node id with SUBTREE semantics "
             "(a parent area matches its children) — find node ids via list_taxonomies. "
             "Ordered by matter title; the limit counts matters you can actually see, so a "
@@ -659,8 +672,9 @@ def create_mcp_server(
         tags={"read"},
         description=(
             "List a matter's invoices (number, date, total). Restricted to matters the caller "
-            "can see; every invoice includes its exact project/document/source-object "
-            "citation. Ordered by invoice date, oldest first, with page.total giving the "
+            "can see; each row carries the ids of the backing documents (document_ids) - "
+            "get_document returns their citation records. Ordered by invoice date, oldest "
+            "first, with page.total giving the "
             "matter's exact invoice count. For an invoiced total across the whole matter "
             "call billing_rollup instead of summing pages by hand."
             + _PAGINATION_CONTRACT
@@ -718,7 +732,16 @@ def create_mcp_server(
                             ),
                             "invoice_total": invoice.invoice_total,
                             "currency": invoice.currency,
-                            "citations": citations,
+                            # Collection row: the invoice's identity plus the ids
+                            # of the documents that back it — the citation
+                            # records themselves come from get_document.
+                            "document_ids": sorted(
+                                {
+                                    citation["document"]["id"]
+                                    for citation in citations
+                                    if citation.get("document")
+                                }
+                            ),
                         }
                     )
                 page = Page(
@@ -785,7 +808,11 @@ def create_mcp_server(
                                     if citation.get("project")
                                 }
                             ),
-                            "citations": citations,
+                            # Collection row: a frequently-cited entity can be
+                            # backed by hundreds of documents, so the row
+                            # advertises the COUNT; drill into the documents
+                            # with search_semantic/search_filter on the entity.
+                            "citation_count": len(citations),
                         }
                     )
                 # `result` starts at the first authorized entity, not at `offset`,
@@ -1047,18 +1074,9 @@ def create_mcp_server(
                         for project_id in scope.project_ids
                         if (project := retrieval.project_reference(project_id)) is not None
                     ],
-                    "documents": _paged(
-                        documents,
-                        citations=_merge_citations(
-                            [
-                                citation
-                                for document_id in documents.items
-                                for citation in retrieval.citations_for_document(
-                                    document_id, principals
-                                )
-                            ]
-                        ),
-                    ),
+                    # The scope preview is a listing: ids and counts. Citation
+                    # records for any of these documents come from get_document.
+                    "documents": _paged(documents),
                 }
                 audit.update(
                     fingerprint=scope.fingerprint,

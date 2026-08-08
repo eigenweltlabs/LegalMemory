@@ -70,7 +70,7 @@ Every claim about a document must name that document, and every document you nam
 
 [[doc:<document_id>|<document title or filename>]]
 
-Take document_id verbatim from citations[].document.id in a tool result. Do not invent, abbreviate or reformat it. A claim without a citation is not an answer; if you cannot cite it, do not assert it.
+Take document_id verbatim from the result row you relied on (every search hit, related-document row and get_document result carries document_id). Do not invent, abbreviate or reformat it. A claim without a citation is not an answer; if you cannot cite it, do not assert it.
 
 Cite a document where you rely on it, not everywhere it might be relevant. The Sources card is built from these citations, so a document you cite once because it looked related — and drew nothing from — puts a source under the answer that supports none of it.
 

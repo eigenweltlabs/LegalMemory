@@ -414,15 +414,18 @@ def test_all_document_query_paths_return_exact_citations(
 
     matters = service.list_matters(principals=PRINCIPALS)
     assert matters[0]["project_id"] == "project-1"
-    _assert_exact_citation(matters[0]["citations"][0])
+    # A listing row advertises the count of citable documents, not the
+    # citations themselves — those belong to the item-level tools.
+    assert "citations" not in matters[0]
+    assert matters[0]["visible_versions"] >= 1
 
     decisions = service.search_decisions("limits exposure", principals=PRINCIPALS)
     assert decisions[0]["project_id"] == "project-1"
     _assert_exact_citation(decisions[0]["citations"][0])
 
     edges = service.traverse("document", "document-1", principals=PRINCIPALS)
-    assert edges and edges[0]["citations"]
-    _assert_exact_citation(edges[0]["citations"][0])
+    assert edges and edges[0]["from"]["id"] and edges[0]["to"]["id"]
+    assert "citations" not in edges[0]
 
     entity_citations = service.citations_for_party_or_client(
         "client", seeded["client"].id, PRINCIPALS
@@ -471,7 +474,8 @@ def test_mcp_query_tools_preserve_citations(factory, tmp_path) -> None:
         _assert_exact_citation(document["citations"][0])
 
         matters = _call_mcp(client, "list_matters")
-        _assert_exact_citation(matters["results"][0]["citations"][0])
+        assert "citations" not in matters["results"][0]
+        assert matters["results"][0]["visible_versions"] >= 1
 
         edges = _call_mcp(
             client,
@@ -539,7 +543,8 @@ def test_mcp_document_reads_are_paginated_and_related_docs_are_discoverable(
             "stored_relation",
             "shared_matter",
         }
-        assert item["citations"][0]["source_objects"][0]["path"] == "DL-001/related.docx"
+        assert item["source_paths"] == ["DL-001/related.docx"]
+        assert "citations" not in item
 
 
 def test_mcp_download_returns_exact_original_blob_and_short_lived_workspace_link(

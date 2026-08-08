@@ -24,6 +24,7 @@ from knowledge_index.db.models import (
     MatterClient,
     MatterParty,
     Matter,
+    Party,
     Project,
     Relation,
     Source,
@@ -64,6 +65,11 @@ class SearchHit:
     score: float
     excerpt: str
     doc_type_label: str | None = None  # human label resolved from the ontology
+    doc_date: str | None = None  # extracted document date, ISO, drives recency choices
+    language: str | None = None
+    matter_ref: str | None = None  # human matter reference, e.g. 1038-00001
+    parties: list[dict] = field(default_factory=list)  # [{name, role}]
+    identifiers: list[str] = field(default_factory=list)  # the document's own legal ids
     source_paths: list[str] = field(default_factory=list)
     matched_identifiers: list[str] = field(default_factory=list)
     citations: list[dict] = field(default_factory=list)
@@ -77,12 +83,20 @@ class SearchHit:
             "title": self.title,
             "doc_type": self.doc_type,
             "doc_type_label": self.doc_type_label,
+            "doc_date": self.doc_date,
+            "language": self.language,
+            "matter_ref": self.matter_ref,
+            "parties": self.parties,
+            "identifiers": self.identifiers,
             "version_status": self.version_status,
             "score": round(self.score, 6),
             "excerpt": self.excerpt,
             "source_paths": self.source_paths,
             "matched_identifiers": self.matched_identifiers,
-            "citations": self.citations,
+            # No embedded citation record: the row already carries the hit's
+            # full identity (document_id, version_id, matter_id, source_paths)
+            # — which is what a caller needs to open or cite it. The citation
+            # record itself comes from get_document.
         }
 
 
@@ -141,6 +155,10 @@ class RetrievalService:
     def __init__(self, session: Session, config: AppConfig) -> None:
         self.session = session
         self.config = config
+        # Filled by _warm_identity_map per materialized page; held on self so
+        # the bulk-loaded rows stay strongly referenced while hits are built.
+        self._warm_matters: dict[str, Matter] = {}
+        self._warm_parties: dict[str, Party] = {}
 
     def search_filter(
         self,
@@ -490,13 +508,10 @@ class RetrievalService:
         page = Page.slice(related, offset=max(0, offset), limit=max(0, limit))
         related = page.items
         visible_ids = {item["document_id"] for item in related} | {root.id}
-        citations_by_document = {
-            root.id: root_summary["citations"],
-            **{
-                item["document_id"]: item["citations"]
-                for item in related
-            },
-        }
+        # Edges carry the relation and its provenance (the evidence that
+        # established it) — not the endpoints' citation records. Both endpoints
+        # are visible by construction; a caller wanting a citation opens the
+        # endpoint with get_document.
         visible_explicit_edges: list[dict] = []
         for edge in explicit_edges:
             if (
@@ -507,23 +522,7 @@ class RetrievalService:
                 and edge["to"]["id"] not in visible_ids
             ):
                 continue
-            edge_citations = _dedupe_citations(
-                [
-                    *(
-                        citations_by_document.get(edge["from"]["id"], [])
-                        if edge["from"]["type"] == "document"
-                        else []
-                    ),
-                    *(
-                        citations_by_document.get(edge["to"]["id"], [])
-                        if edge["to"]["type"] == "document"
-                        else []
-                    ),
-                ]
-            )
-            visible_explicit_edges.append(
-                {**edge, "basis": "stored_relation", "citations": edge_citations}
-            )
+            visible_explicit_edges.append({**edge, "basis": "stored_relation"})
         context_edges = [
             {
                 "kind": reason["kind"],
@@ -535,9 +534,6 @@ class RetrievalService:
                     for key, value in reason.items()
                     if key not in {"kind", "basis"}
                 },
-                "citations": _dedupe_citations(
-                    [*root_summary["citations"], *item["citations"]]
-                ),
             }
             for item in related
             for reason in item["relationships"]
@@ -580,22 +576,16 @@ class RetrievalService:
         )
         visible: list[dict] = []
         for relation in relations:
+            # Edge rows are collection rows: relation, endpoints, provenance.
+            # Both endpoints passed the visibility filter above; their citation
+            # records belong to the item-level tools, not to every edge that
+            # mentions them.
             visible.append(
                 {
                     "kind": relation.kind,
                     "from": {"type": relation.from_type, "id": relation.from_id},
                     "to": {"type": relation.to_type, "id": relation.to_id},
                     "provenance": relation.provenance,
-                    "citations": _dedupe_citations(
-                        [
-                            *self.citations_for_reference(
-                                relation.from_type, relation.from_id, principals
-                            ),
-                            *self.citations_for_reference(
-                                relation.to_type, relation.to_id, principals
-                            ),
-                        ]
-                    ),
                 }
             )
         return visible
@@ -775,8 +765,15 @@ class RetrievalService:
                     }
                     if matter.matter_kind
                     else None,
+                    # A listing is a collection resource: each row carries what a
+                    # caller needs to decide which matter to open, plus the COUNT
+                    # of citable documents behind it — never the citations
+                    # themselves. Embedding them (one citation per visible
+                    # version) made a row ~28 KB and a 100-row page ~2.9 MB, and
+                    # a partial embed would misrepresent the set. The citations
+                    # live where the item does: search_filter / get_document on
+                    # the chosen matter.
                     "visible_versions": len(citations),
-                    "citations": citations,
                 }
             )
         return result
@@ -896,7 +893,9 @@ class RetrievalService:
                 "rationale_text": row.rationale_text,
                 "generalizable": row.generalizable,
                 "score": round(score, 6),
-                "citations": [citation],
+                # Collection row: the decision content plus document_id to open
+                # the underlying document. The citation gated visibility above;
+                # its record comes from get_document, not from every list row.
             }
             for score, row, citation in scored
         ]
@@ -1124,6 +1123,10 @@ class RetrievalService:
         citation = self.citation_for_version(version.id, principals)
         if citation is None:
             return None
+        # A graph/listing summary is a collection row: identity and the info
+        # needed to decide whether to open the document — not its citation
+        # record. The citation still gates visibility above (no citation, no
+        # row); the record itself comes from get_document on the chosen id.
         return {
             "document_id": document.id,
             "version_id": version.id,
@@ -1135,7 +1138,6 @@ class RetrievalService:
             "source_paths": [
                 source["path"] for source in citation["source_objects"]
             ],
-            "citations": [citation],
         }
 
     def _resolve_practice_area(self, filters: SearchFilters) -> SearchFilters:
@@ -1515,6 +1517,24 @@ class RetrievalService:
             title=document.title,
             doc_type=document.doc_type,
             doc_type_label=doc_type_label,
+            doc_date=document.doc_date.isoformat() if document.doc_date else None,
+            language=document.language,
+            matter_ref=(
+                matter.reference_numbers[0]
+                if (matter := self._warm_matters.get(document.matter_id or ""))
+                and matter.reference_numbers
+                else None
+            ),
+            parties=[
+                {
+                    "name": party.name,
+                    "role": entry.get("role_in_doc"),
+                }
+                for entry in (document.parties or [])
+                if isinstance(entry, dict)
+                and (party := self._warm_parties.get(str(entry.get("party_id"))))
+            ],
+            identifiers=list(document.identifiers or []),
             version_status=version.status,
             score=score,
             excerpt=_excerpt(str(source.get("text") or ""), query_terms),
@@ -1553,6 +1573,36 @@ class RetrievalService:
                     select(Document).where(Document.id.in_(doc_ids))
                 )
             }
+        # Hit rows surface matter references and party names, so warm those
+        # tables for the page too — same identity-map contract as above: the
+        # caller holds the maps, per-hit session.get stays a dict lookup.
+        matter_ids = {doc.matter_id for doc in documents.values()} - {None, ""}
+        party_ids = {
+            str(entry.get("party_id"))
+            for doc in documents.values()
+            for entry in (doc.parties or [])
+            if isinstance(entry, dict) and entry.get("party_id")
+        }
+        self._warm_matters = (
+            {
+                matter.id: matter
+                for matter in self.session.scalars(
+                    select(Matter).where(Matter.id.in_(matter_ids))
+                )
+            }
+            if matter_ids
+            else {}
+        )
+        self._warm_parties = (
+            {
+                party.id: party
+                for party in self.session.scalars(
+                    select(Party).where(Party.id.in_(party_ids))
+                )
+            }
+            if party_ids
+            else {}
+        )
         if version_ids:
             versions = {
                 version.id: version
