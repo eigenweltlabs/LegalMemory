@@ -716,7 +716,7 @@ class RetrievalService:
         visible: list[Matter] = []
         scanned = 0
         batch_size = max(wanted, _VERIFY_BATCH_MIN)
-        citations_by_matter: dict[str, list[dict]] = {}
+        visible_counts: dict[str, int] = {}
         while len(visible) < wanted:
             batch = self.session.scalars(
                 statement.offset(scanned).limit(batch_size)
@@ -724,11 +724,19 @@ class RetrievalService:
             if not batch:
                 break
             scanned += len(batch)
+            # One authorization pass for the whole batch. This used to call
+            # citations_for_matter per matter, which built a full citation
+            # record for every version of every matter — hundreds of queries and
+            # thousands of dicts — only to ask whether any survived. Measured on
+            # a 266-matter estate: 36 seconds to return twenty rows of ~190
+            # bytes. The counts below answer the same two questions (is anything
+            # visible, and how much) at a fixed cost per page.
+            counts = self._visible_version_counts([m.id for m in batch], principals)
             for matter in batch:
-                citations = self.citations_for_matter(matter.id, principals)
-                if not citations:
+                count = counts.get(matter.id, 0)
+                if not count:
                     continue
-                citations_by_matter[matter.id] = citations
+                visible_counts[matter.id] = count
                 visible.append(matter)
                 if len(visible) >= wanted:
                     break
@@ -737,7 +745,6 @@ class RetrievalService:
 
         result: list[dict] = []
         for matter in visible[offset:]:
-            citations = citations_by_matter[matter.id]
             area_payload = None
             if matter.practice_area:
                 area_payload = {
@@ -773,10 +780,40 @@ class RetrievalService:
                     # a partial embed would misrepresent the set. The citations
                     # live where the item does: search_filter / get_document on
                     # the chosen matter.
-                    "visible_versions": len(citations),
+                    "visible_versions": visible_counts[matter.id],
                 }
             )
         return result
+
+    def _visible_version_counts(
+        self, matter_ids: list[str], principals: set[str]
+    ) -> dict[str, int]:
+        """Document versions per matter the caller may actually see.
+
+        Same fail-closed rule as building a citation for each version and
+        counting what came back — a version counts only when the caller passes
+        the ACL predicate AND holds at least one authorized source observation
+        for it — but as one set-based pass over the whole batch instead of a
+        citation record per version.
+        """
+        wanted = [m for m in matter_ids if m]
+        if not wanted:
+            return {}
+        rows = self.session.execute(
+            select(Document.matter_id, DocumentVersion.id)
+            .join(Document, Document.id == DocumentVersion.document_id)
+            .where(Document.matter_id.in_(wanted))
+        ).all()
+        if not rows:
+            return {}
+        authorized = self._bulk_authorized_sources(
+            [version_id for _, version_id in rows], principals
+        )
+        counts: dict[str, int] = {}
+        for matter_id, version_id in rows:
+            if authorized.get(version_id):
+                counts[matter_id] = counts.get(matter_id, 0) + 1
+        return counts
 
     def list_matters_page(
         self,

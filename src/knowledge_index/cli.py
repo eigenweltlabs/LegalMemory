@@ -323,6 +323,17 @@ def parser() -> argparse.ArgumentParser:
     serve = commands.add_parser("serve", help="run admin UI, API, and MCP endpoint")
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8000)
+    serve.add_argument(
+        "--workers",
+        type=int,
+        default=int(os.environ.get("KI_WEB_WORKERS", "1")),
+        help=(
+            "HTTP worker processes. Retrieval is CPU-bound Python, so one worker is "
+            "one GIL: measured against twenty concurrent agents the container held "
+            "114%% of a single core and every tool call queued. Background schedulers "
+            "stay in this process whatever this is set to."
+        ),
+    )
     return root
 
 
@@ -713,7 +724,21 @@ def main() -> None:
         # is governed by backup.schedule.enabled in the admin UI; this only decides that
         # something is watching the clock.
         start_backup_scheduler(factory, store.get)
-        uvicorn.run(create_app(factory, store), host=args.host, port=args.port, log_level="info")
+        if args.workers > 1:
+            # Workers fork children that import the app rather than inheriting an
+            # object, so they get the importable entry point. The schedulers
+            # started above stay here, in the parent, and run once.
+            uvicorn.run(
+                "knowledge_index.web.asgi:app",
+                host=args.host,
+                port=args.port,
+                workers=args.workers,
+                log_level="info",
+            )
+        else:
+            uvicorn.run(
+                create_app(factory, store), host=args.host, port=args.port, log_level="info"
+            )
 
 
 if __name__ == "__main__":
