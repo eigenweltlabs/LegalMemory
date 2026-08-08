@@ -17,6 +17,20 @@ from knowledge_index.retrieval_types import SearchFilters
 _SOURCE_EXCLUDES = {"_source": {"excludes": ["embedding"]}}
 
 
+# One pooled HTTP client for the whole process.
+#
+# Every call site here used the module-level ``httpx.post`` / ``httpx.get``,
+# which builds a client, opens a TCP connection, and tears both down per
+# request. A hybrid search issues several legs, so thirty concurrent searches
+# meant hundreds of handshakes — and the cost was invisible from inside
+# OpenSearch, which reported 64.6ms per query while callers measured seconds.
+# A shared pool makes the measured cost the query cost.
+_HTTP = httpx.Client(
+    limits=httpx.Limits(max_connections=200, max_keepalive_connections=100),
+    timeout=30.0,
+)
+
+
 class OpenSearchIndex:
     """Small adapter; OpenSearch owns BM25/vector indexing, not authorization policy."""
 
@@ -74,7 +88,7 @@ class OpenSearchIndex:
             lines.append(json.dumps({"index": {"_id": chunk.id}}))
             lines.append(json.dumps(self._doc_body(chunk)))
         body = "\n".join(lines) + "\n"
-        response = httpx.post(
+        response = _HTTP.post(
             f"{self.base_url}/{self.index_name}/_bulk",
             params={"refresh": "false"},
             content=body.encode("utf-8"),
@@ -282,7 +296,7 @@ class OpenSearchIndex:
             lines.append(json.dumps({}))  # per-search header targets the same index (URL)
             lines.append(json.dumps(body))
         payload = "\n".join(lines) + "\n"
-        response = httpx.post(
+        response = _HTTP.post(
             f"{self.base_url}/{self.index_name}/_msearch",
             params={"typed_keys": "false"},
             content=payload.encode("utf-8"),
@@ -303,7 +317,7 @@ class OpenSearchIndex:
         physically cannot enter the field; different-model-same-dimension vectors are
         blocked by binding the index name to the embedding signature + the reindex flow.
         Nothing degrades silently."""
-        response = httpx.get(f"{self.base_url}/{self.index_name}/_mapping", timeout=5)
+        response = _HTTP.get(f"{self.base_url}/{self.index_name}/_mapping", timeout=5)
         response.raise_for_status()
         mappings = response.json().get(self.index_name, {}).get("mappings", {})
         embedding = (mappings.get("properties") or {}).get("embedding") or {}
@@ -334,7 +348,7 @@ class OpenSearchIndex:
         return self._run_search(body)
 
     def _run_search(self, body: dict) -> list[dict]:
-        response = httpx.post(
+        response = _HTTP.post(
             f"{self.base_url}/{self.index_name}/_search",
             json=body,
             timeout=30,
@@ -383,7 +397,7 @@ class OpenSearchIndex:
         so an unmapped field is silently dropped at index time — a code-side field
         addition must be pushed to indexes created before it). Additive only; docs
         indexed before the push need a re-sync to become searchable on new fields."""
-        response = httpx.get(f"{self.base_url}/{self.index_name}/_mapping", timeout=5)
+        response = _HTTP.get(f"{self.base_url}/{self.index_name}/_mapping", timeout=5)
         response.raise_for_status()
         live = next(iter(response.json().values()))["mappings"].get("properties", {})
         missing = {
@@ -434,7 +448,7 @@ class OpenSearchIndex:
                 "aggs": {"v": {"terms": {"field": field, "size": 400}}},
             }
             try:
-                response = httpx.post(
+                response = _HTTP.post(
                     f"{self.base_url}/{self.index_name}/_search", json=body, timeout=30
                 )
                 response.raise_for_status()
