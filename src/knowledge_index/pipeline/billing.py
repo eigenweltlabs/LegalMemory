@@ -169,7 +169,6 @@ class BillingExtractor:
                             system=BILLING_SYSTEM,
                             user=_final_text(session, version.content_hash)[:16000],
                             schema=BillingExtraction,
-                            max_output_tokens=3000,
                         )
                 except Exception:
                     result.errors += 1

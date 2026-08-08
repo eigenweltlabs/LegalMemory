@@ -812,7 +812,6 @@ class PipelineRunner:
             ),
             final_schema=MatterClassification,
             max_iters=100,
-            max_output_tokens=16_000,
             # Service listings with definitions can exceed the default cap, and a
             # truncated listing hides the right candidate. Effectively no truncation.
             max_tool_result_chars=200_000,
@@ -1051,7 +1050,6 @@ class PipelineRunner:
             ),
             final_schema=FileRelationResult,
             max_iters=100,
-            max_output_tokens=16_000,
             max_tool_result_chars=24000,
             result_validator=validate_opened_refs,
             trace_tags=trace_tags,
@@ -2029,7 +2027,6 @@ class PipelineRunner:
             max_iters=40,
             # Reasoning models account internal reasoning against max_tokens. Keep enough
             # room for both reasoning and the dense, clause-heavy JSON response.
-            max_output_tokens=16_000,
             # Ontology listings are bounded (~25KB for the largest sibling list) and
             # must NEVER be cut: a truncated list means the right candidate is
             # invisible and the walk fails silently. Effectively no truncation.
@@ -2161,7 +2158,6 @@ class PipelineRunner:
                 ensure_ascii=False,
             ),
             schema=DecisionExtraction,
-            max_output_tokens=16_000,
             trace_tags=trace_tags,
         )
         if not result.has_decision:
