@@ -46,26 +46,35 @@ export function AuthShell({
   children: ReactNode;
 }) {
   return (
-    <div className="flex min-h-full flex-col items-center justify-center bg-[var(--lm-black)] px-6 py-16">
-      <div className="flex w-full max-w-[420px] flex-col items-center">
-        <Wordmark />
+    // Two boxes rather than one, because the page behind this scrolls nowhere:
+    // the outer one is the viewport and owns the scrollbar, the inner one is at
+    // least a viewport tall so a short form sits centred. Centring the scroll
+    // container itself would put the top of a tall form — the wordmark, and on
+    // a phone in landscape the first field — above the top of the page, where
+    // there is no way to scroll back to it.
+    <div className="lm-scroll h-full overflow-y-auto bg-[var(--lm-black)]">
+      <div className="flex min-h-full flex-col items-center justify-center px-6 py-10 sm:py-16">
+        <div className="flex w-full max-w-[420px] flex-col items-center">
+          <Wordmark />
 
-        {/* This is not the product; it is an instance of it holding a synthetic
-            corpus. Saying so under the wordmark costs one line and prevents the
-            reading where someone signs in expecting their own firm's matters. */}
-        <span className="mt-3 rounded-full border border-white/15 bg-white/5 px-3 py-[5px] font-mono text-[10.5px] tracking-[0.11em] text-white/50 uppercase">
-          Demo
-        </span>
+          {/* This is not the product; it is an instance of it holding a
+              synthetic corpus. Saying so under the wordmark costs one line and
+              prevents the reading where someone signs in expecting their own
+              firm's matters. */}
+          <span className="mt-3 rounded-full border border-white/15 bg-white/5 px-3 py-[5px] font-mono text-[10.5px] tracking-[0.11em] text-white/50 uppercase">
+            Demo
+          </span>
 
-        <p className="mt-6 text-center text-[13.5px] leading-relaxed text-white/45">
-          {title}
-        </p>
+          <p className="mt-5 text-center text-[13.5px] leading-relaxed text-white/45 sm:mt-6">
+            {title}
+          </p>
 
-        <div className="mt-8 w-full">{children}</div>
+          <div className="mt-6 w-full sm:mt-8">{children}</div>
 
-        <p className="mt-10 text-center font-mono text-[10.5px] tracking-[0.08em] text-white/25 uppercase">
-          Eigenwelt Labs
-        </p>
+          <p className="mt-8 text-center font-mono text-[10.5px] tracking-[0.08em] text-white/25 uppercase sm:mt-10">
+            Eigenwelt Labs
+          </p>
+        </div>
       </div>
     </div>
   );

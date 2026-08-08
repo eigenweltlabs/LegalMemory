@@ -286,9 +286,9 @@ export function EmlPreview({ src }: { src: string }) {
   const body = email.text ?? (email.html ? null : email.raw);
 
   return (
-    <div className="p-5">
+    <div className="compact:p-3 p-5">
       <article className="overflow-hidden rounded-xl border bg-background">
-        <header className="border-b px-5 py-4">
+        <header className="compact:px-4 border-b px-5 py-4">
           <h3 className="font-emphasis text-[15px] leading-snug">
             {headers.subject || "(no subject)"}
           </h3>
@@ -313,7 +313,7 @@ export function EmlPreview({ src }: { src: string }) {
           )}
         </header>
 
-        <div className="px-5 py-4">
+        <div className="compact:px-4 px-5 py-4">
           {showSource ? (
             <pre className="lm-mono text-[11.5px] leading-[1.6] whitespace-pre-wrap">
               {email.raw}
@@ -325,7 +325,7 @@ export function EmlPreview({ src }: { src: string }) {
               srcDoc={email.html}
               title={headers.subject || "message"}
               sandbox=""
-              className="h-[60vh] w-full border-0"
+              className="h-[60dvh] w-full border-0"
             />
           ) : (
             <pre className="text-[13px] leading-[1.7] whitespace-pre-wrap">
@@ -334,7 +334,7 @@ export function EmlPreview({ src }: { src: string }) {
           )}
         </div>
 
-        <footer className="flex justify-end border-t px-5 py-2.5">
+        <footer className="compact:px-4 compact:py-3.5 flex justify-end border-t px-5 py-2.5">
           <button
             type="button"
             onClick={() => setShowSource((current) => !current)}

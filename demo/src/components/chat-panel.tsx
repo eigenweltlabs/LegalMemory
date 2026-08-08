@@ -48,8 +48,11 @@ export function ChatPanel({ onReveal }: { onReveal: (documentId: string) => void
             Thread so the registration outlives any one message. */}
         <ToolCards />
         <div className="flex h-full min-h-0 flex-col bg-background">
-          <header className="flex flex-none items-baseline justify-between gap-3 border-b px-5 pt-4 pb-3.5">
-            <span className="lm-label">Ask</span>
+          <header className="compact:px-4 flex flex-none items-baseline justify-between gap-3 border-b px-5 pt-4 pb-3.5">
+            {/* The tab bar above this says Ask on a phone, and a heading is not
+                worth reading twice. What it says next to it is not repeated
+                anywhere, so that stays. */}
+            <span className="lm-label compact:hidden">Ask</span>
             <span className="lm-mono text-[10px] text-[var(--lm-muted-3)]">
               Answers cite the documents they came from
             </span>

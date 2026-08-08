@@ -36,10 +36,16 @@ export default function Page() {
   return (
     <div className="flex h-full flex-col">
       {/* Black owns the chrome, exactly as it owns the hero on the product
-          page, and nothing below this bar is allowed to be black again. */}
-      <header className="flex h-16 flex-none items-center gap-5 bg-[var(--lm-black)] px-6 text-[var(--lm-ink)]">
+          page, and nothing below this bar is allowed to be black again.
+
+          On a phone the bar keeps the wordmark, the way into MCP and the
+          identity, and gives up everything that is a signpost rather than a
+          fact: the eyebrow, the divider, the three links out. Those are for
+          somebody who has finished with the demo, and on four hundred pixels
+          they would be in front of somebody who has not started. */}
+      <header className="flex h-14 flex-none items-center gap-3 bg-[var(--lm-black)] px-4 text-[var(--lm-ink)] sm:h-16 sm:gap-5 sm:px-6">
         <span
-          className="text-[20px] font-black text-[var(--lm-orange)]"
+          className="text-[17px] font-black text-[var(--lm-orange)] sm:text-[20px]"
           style={{
             // The wordmark is the product's face and it is set in the widest
             // optical width available. Geist has no expanded cut, so the system
@@ -54,9 +60,9 @@ export default function Page() {
           LegalMemory
         </span>
 
-        <span className="h-4 w-px bg-white/15" aria-hidden />
+        <span className="hidden h-4 w-px bg-white/15 sm:block" aria-hidden />
 
-        <span className="font-mono text-[10.5px] tracking-[0.11em] text-white/40 uppercase">
+        <span className="hidden font-mono text-[10.5px] tracking-[0.11em] text-white/40 uppercase sm:inline">
           Demo
         </span>
 
@@ -64,7 +70,7 @@ export default function Page() {
             own mono, and never competing with the wordmark — somebody who wants
             the docs or the source will look for them, and somebody who does not
             should not have three links in their way. */}
-        <nav className="ml-6 hidden items-center gap-5 sm:flex">
+        <nav className="ml-6 hidden items-center gap-5 md:flex">
           {NAV_LINKS.map((link) => (
             <a
               key={link.href}
@@ -80,7 +86,7 @@ export default function Page() {
 
         {/* The identity is in the chrome because it is the variable everything
             on screen depends on: this is one lawyer's estate, not the firm's. */}
-        <div className="ml-auto flex items-center gap-2.5">
+        <div className="ml-auto flex min-w-0 items-center gap-2 sm:gap-2.5">
           {/* The demo republishes the appliance's MCP server, and a lawyer
               connecting their own tool to it is a better demonstration than
               this page is — so the way in sits in the chrome, not in a doc. */}
@@ -89,7 +95,13 @@ export default function Page() {
           <span className="ml-1 hidden font-mono text-[10.5px] tracking-[0.11em] text-white/40 uppercase lg:inline">
             Signed in as
           </span>
-          <span className="rounded-full border border-white/15 bg-white/5 px-3 py-[5px] font-mono text-[11.5px] text-white/75">
+          {/* Truncated rather than wrapped or dropped: a firm's principal list
+              is longer than a phone is wide, and which identity this is stays
+              the one fact the bar cannot do without. */}
+          <span
+            title={identity}
+            className="max-w-[42vw] truncate rounded-full border border-white/15 bg-white/5 px-2.5 py-[5px] font-mono text-[11.5px] text-white/75 sm:max-w-none sm:px-3"
+          >
             {identity}
           </span>
           {/* Two different identities, deliberately not conflated. The pill is

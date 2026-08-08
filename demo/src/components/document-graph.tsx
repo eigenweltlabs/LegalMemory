@@ -2,6 +2,7 @@
 
 import { useMemo, useState } from "react";
 
+import { useCompact } from "@/lib/use-compact";
 import { cn } from "@/lib/utils";
 
 /**
@@ -35,11 +36,25 @@ export interface GraphNode {
   evidence?: string | null;
 }
 
-const WIDTH = 620;
-const HEIGHT = 360;
-// Enough to read the shape; past this, labels collide and the picture stops
-// being information. The card still says how many there are in total.
-const MAX_NODES = 9;
+/**
+ * The frame the graph is drawn in, and how much fits inside it.
+ *
+ * An SVG scales to the column it is given, and its type scales with it: this
+ * picture at 620 units wide, rendered into the 340 a phone has, is a correct
+ * drawing of the graph with six-pixel labels — which is a diagram of a diagram.
+ * So a narrow screen gets its own frame, roughly the width it will be drawn at,
+ * where eleven units is eleven pixels. Fewer nodes and shorter labels are what
+ * that frame will hold: past this they collide, and the card still says how many
+ * there are in total.
+ */
+const FRAME = {
+  wide: { width: 620, height: 360, nodes: 9, perLine: 26, rootPerLine: 34 },
+  // No rootPerLine: the hub's name is HTML above the picture at this size, and
+  // wraps to the card rather than to a line length guessed here.
+  compact: { width: 340, height: 400, nodes: 5, perLine: 17 },
+} as const;
+
+type Frame = (typeof FRAME)[keyof typeof FRAME];
 
 /** mulberry32 — small, seeded, and good enough for a layout. */
 function seeded(seed: number) {
@@ -73,10 +88,16 @@ interface Placed {
  * repulsion stops labels stacking. Sixty passes is well past the point where
  * this settles for the ten-odd nodes it ever draws.
  */
-function layout(count: number, seed: number): Placed[] {
+function layout(count: number, seed: number, frame: Frame): Placed[] {
+  const { width: WIDTH, height: HEIGHT } = frame;
   const random = seeded(seed);
   const centre = { x: WIDTH / 2, y: HEIGHT / 2 };
   const radius = Math.min(WIDTH, HEIGHT) * 0.36;
+
+  // The ring is drawn wider than it is tall because the frame is, and because
+  // labels need horizontal room. A frame taller than it is wide has neither
+  // reason, so it gets a circle.
+  const stretch = Math.max(1, (WIDTH / HEIGHT) * 0.78);
 
   const nodes: Placed[] = Array.from({ length: count }, (_, index) => {
     // A jittered ring, so the relaxation starts somewhere sane and the result
@@ -84,7 +105,7 @@ function layout(count: number, seed: number): Placed[] {
     const angle = (index / count) * Math.PI * 2 + random() * 0.7;
     const distance = radius * (0.78 + random() * 0.44);
     return {
-      x: centre.x + Math.cos(angle) * distance * 1.35,
+      x: centre.x + Math.cos(angle) * distance * stretch,
       y: centre.y + Math.sin(angle) * distance,
     };
   });
@@ -117,8 +138,11 @@ function layout(count: number, seed: number): Placed[] {
     }
   }
 
+  // Keep the label inside the frame, not the node: the disc is nine units wide
+  // and the name under it is as wide as the line it was wrapped to.
+  const inset = frame.perLine * 3.2;
   return nodes.map((node) => ({
-    x: Math.max(84, Math.min(WIDTH - 84, node.x)),
+    x: Math.max(inset, Math.min(WIDTH - inset, node.x)),
     y: Math.max(36, Math.min(HEIGHT - 56, node.y)),
   }));
 }
@@ -135,21 +159,40 @@ export function DocumentGraph({
   onReveal: (documentId: string) => void;
 }) {
   const [active, setActive] = useState<string | null>(null);
+  const compact = useCompact();
+  const frame = compact ? FRAME.compact : FRAME.wide;
+  const { width: WIDTH, height: HEIGHT } = frame;
 
-  const shown = useMemo(() => nodes.slice(0, MAX_NODES), [nodes]);
+  const shown = useMemo(() => nodes.slice(0, frame.nodes), [nodes, frame]);
   const positions = useMemo(
-    () => layout(shown.length, hash(rootTitle + shown.length)),
-    [shown, rootTitle],
+    () => layout(shown.length, hash(rootTitle + shown.length), frame),
+    [shown, rootTitle, frame],
   );
 
   const labels = useMemo(
-    () => shown.map((node) => wrapLabel(node.title, 26, 2)),
-    [shown],
+    () => shown.map((node) => wrapLabel(node.title, frame.perLine, 2)),
+    [shown, frame],
   );
 
   const centre = { x: WIDTH / 2, y: HEIGHT / 2 };
   const focused = shown.find((node) => node.documentId === active) ?? null;
   const storedCount = shown.filter((node) => node.stored).length;
+
+  /**
+   * Hovering is how this is read, and a touch screen has no hover.
+   *
+   * So on one, the first tap on a document says what the relation is and the
+   * second opens it — the caption is the half of the graph that carries the
+   * evidence, and going straight to the document skips it. With a pointer,
+   * hover has already said it and a click means open.
+   */
+  const activate = (documentId: string) => {
+    if (compact && active !== documentId) {
+      setActive(documentId);
+      return;
+    }
+    onReveal(documentId);
+  };
 
   return (
     <div className="bg-[var(--lm-paper-2)]">
@@ -158,6 +201,14 @@ export function DocumentGraph({
         <Legend swatch="var(--lm-orange)" label={`Relation ${storedCount}`} />
         <Legend swatch="var(--lm-muted-3)" label={`Context ${shown.length - storedCount}`} />
       </div>
+
+      {/* On a narrow frame the hub's name is the widest thing in the picture and
+          it sits in the middle of it, where the neighbours' own names are. Moved
+          up here it collides with nothing, wraps as text rather than as an SVG
+          label, and leaves the middle of a small graph to the graph. */}
+      {compact && (
+        <p className="font-emphasis px-3.5 pt-2.5 text-[12.5px] leading-snug">{rootTitle}</p>
+      )}
 
       <svg
         viewBox={`0 0 ${WIDTH} ${HEIGHT}`}
@@ -190,21 +241,24 @@ export function DocumentGraph({
           );
         })}
 
-        {/* The document itself: the orange hub, named beneath it. */}
+        {/* The document itself: the orange hub, named beneath it — or, on a
+            narrow frame, named above the picture instead. */}
         <circle cx={centre.x} cy={centre.y} r={19} fill="#E95700" />
-        <text
-          x={centre.x}
-          y={centre.y + 38}
-          textAnchor="middle"
-          className="fill-[var(--lm-ink-900)] text-[12.5px]"
-          style={{ fontWeight: 560 }}
-        >
-          {wrapLabel(rootTitle, 34, 2).map((line, lineIndex) => (
-            <tspan key={line + lineIndex} x={centre.x} dy={lineIndex === 0 ? 0 : 14}>
-              {line}
-            </tspan>
-          ))}
-        </text>
+        {!compact && (
+          <text
+            x={centre.x}
+            y={centre.y + 38}
+            textAnchor="middle"
+            className="fill-[var(--lm-ink-900)] text-[12.5px]"
+            style={{ fontWeight: 560 }}
+          >
+            {wrapLabel(rootTitle, FRAME.wide.rootPerLine, 2).map((line, lineIndex) => (
+              <tspan key={line + lineIndex} x={centre.x} dy={lineIndex === 0 ? 0 : 14}>
+                {line}
+              </tspan>
+            ))}
+          </text>
+        )}
 
         {shown.map((node, index) => {
           const point = positions[index];
@@ -212,14 +266,19 @@ export function DocumentGraph({
           return (
             <g
               key={node.documentId}
-              onMouseEnter={() => setActive(node.documentId)}
-              onMouseLeave={() => setActive(null)}
-              onClick={() => onReveal(node.documentId)}
+              // Pointer only: a browser sends these for a tap as well, and a
+              // node that "hovers" on the way to being tapped would open on the
+              // first tap, which is the behaviour `activate` exists to avoid.
+              onPointerEnter={(event) =>
+                event.pointerType === "mouse" && setActive(node.documentId)
+              }
+              onPointerLeave={(event) => event.pointerType === "mouse" && setActive(null)}
+              onClick={() => activate(node.documentId)}
               className="cursor-pointer"
             >
               {/* An invisible disc so the pointer target is comfortable without
                   drawing a node the size of the target. */}
-              <circle cx={point.x} cy={point.y} r={22} fill="transparent" />
+              <circle cx={point.x} cy={point.y} r={compact ? 26 : 22} fill="transparent" />
               <circle
                 cx={point.x}
                 cy={point.y}
@@ -266,8 +325,9 @@ export function DocumentGraph({
       </svg>
 
       {/* The caption is the graph's other half: an edge you cannot interrogate
-          is decoration. Hovering a node says what the relation is and, for a
-          stored one, the evidence the appliance recorded for it. */}
+          is decoration. Hovering a node — tapping it, without a pointer — says
+          what the relation is and, for a stored one, the evidence the appliance
+          recorded for it. */}
       <div className="min-h-[46px] border-t px-3.5 py-2.5">
         {focused ? (
           <>
@@ -279,14 +339,20 @@ export function DocumentGraph({
             >
               {focused.kind.replace(/_/g, " ")}
             </span>
+            {compact && (
+              <span className="lm-mono ml-2 text-[9.5px] tracking-[0.11em] text-[var(--lm-muted-3)] uppercase">
+                Tap again to open
+              </span>
+            )}
             <p className="mt-1 line-clamp-2 text-[11.5px] leading-[1.5] text-[var(--lm-muted-2)]">
               {focused.evidence ?? focused.title}
             </p>
           </>
         ) : (
           <p className="text-[11.5px] text-[var(--lm-muted-3)]">
-            {totalRelated > shown.length
-              ? `Showing ${shown.length} of ${totalRelated}. Hover for the relation, click to open.`
+            {totalRelated > shown.length ? `Showing ${shown.length} of ${totalRelated}. ` : ""}
+            {compact
+              ? "Tap a document for the relation, again to open it."
               : "Hover a document for the relation, click to open it."}
           </p>
         )}

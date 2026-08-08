@@ -66,7 +66,9 @@ export function CitationsCard() {
               <span className="font-emphasis min-w-0 flex-1 truncate text-[13px] group-hover:text-[var(--lm-orange)]">
                 {document.title}
               </span>
-              <span className="lm-label shrink-0 opacity-0 transition-opacity duration-[var(--lm-dur-fast)] group-hover:opacity-100">
+              {/* The hint a pointer gets from hovering the row, spelled out
+                  where there is no pointer to hover with. */}
+              <span className="lm-label compact:opacity-100 shrink-0 opacity-0 transition-opacity duration-[var(--lm-dur-fast)] group-hover:opacity-100">
                 Open
               </span>
             </button>

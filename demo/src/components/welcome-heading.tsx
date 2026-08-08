@@ -29,19 +29,25 @@ export function WelcomeHeading() {
     };
   }, []);
 
+  // Smaller on a small screen, and not for taste: this sits above the composer
+  // and the openers, and at display size in a phone's landscape it pushes both
+  // of them off the bottom of the screen.
   return (
-    <div className="mb-6 flex flex-col items-center px-4 text-center">
-      <h1 className="fade-in slide-in-from-bottom-1 animate-in fill-mode-both text-[34px] leading-[1.05] font-semibold tracking-[-0.045em] duration-200">
+    <div className="compact:mb-4 mb-6 flex flex-col items-center px-4 text-center">
+      <h1 className="fade-in slide-in-from-bottom-1 animate-in fill-mode-both compact:text-[26px] text-[34px] leading-[1.05] font-semibold tracking-[-0.045em] duration-200">
         LegalMemory Demo
       </h1>
-      <p className="mt-3 max-w-md text-[15px] leading-relaxed text-[var(--lm-muted-2)]">
+      <p className="compact:mt-2 compact:text-[14px] mt-3 max-w-md text-[15px] leading-relaxed text-[var(--lm-muted-2)]">
         {/* No skeleton and no jump: until the count arrives the sentence still
             reads, and the number slots into a gap the layout already had. */}
         Ask anything about the{" "}
         <span className="font-emphasis text-foreground tabular-nums">
           {count === null ? "" : count.toLocaleString()}
         </span>{" "}
-        documents on the left.
+        {/* Where the documents are depends on the screen: beside this on a
+            desktop, behind the tab next to it on a phone. Naming a direction
+            that is not there is worse than not pointing at all. */}
+        documents<span className="compact:hidden"> on the left</span>.
       </p>
     </div>
   );
