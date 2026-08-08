@@ -263,15 +263,18 @@ composes them:
 | `search_decisions` | query DecisionRecords (anonymized layer) |
 | `billing_rollup` / `list_invoices` | matter billing with fail-closed invoice-source citations |
 | `resolve_entity` | client/party resolution, restricted to entities backed by authorized matter documents |
-| `preview_search_scope` | exact authorized project/document IDs and their citations |
+| `preview_search_scope` | exact authorized project/document IDs and counts |
 | `list_taxonomies` | current doc/task/practice-area trees for the calling agent |
 
-Every evidence-bearing row has a `citations` array. A citation identifies the exact
-project, logical document, document version, source object, connector, and path; search
-citations also identify the matched chunk and its originating source object. Tools with
+A citation identifies the exact project, logical document, document version, source
+object, connector, and path, and on a read it also identifies the matched chunk and its
+originating source object. **Item-level tools return the record** (`get_document`,
+`download_document`, `billing_rollup`); **listing rows return the document's metadata,
+ids and counts instead**, because a row that embedded the record restated its own fields
+at megabyte scale. The citation still decides visibility everywhere: tools with
 structured evidence (billing, decisions, entity resolution) withhold rows when that
 evidence cannot be resolved to an authorized source. Static taxonomies and empty/denied
-results are non-evidentiary and therefore have no citations.
+results are non-evidentiary.
 
 Every call carries the end-user identity (OAuth 2.1 / header from the embedding app);
 ACL filtering happens before ranking or traversal results are built, not post-hoc.

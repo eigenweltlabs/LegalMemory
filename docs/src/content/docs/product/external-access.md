@@ -18,8 +18,9 @@ configuration, and (for administrators) the external-clients registry.
 The MCP server is built on FastMCP and mounted at `/mcp` on the same FastAPI
 app as the console (`http_app(path="/", stateless_http=True,
 json_response=True)`). Its server instructions direct a connected model to
-treat the index as the primary source for firm-document questions and to never
-make a factual claim from a result without a non-empty `citations` array.
+treat the index as the primary source for firm-document questions, and tell it
+where evidence lives: listing rows carry the document's metadata and ids, and
+the citation record comes from reading the document.
 
 ### Identity binding
 
@@ -61,7 +62,7 @@ tool's name, short title, and tags.
 | `traverse` | Low-level walk of stored relation edges (`supersedes`, `annex_of`, `references`, `responds_to`, `belongs_to_thread`). | `entity_type`, `entity_id`, `limit` (capped 250), `offset`; the limit counts *visible* edges |
 | `list_matters` | Matters containing at least one version visible to the caller. | `limit` (capped 250), `offset`, `practice_area` (Area-of-Law node id, subtree semantics); the limit counts *visible* matters, and no `total` is reported |
 | `billing_rollup` | Invoiced total plus hours/fees per UTBMS task code for one matter. | `matter_id`; fails closed if any invoice lacks exact provenance. Not paginated — the rollup covers every invoice |
-| `list_invoices` | A matter's invoices (number, date, total) with per-invoice citations. | `matter_id`, `limit` (capped 250), `offset`; `page.total` is the matter's exact invoice count |
+| `list_invoices` | A matter's invoices (number, date, total) with the ids of the documents behind each. | `matter_id`, `limit` (capped 250), `offset`; `page.total` is the matter's exact invoice count |
 | `resolve_entity` | Resolves a party/client name or identifier (LEI, HRB, VAT) to known entities. | `query`, `limit` (capped 100), `offset`; results without an authorized citation are withheld, so a short page can still have `has_more` |
 | `search_decisions` | Searches anonymized drafting and negotiation rationale. | `query`, `limit` (capped 100), `offset`; `page.total` is exact |
 | `list_taxonomies` | The active document-type ontology scope plus task types and practice areas. | none. Not paginated — returns the roots and the top two practice-area levels, with `ontology.visible_nodes` as the true node count |
@@ -124,11 +125,21 @@ larger limit until it hit the cap.
 
 ### Citations
 
-Every evidence-bearing result carries a `citations` array naming the exact
-project, document, version, and source objects behind it. Tools enforce this
-rather than merely promising it: `billing_rollup` and `list_invoices` raise
-instead of answering when an invoice's source provenance is missing, and
-`resolve_entity` silently drops entities the caller holds no citation for.
+A citation names the exact project, document, version, and source objects
+behind a result. **Item-level tools return them** — `get_document`,
+`download_document`, `billing_rollup`. **Listing rows do not**: a search hit,
+a related-document row, a graph edge or a matter carries the document's own
+metadata (title, type, date, `matter_ref`, parties, identifiers, status,
+`source_paths`) and the ids to act on it, plus a count where a set stands
+behind the row (`visible_versions`, `citation_count`, `document_ids`). A
+listing that embedded the record per row cost megabytes a page and told the
+caller nothing its own fields did not.
+
+The citation is still what gates visibility — a row the caller holds no
+citation for is never returned — and tools enforce that rather than merely
+promising it: `billing_rollup` and `list_invoices` raise instead of answering
+when an invoice's source provenance is missing, and `resolve_entity` drops
+entities the caller holds no citation for.
 
 ### The access-ledger write per call
 
@@ -199,9 +210,10 @@ its headers (session or trusted proxy), and an unauthenticated request gets
 The response is `{scope, hits}`. `scope` reports the compiled ACL scope the
 query ran under: `fingerprint`, project and document counts, and the active
 filters. Each hit carries `document_id`, `project_id`, `version_id`,
-`matter_id`, `title`, `doc_type` and `doc_type_label`, `version_status`,
-`score`, a term-centered `excerpt`, `source_paths`, `matched_identifiers`, and
-`citations`.
+`matter_id`, `matter_ref`, `title`, `doc_type` and `doc_type_label`,
+`doc_date`, `language`, `parties` with their roles, the document's own
+`identifiers`, `version_status`, `score`, a term-centered `excerpt`,
+`source_paths` and `matched_identifiers`.
 
 ## OpenAPI and API docs
 
