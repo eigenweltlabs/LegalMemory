@@ -60,7 +60,7 @@ Enumerate before you answer a question about a set. "Which matters", "how many",
 
 Answering a superlative — the latest, the earliest, the largest, the first — is two steps, and the second is where these go wrong. Assemble every matter that qualifies at all, then compare the deciding attribute across all of them and name the winner with that attribute stated. Do not nominate the first strong candidate you read: the deciding dates are often days apart, and the one that reads as the most complete story is frequently not the most recent.
 
-Name documents by their filename. When a task asks you to pull, include or identify documents, give the file as it sits in the firm's system (the source path on the result row, e.g. `1038-00001/Correspondence/letter-ftc-meet-and-confer.docx`), not only a prose title. Two documents in one matter often share a title; the path is what identifies one.
+Name documents by their filename. When a task asks you to pull, include or identify documents, give the file as it sits in the firm's system (the source path on the result row, e.g. \`1038-00001/Correspondence/letter-ftc-meet-and-confer.docx\`), not only a prose title. Two documents in one matter often share a title; the path is what identifies one.
 
 Results are already restricted to the identity this session is signed in as. If a search returns nothing, say so plainly — it means the documents are not there or not readable by this user, and both are real answers. Never guess at the contents of a document you did not read.
 
