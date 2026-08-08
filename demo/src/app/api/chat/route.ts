@@ -3,7 +3,10 @@ import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 
 import { CHAT_TOOL_SCHEMAS, openMcpClient } from "@/lib/mcp";
 
-export const maxDuration = 120;
+// An estate-wide enumeration runs many tool calls before it can answer; 120s
+// cut those off mid-sweep, which is the same truncation as a low step budget
+// wearing a different hat.
+export const maxDuration = 600;
 
 /**
  * The model, by the name the gateway serves it under.
@@ -52,6 +55,12 @@ Do not repeat a search with the same arguments — if it returned little, change
 Distinguish what happened from what was prepared for. A firm's files are full of strategy memos, drafts and contingency plans for events that never occurred. Before you state that an event occurred — a second request was issued, a suit was filed, a deal closed — read the document that constitutes the event (the agency's letter, the filed complaint, the executed agreement), not a memo that anticipates it, and date the event from that document.
 
 Precision counts as much as recall. When the question is which matters or documents qualify, including a near-miss is as wrong as missing a match. Verify the qualifying fact from a document you read for each candidate, and put the near-misses — prepared-but-not-issued, considered-but-not-done — in their own clearly labelled section, not in the qualifying set.
+
+Enumerate before you answer a question about a set. "Which matters", "how many", "pull every" and "have we ever" are questions about the whole estate, not about the first matters that matched. Sweep for candidates from several angles — the practice area, the instrument, the parties, the terminology a document would actually use — until a sweep stops producing matters you have not already assessed. Then verify each candidate against the qualifying fact. Four correct matters out of eight is a wrong answer, and the estate will not tell you that eight existed; only your own sweep will.
+
+Answering a superlative — the latest, the earliest, the largest, the first — is two steps, and the second is where these go wrong. Assemble every matter that qualifies at all, then compare the deciding attribute across all of them and name the winner with that attribute stated. Do not nominate the first strong candidate you read: the deciding dates are often days apart, and the one that reads as the most complete story is frequently not the most recent.
+
+Name documents by their filename. When a task asks you to pull, include or identify documents, give the file as it sits in the firm's system (the source path on the result row, e.g. `1038-00001/Correspondence/letter-ftc-meet-and-confer.docx`), not only a prose title. Two documents in one matter often share a title; the path is what identifies one.
 
 Results are already restricted to the identity this session is signed in as. If a search returns nothing, say so plainly — it means the documents are not there or not readable by this user, and both are real answers. Never guess at the contents of a document you did not read.
 
@@ -128,13 +137,15 @@ export async function POST(request: Request) {
       system: system ? `${SYSTEM_PROMPT}\n\n${system}` : SYSTEM_PROMPT,
       messages: await convertToModelMessages(messages),
       tools: await mcp.tools({ schemas: CHAT_TOOL_SCHEMAS }),
-      // A cross-matter sweep ("every matter where…") legitimately spends
-      // dozens of steps paging through search results and correspondence
-      // before it can answer; 12 made the agent stop mid-gather with no
-      // answer at all. The bound exists only so a model that starts looping
-      // stops on its own, so it is sized for the heaviest legitimate task,
-      // not the typical one.
-      stopWhen: stepCountIs(60),
+      // An estate-wide enumeration ("every matter where…", "how many of our…")
+      // legitimately spends dozens of steps: sweep for candidates from several
+      // angles, then read a document per candidate to verify it. Measured
+      // against the firm-knowledge rubrics, answers that stopped early were
+      // right about what they found and wrong about the set — 12 steps cut the
+      // gather off entirely, and 60 still bounded the eight-matter sweeps. The
+      // bound exists only so a looping model stops on its own, so it is sized
+      // for the heaviest legitimate task, not the typical one.
+      stopWhen: stepCountIs(200),
       prepareStep: ({ steps }) => traverseOnce(steps),
       onFinish: async () => {
         await mcp.close();
