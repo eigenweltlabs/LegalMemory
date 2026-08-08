@@ -875,20 +875,37 @@ class PipelineRunner:
                     if unassigned
                     else classification.matter_title or matter_ref
                 ),
-                practice_area=practice_area,
-                matter_kind=matter_kind,
+                # Both labels are left unset here and derived from the vote below,
+                # so the document that happens to create the matter carries exactly
+                # the same weight as the twenty that join it.
                 status="unassigned" if unassigned else "unknown",
                 imported=False,
                 provenance=provenance,
             )
             session.add(matter)
             session.flush()
-        elif matter.practice_area is None and practice_area and not matter.imported:
-            # first valid area wins; a 30-document matter must not flap between
-            # areas, and practice-management imports stay authoritative
-            matter.practice_area = practice_area
-        if matter.matter_kind is None and matter_kind and not matter.imported:
-            matter.matter_kind = matter_kind
+        if not matter.imported:
+            # A matter's area and kind are properties of the MATTER, but this agent
+            # only ever sees ONE document, so its answer is about that document.
+            # "First valid answer wins" then froze whichever parallel call returned
+            # first: a Master Clinical Trial Agreement became Contract Law (a CTA is
+            # a contract), a continuation-vehicle LPA became Tax Law (its §1061 memo
+            # won the race), a co-invest LP became M&A (the deal it funded). Each
+            # answer was right about its document and wrong about the matter.
+            #
+            # Every document votes instead, weighted by the agent's own confidence,
+            # and the running mode is the label. Order stops mattering, so the
+            # anti-flapping property that first-wins was protecting survives — a
+            # settled matter only changes when the evidence does. Practice area and
+            # matter kind go through the identical path: they were both first-wins,
+            # and a matter that asserts "Funds Practice" and "Tax Law" at once is
+            # exactly what two independent races produce.
+            _record_matter_vote(
+                matter,
+                area=practice_area,
+                kind=matter_kind,
+                weight=float(classification.confidence or 0.0),
+            )
         if matter.project_id is None and source.project_id:
             project = session.get(Project, source.project_id)
             if project is None:
@@ -2386,6 +2403,52 @@ class PipelineRunner:
             if (row.last_error or {}).get("reason") == WAITING_FOR_PREVIOUS_STAGE:
                 row.status = ProcessingStatus.PENDING.value
                 row.last_error = None
+
+
+def _record_matter_vote(
+    matter: Matter, *, area: str | None, kind: str | None, weight: float
+) -> None:
+    """Add one document's opinion to the matter's tally and re-derive the labels.
+
+    The classify agent sees one document, so its answer is evidence about the
+    matter rather than a verdict on it. Tallying the evidence and taking the mode
+    makes the label a property of the whole matter and makes arrival order stop
+    mattering — the two things "first valid answer wins" got wrong.
+
+    ``weight`` is the agent's own confidence in that answer, so a document it
+    classified reluctantly counts for less than one it was sure about. Votes live
+    in ``provenance`` (already JSON) so this needs no migration, and they are kept
+    rather than reduced away: they are the audit trail for why a matter carries
+    the label it does, and they let a later document change a wrong early call.
+    """
+    if weight <= 0:
+        # The agent said it was guessing. Recording a zero-weight vote would still
+        # let enough guesses outvote one confident answer.
+        return
+    votes = dict(matter.provenance or {})
+    for field, value in (("area_votes", area), ("kind_votes", kind)):
+        if not value:
+            continue
+        tally = dict(votes.get(field) or {})
+        tally[value] = round(tally.get(value, 0.0) + weight, 4)
+        votes[field] = tally
+        # Ties keep the incumbent: re-running the same corpus must not shuffle a
+        # matter between two equally-supported areas.
+        current = matter.practice_area if field == "area_votes" else matter.matter_kind
+        winner = max(tally, key=lambda node: (tally[node], node == current))
+        if field == "area_votes":
+            matter.practice_area = winner
+        else:
+            matter.matter_kind = winner
+        # A label the matter's own documents do not agree on is a label to review,
+        # not one to trust. This is the signal the old first-wins path destroyed:
+        # it recorded a winner and threw the disagreement away, so a matter split
+        # between Tax and Funds looked exactly like one every document agreed on.
+        total = sum(tally.values())
+        votes.setdefault("contested", {})[field] = round(
+            1.0 - (tally[winner] / total), 3
+        ) if total else 0.0
+    matter.provenance = votes
 
 
 def _advisory_xact_lock(session: Session, key: str) -> None:

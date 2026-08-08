@@ -411,9 +411,13 @@ MATTER_KIND_INSTRUCTION = (
     "near-sounding label with a non-matching definition is wrong. When no deeper "
     "node's definition matches the work exactly, the broader node IS the answer: "
     "the facet does not cover every specialty, and a correct broad node always "
-    "beats a wrong specific one. Any non-null matter_kind_node must be an id that "
-    "appeared in a service_* tool result. null when genuinely unclear — never "
-    "guess.\n"
+    "beats a wrong specific one. But a broad node is only the answer once you have "
+    "LOOKED: before submitting a root's direct child (e.g. 'Transactional "
+    "Practice', 'Advisory Service'), open its children with service_children and "
+    "read their definitions, because such a node describes every matter of its "
+    "family and so tells a later reader nothing. Any non-null matter_kind_node "
+    "must be an id that appeared in a service_* tool result. null when genuinely "
+    "unclear — never guess.\n"
 )
 
 AREA_OF_LAW_INSTRUCTION = (

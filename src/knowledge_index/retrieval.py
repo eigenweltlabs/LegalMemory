@@ -789,6 +789,15 @@ class RetrievalService:
                         "label": service_scope.label_of(matter.matter_kind)
                         if service_scope
                         else None,
+                        # Same shape as practice_area above, and for the same
+                        # reason: the leaf label alone hides the hierarchy, so
+                        # "Debt Financing Practice" and "Lending Practice" read as
+                        # unrelated kinds when they are siblings under "Financing
+                        # Practice". A caller scoping a practice needs the path to
+                        # see that.
+                        "path": service_scope.path_labels(matter.matter_kind)
+                        if service_scope and matter.matter_kind in service_scope.visible
+                        else [],
                     }
                     if matter.matter_kind
                     else None,
