@@ -421,7 +421,8 @@ def test_all_document_query_paths_return_exact_citations(
 
     decisions = service.search_decisions("limits exposure", principals=PRINCIPALS)
     assert decisions[0]["project_id"] == "project-1"
-    _assert_exact_citation(decisions[0]["citations"][0])
+    assert decisions[0]["document_id"] == "document-1"
+    assert "citations" not in decisions[0]
 
     edges = service.traverse("document", "document-1", principals=PRINCIPALS)
     assert edges and edges[0]["from"]["id"] and edges[0]["to"]["id"]
@@ -482,29 +483,33 @@ def test_mcp_query_tools_preserve_citations(factory, tmp_path) -> None:
             "traverse",
             {"entity_type": "document", "entity_id": "document-1"},
         )
-        _assert_exact_citation(edges["results"][0]["citations"][0])
+        assert "citations" not in edges["results"][0]
+        assert edges["results"][0]["from"]["id"] and edges["results"][0]["to"]["id"]
 
         rollup = _call_mcp(client, "billing_rollup", {"matter_id": "matter-1"})
         _assert_exact_citation(rollup["citations"][0])
 
         invoices = _call_mcp(client, "list_invoices", {"matter_id": "matter-1"})
-        _assert_exact_citation(invoices["results"][0]["citations"][0])
+        assert invoices["results"][0]["document_ids"] == ["document-1"]
+        assert "citations" not in invoices["results"][0]
 
         entities = _call_mcp(client, "resolve_entity", {"query": "Citation GmbH"})
-        _assert_exact_citation(entities["results"][0]["citations"][0])
+        assert entities["results"][0]["citation_count"] >= 1
+        assert "citations" not in entities["results"][0]
 
         decisions = _call_mcp(
             client,
             "search_decisions",
             {"query": "limits exposure"},
         )
-        _assert_exact_citation(decisions["results"][0]["citations"][0])
+        assert decisions["results"][0]["document_id"] == "document-1"
+        assert "citations" not in decisions["results"][0]
 
         scope = _call_mcp(client, "preview_search_scope")
         assert scope["project_ids"] == ["project-1"]
         assert scope["document_count"] == 1
         assert scope["documents"]["results"] == ["document-1"]
-        _assert_exact_citation(scope["documents"]["citations"][0])
+        assert "citations" not in scope["documents"]
 
 
 def test_mcp_document_reads_are_paginated_and_related_docs_are_discoverable(
