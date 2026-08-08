@@ -33,7 +33,15 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from sqlalchemy.orm import (
+    DeclarativeBase,
+    Mapped,
+    mapped_column,
+    relationship,
+    validates,
+)
+
+from knowledge_index.entity_names import normalize_entity_name
 
 JSONVariant = JSON().with_variant(JSONB(), "postgresql")
 
@@ -311,28 +319,97 @@ class Artifact(Base):
 # ------------------------------------------------------------------------ knowledge layer
 
 
-class Client(TimestampMixin, Base):
-    __tablename__ = "clients"
+def _normalized_name_default(context) -> str:
+    """``normalized_name`` derived from whatever ``name`` this statement writes.
 
-    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    Set as a column default rather than left to the caller so no insert path can
+    produce a row the uniqueness constraint and the resolver disagree about — the
+    constraint is only worth its name if every row is keyed the same way.
+    """
+    parameters = context.get_current_parameters()
+    return normalize_entity_name(parameters.get("name"))
+
+
+class EntityIdentityMixin:
+    """The columns that make one real-world entity one row.
+
+    ``normalized_name`` is the identity key (see knowledge_index.entity_names) and
+    carries a trigram index, so the insertion-time resolver can ask "who does the
+    estate already know by roughly this name" instead of the substring test it used
+    to run — which found "Verimark Hospitality Group Inc." from "Verimark
+    Hospitality Group Inc" and from nothing else.
+
+    ``identity_discriminator`` is empty for every entity the estate has no reason to
+    split. Two genuinely different companies DO share a name, and the corpus plants
+    exactly that case; when a mention carries a register identifier that contradicts
+    the same-named incumbent's, the new row records that identifier here and the
+    unique constraint admits it as a second, deliberately distinct entity. Anything
+    else that shares a normalized name is the same entity — 46 clients spread over
+    266 matters is what a law firm looks like, and 1,076 single-matter clients out
+    of 1,212 was the inverse of it.
+
+    ``normalized_aliases`` is every OTHER name form seen for this entity, normalized,
+    so a variant the corpus has already taught the resolver resolves exactly rather
+    than fuzzily on the next document that uses it.
+    """
+
     name: Mapped[str] = mapped_column(Text)
+    normalized_name: Mapped[str] = mapped_column(Text, default=_normalized_name_default)
+    identity_discriminator: Mapped[str] = mapped_column(Text, default="", server_default="")
     aliases: Mapped[list] = mapped_column(JSONVariant, default=list)
+    normalized_aliases: Mapped[list] = mapped_column(JSONVariant, default=list)
     kind: Mapped[str] = mapped_column(String(20), default="legal_entity")
     identifiers: Mapped[dict] = mapped_column(JSONVariant, default=dict)  # HRB, USt-Id, DMS code
     provenance: Mapped[dict | None] = mapped_column(JSONVariant)
 
+    @validates("name")
+    def _keep_normalized_name(self, _key: str, value: str) -> str:
+        """Renaming an entity re-keys it, in the same statement.
 
-class Party(TimestampMixin, Base):
+        The column default covers Core inserts; this covers every ORM write,
+        including the ones that only touch ``name``. A row whose normalized name no
+        longer matches its name is invisible to the resolver that is supposed to
+        find it, which is the failure this whole change exists to end.
+        """
+        self.normalized_name = normalize_entity_name(value)
+        return value
+
+
+def _entity_identity_args(table: str) -> tuple:
+    """Uniqueness and the two lookup indexes, identical for clients and parties."""
+    return (
+        UniqueConstraint(
+            "normalized_name", "identity_discriminator", name=f"uq_{table}_identity"
+        ),
+        Index(
+            f"ix_{table}_normalized_name_trgm",
+            "normalized_name",
+            postgresql_using="gin",
+            postgresql_ops={"normalized_name": "gin_trgm_ops"},
+        ),
+        Index(
+            f"ix_{table}_normalized_aliases",
+            "normalized_aliases",
+            postgresql_using="gin",
+            postgresql_ops={"normalized_aliases": "jsonb_path_ops"},
+        ),
+    )
+
+
+class Client(EntityIdentityMixin, TimestampMixin, Base):
+    __tablename__ = "clients"
+    __table_args__ = _entity_identity_args("clients")
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+
+
+class Party(EntityIdentityMixin, TimestampMixin, Base):
     """Any natural/legal person appearing in matters or documents (incl. non-clients)."""
 
     __tablename__ = "parties"
+    __table_args__ = _entity_identity_args("parties")
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
-    name: Mapped[str] = mapped_column(Text)
-    aliases: Mapped[list] = mapped_column(JSONVariant, default=list)
-    kind: Mapped[str] = mapped_column(String(20), default="legal_entity")
-    identifiers: Mapped[dict] = mapped_column(JSONVariant, default=dict)
-    provenance: Mapped[dict | None] = mapped_column(JSONVariant)
 
 
 class Matter(TimestampMixin, Base):

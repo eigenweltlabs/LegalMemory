@@ -86,11 +86,14 @@ class TypedIdentifier(BaseModel):
 
 
 class ExtractedParty(BaseModel):
-    """One party named on the document, resolved to a firm-wide entity by the agent.
+    """One party named on the document.
 
-    The agent decides link-vs-create with the search_entities tool: it searches the
-    firm's known parties/clients and, only when a candidate is genuinely the SAME
-    real-world entity, reuses its id — a matching name alone is never enough.
+    The agent searches with search_entities and links what it recognizes, but it does
+    not have the last word: whether two names are one entity is decided by rule in
+    pipeline.runner._resolve_document_parties, which links on a shared identifier, on
+    an identical normalized name, or on a strong name match with corroboration. What
+    the agent contributes that no rule can is the identifiers printed on the page and
+    an honest role.
     """
 
     name: str = Field(
@@ -98,13 +101,19 @@ class ExtractedParty(BaseModel):
         "number, or defined-term label. Register numbers/LEI belong in identifiers. Write the "
         "same entity identically everywhere so mentions across documents match."
     )
-    role: PartyRole = Field(description="This party's role on THIS document.")
+    role: PartyRole = Field(
+        description="This party's role on THIS document. 'client' means the party THIS "
+        "FIRM acts for on this matter — not merely a prominent company on the page, and "
+        "never this firm itself. A counterparty, a co-investor, a guarantor, a person "
+        "signing for a company, an adviser, a court: all of these have their own role."
+    )
     existing_id: str | None = Field(
         default=None,
         description="The id of an existing entity returned by search_entities, when this "
-        "party IS that already-known entity. null to create a new one. Reuse an id ONLY "
-        "when identifiers or the matter context confirm it — never on name similarity alone. "
-        "null is only accepted for a party you actually searched with search_entities.",
+        "party IS that already-known entity. A candidate whose match.verdict is "
+        "same_entity IS this party — copy its id. null when the search genuinely found "
+        "nothing that is this entity; null is only accepted for a party you actually "
+        "searched with search_entities.",
     )
     kind: str = Field(
         default="legal_entity",
@@ -112,7 +121,9 @@ class ExtractedParty(BaseModel):
     )
     identifiers: list[TypedIdentifier] = Field(
         default_factory=list,
-        description="Register numbers/LEI/tax ids printed for THIS party, if any.",
+        description="Register numbers/LEI/tax ids printed for THIS party, if any. These "
+        "are what proves identity — copy every one the document shows, and they also "
+        "keep two same-named but genuinely different companies apart.",
     )
 
 
@@ -495,15 +506,29 @@ METADATA_SYSTEM = (
     "Party resolution — for every party named on the face of the document (the client "
     "the firm acts for, the contracting parties and counterparties, guarantors and "
     "agents, the court or authority, notaries, and any advising law firms):\n"
-    "(a) Give its role on THIS document, and its CANONICAL legal name only — strip the "
-    "address/seat, register text, and defined-term labels so the same entity reads "
-    "identically everywhere.\n"
-    "(b) Call search_entities for EVERY party — with its name (and any register "
-    "number/LEI) — BEFORE deciding whether it is new. If a returned candidate is the "
-    "SAME real-world entity, put its id in existing_id; a matching NAME ALONE is never "
-    "enough — different companies share names, so reuse an id only when identifiers or "
-    "the matter context agree. Otherwise leave existing_id null to create a new entity.\n"
-    "(c) Any non-null existing_id MUST be an id returned by search_entities in this "
+    "(a) Give its CANONICAL legal name only — strip the address/seat, register text, "
+    "and defined-term labels so the same entity reads identically everywhere — and copy "
+    "every register number, LEI or tax id the document prints for it into identifiers. "
+    "Those identifiers are what proves two mentions are one company, and what keeps two "
+    "same-named companies apart.\n"
+    "(b) Give its role on THIS document. 'client' is the party THIS FIRM acts for on "
+    "this matter. There is normally exactly one, it is the same party on every document "
+    "of the matter, and it is NEVER this firm: a counterparty, a co-investor, a "
+    "guarantor, a person signing on behalf of a company, an adviser, a notary or a court "
+    "each take their own role, not 'client'. When you cannot tell whose side the firm is "
+    "on from this document alone, use the role you CAN justify rather than guessing "
+    "'client'.\n"
+    "(c) Call search_entities for EVERY party — with its name, and again with any "
+    "register number — BEFORE deciding it is new. The search matches shorter and longer "
+    "forms of a name, and every form already seen for an entity, so a candidate under a "
+    "differently written name is normally the same company. Each candidate carries its "
+    "evidence: match.verdict=same_entity means the estate already holds this entity and "
+    "you must copy its id into existing_id; likely means judge it against the "
+    "identifiers, the matters it appears on and whether it is already on this matter; "
+    "distinct means it carries a conflicting register number and is a different company "
+    "with the same name. A candidate appearing on OTHER matters is normal — a firm "
+    "client has many matters — and is a reason to link, not a reason to create.\n"
+    "(d) Any non-null existing_id MUST be an id returned by search_entities in this "
     "conversation, and a null existing_id is only accepted for a party you actually "
     "searched."
 )

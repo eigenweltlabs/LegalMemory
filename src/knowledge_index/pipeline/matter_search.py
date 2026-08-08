@@ -1,5 +1,6 @@
-"""Ingestion-time matter search: the tools the classification agent uses to link a
-document to one of the firm's existing matters.
+"""Ingestion-time search: the tools the classification and extraction agents use to
+link a document to one of the firm's existing matters, and a named party to one of
+its existing entities.
 
 A firm has hundreds to thousands of matters, so the old "dump the first 80 matters
 into the prompt" approach silently drops most of them. Instead the agent SEARCHES:
@@ -7,16 +8,21 @@ semantically over already-indexed chunks, lexically over matter titles, and by e
 reference number, then reads the folder neighbourhood the way a paralegal would. All
 of this is unscoped by design — classification legitimately needs corpus-wide
 visibility to find the right matter — and never runs on the user query path.
+
+Entity resolution lives here too, and deliberately does NOT share the semantic leg:
+see the block comment above ``EntityCandidate`` for what that cost.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
-import re
+import logging
 from collections.abc import Callable
+from dataclasses import dataclass
 
 from sqlalchemy import func, select, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from knowledge_index.config import AppConfig
@@ -29,9 +35,16 @@ from knowledge_index.db.models import (
     EntityIdentifier,
     Matter,
     MatterAssignment,
+    MatterClient,
+    MatterParty,
     Party,
     Project,
     SourceObject,
+)
+from knowledge_index.entity_names import (
+    name_similarity,
+    name_tokens,
+    normalize_entity_name,
 )
 from knowledge_index.pipeline.folder_context import (
     _parent,
@@ -41,6 +54,8 @@ from knowledge_index.pipeline.folder_context import (
 )
 from knowledge_index.pipeline.providers import AgentTool, embed_text
 from knowledge_index.retrieval_types import Page
+
+log = logging.getLogger(__name__)
 
 # The classification and relation agents see the same pagination contract as the
 # external MCP surface, in fewer words: these agents run per document, thousands
@@ -886,153 +901,796 @@ def classification_tools(
     return tools
 
 
-def search_entities(
-    session: Session, config: AppConfig, query: str, *, limit: int = 8, offset: int = 0
-) -> list[dict]:
-    """Rank the firm's known parties/clients against a free-text name — the entity
-    analogue of search_matters, and semantic-first for the same reason.
+# ---------------------------------------------------------------- entity resolution
+#
+# What the insertion agent used to be given, and why it created 1,212 clients for a
+# corpus whose ground truth is 46. The lexical leg was `Party.name ILIKE '%query%'`,
+# which cannot match "Nexford" against a stored "Nexford Industrial Holdings Inc." in
+# either direction; the primary leg was semantic over already-INDEXED chunks, and
+# `index` is the last pipeline stage, so during a bulk run it is empty exactly when
+# extraction needs it (measured: extraction at 9,122 documents while index stood at
+# 7,033, and near-empty for the first several thousand). The agent searched, was told
+# nothing existed, and created — 973 times for a normalized name the estate already
+# held, 293 of them within 60 seconds of the previous one.
+#
+# So: no leg here depends on the index stage. Identity comes from typed identifiers
+# and from names, matched as token sets over a normalized column with a trigram index
+# behind it. What the semantic leg used to buy — "Nordwind Energie GmbH, Hamburg, HRB
+# 45678" reaching "Nordwind Energie GmbH" — the alias ledger buys instead, and keeps:
+# every surface form that resolves to an entity is recorded on it and matches exactly
+# from then on.
 
-    Primary signal is SEMANTIC: embed the query, take the nearest already-indexed
-    chunks, and surface the entities already resolved on those documents. A party is
-    found by the meaning of where it appears, not by string overlap — so 'Nordwind
-    Energie GmbH' and 'Nordwind Energie GmbH, Hamburg, HRB 45678' reach the same
-    documents and therefore the same candidate, in any language, with no
-    normalization rules. Lexical name and identifier matches are boosts, not the whole
-    search. Skips the semantic leg cleanly on a cold index."""
-    return Page.slice(
-        _ranked_entities(session, config, query), offset=max(0, offset), limit=limit
-    ).items
+# Below this the match is not worth an agent's attention: a single shared generic
+# token, or two names that merely rhyme. Candidates under it are dropped rather than
+# ranked last, so `page.total` counts real candidates.
+_ENTITY_SCORE_FLOOR = 0.35
+
+# A containment match ("Verimark Group" inside "Verimark Hospitality Group Inc.")
+# starts here. Strong enough to link with corroboration, never strong enough alone.
+_ENTITY_LIKELY_SCORE = 0.80
+
+# How many rows one leg may contribute before scoring. A generic token ("holdings")
+# matches half the estate; the floor above sinks those, and this stops the leg from
+# reading the whole table to find out.
+_ENTITY_LEG_LIMIT = 60
+
+# Matter references shown inline on a candidate. The true total rides along as
+# matter_count and the sample says it is one, exactly like peek_matter's titles.
+_ENTITY_MATTER_SAMPLE = 8
+
+_ENTITY_VERDICTS = {
+    "same_entity": (
+        "the estate already holds this entity — reuse its id, do not create a second row"
+    ),
+    "likely": "same name family; link it when the evidence below agrees, else say so",
+    "possible": "a weak name resemblance only",
+    "distinct": (
+        "shares the name but carries a CONFLICTING register identifier — a different "
+        "company with the same name"
+    ),
+}
 
 
-def search_entities_page(
-    session: Session, config: AppConfig, query: str, *, limit: int = 8, offset: int = 0
-) -> Page:
-    """``search_entities`` with an exact candidate total."""
-    return Page.slice(
-        _ranked_entities(session, config, query), offset=max(0, offset), limit=limit
+@dataclass(frozen=True)
+class EntityCandidate:
+    """One already-known entity that might be the one a document just named."""
+
+    entity_type: str  # client | party
+    entity_id: str
+    name: str
+    normalized_name: str
+    kind: str
+    score: float
+    verdict: str
+    components: dict[str, float]
+    matched_identifiers: list[dict]
+    conflicting_identifiers: list[dict]
+
+    @property
+    def key(self) -> tuple[str, str]:
+        return (self.entity_type, self.entity_id)
+
+
+def _entity_identifier_rows(session: Session, entity_type: str, entity_id: str) -> list[dict]:
+    return [
+        {"scheme": row.scheme, "value": row.value}
+        for row in session.scalars(
+            select(EntityIdentifier)
+            .where(
+                EntityIdentifier.entity_type == entity_type,
+                EntityIdentifier.entity_id == entity_id,
+            )
+            .order_by(EntityIdentifier.scheme, EntityIdentifier.value)
+        )
+    ]
+
+
+def _normalize_identifiers(identifiers: dict[str, str] | None) -> dict[str, str]:
+    """The (scheme, value) pairs a mention brings, lowercased and trimmed for comparison."""
+    return {
+        str(scheme).strip().lower(): str(value).strip()
+        for scheme, value in (identifiers or {}).items()
+        if str(value or "").strip()
+    }
+
+
+def _entity_model(entity_type: str):
+    return Client if entity_type == "client" else Party
+
+
+def _candidate_pool(
+    session: Session, query: str, identifiers: dict[str, str] | None
+) -> dict[tuple[str, str], object]:
+    """Every entity worth scoring for this query, from four independent legs.
+
+    Generation is deliberately generous and scoring is strict: a leg that misses is
+    a candidate that can never be found, while a leg that over-fetches only costs
+    rows the score floor then drops.
+    """
+    normalized = normalize_entity_name(query)
+    tokens = sorted(name_tokens(normalized), key=len, reverse=True)[:6]
+    pool: dict[tuple[str, str], object] = {}
+    postgres = session.bind is not None and session.bind.dialect.name == "postgresql"
+
+    def collect(entity_type: str, rows) -> None:
+        for row in rows:
+            pool.setdefault((entity_type, row.id), row)
+
+    # Leg 1 — typed identifiers. A shared register number is proof of identity, so
+    # it must reach the pool whatever the names look like.
+    wanted_values = {value.lower() for value in _normalize_identifiers(identifiers).values()}
+    if query.strip():
+        wanted_values.add(query.strip().lower())
+    if wanted_values:
+        for identifier in session.scalars(
+            select(EntityIdentifier)
+            .where(func.lower(EntityIdentifier.value).in_(sorted(wanted_values)))
+            .order_by(EntityIdentifier.scheme, EntityIdentifier.value, EntityIdentifier.id)
+            .limit(_ENTITY_LEG_LIMIT)
+        ):
+            entity = session.get(_entity_model(identifier.entity_type), identifier.entity_id)
+            if entity is not None:
+                pool.setdefault((identifier.entity_type, entity.id), entity)
+
+    if not normalized:
+        return pool
+
+    for entity_type, model in (("client", Client), ("party", Party)):
+        # Leg 2 — the identity key itself, and the alias ledger. Both are exact
+        # lookups an index answers directly.
+        collect(
+            entity_type,
+            session.scalars(
+                select(model).where(model.normalized_name == normalized).limit(_ENTITY_LEG_LIMIT)
+            ),
+        )
+        if postgres:
+            collect(
+                entity_type,
+                session.scalars(
+                    select(model)
+                    .where(
+                        text(f"{model.__tablename__}.normalized_aliases @> cast(:alias as jsonb)")
+                    )
+                    .params(alias=json.dumps([normalized]))
+                    .limit(_ENTITY_LEG_LIMIT)
+                ),
+            )
+            # Leg 3 — trigram similarity, for the variants nobody has recorded yet:
+            # typos, dropped middle words, transliterations. `%` rides the GIN index
+            # on normalized_name. Doubled because the driver's paramstyle is
+            # `format`: a lone % in raw SQL reads as a placeholder.
+            collect(
+                entity_type,
+                session.scalars(
+                    select(model)
+                    .where(text(f"{model.__tablename__}.normalized_name %% :needle"))
+                    .params(needle=normalized)
+                    .order_by(
+                        func.similarity(model.normalized_name, normalized).desc(), model.id
+                    )
+                    .limit(_ENTITY_LEG_LIMIT)
+                ),
+            )
+        # Leg 4 — one token at a time. This is the leg the old substring predicate
+        # was missing: "Nexford" has to find "Nexford Industrial Holdings Inc." and
+        # be found by it, and trigram similarity between a short name and a long one
+        # is too low to clear any useful threshold. On Postgres the same trigram
+        # index answers these LIKEs.
+        for token in tokens:
+            collect(
+                entity_type,
+                session.scalars(
+                    select(model)
+                    .where(model.normalized_name.like(f"%{token}%"))
+                    .order_by(model.normalized_name, model.id)
+                    .limit(_ENTITY_LEG_LIMIT)
+                ),
+            )
+    return pool
+
+
+def _score_candidate(
+    session: Session,
+    entity_type: str,
+    entity,
+    normalized_query: str,
+    wanted_identifiers: dict[str, str],
+) -> EntityCandidate | None:
+    """Turn one pooled entity into a scored candidate, or drop it below the floor."""
+    held = _entity_identifier_rows(session, entity_type, entity.id)
+    held_by_scheme: dict[str, set[str]] = {}
+    for row in held:
+        held_by_scheme.setdefault(row["scheme"], set()).add(row["value"])
+    matched = [
+        {"scheme": scheme, "value": value}
+        for scheme, value in sorted(wanted_identifiers.items())
+        if value in held_by_scheme.get(scheme, set())
+    ]
+    conflicting = [
+        {"scheme": scheme, "value": sorted(held_by_scheme[scheme])[0]}
+        for scheme, value in sorted(wanted_identifiers.items())
+        if scheme in held_by_scheme and value not in held_by_scheme[scheme]
+    ]
+
+    name_score, component = name_similarity(normalized_query, entity.normalized_name or "")
+    alias_hit = normalized_query and normalized_query in (entity.normalized_aliases or [])
+    if alias_hit and name_score < 1.0:
+        name_score, component = 0.97, "alias"
+    components: dict[str, float] = {}
+    if component:
+        components[component] = name_score
+    if matched:
+        components["identifier"] = 1.0
+
+    if matched:
+        score, verdict = 1.0, "same_entity"
+    elif conflicting:
+        # Same name, contradicting register number. Shown, never linked.
+        score, verdict = name_score, "distinct"
+    elif component == "exact" or alias_hit:
+        score, verdict = max(name_score, 0.97), "same_entity"
+    elif name_score >= _ENTITY_LIKELY_SCORE:
+        score, verdict = name_score, "likely"
+    elif name_score >= _ENTITY_SCORE_FLOOR:
+        score, verdict = name_score, "possible"
+    else:
+        return None
+    return EntityCandidate(
+        entity_type=entity_type,
+        entity_id=entity.id,
+        name=entity.name,
+        normalized_name=entity.normalized_name or "",
+        kind=entity.kind,
+        score=round(score, 4),
+        verdict=verdict,
+        components={key: round(value, 4) for key, value in components.items()},
+        matched_identifiers=matched,
+        conflicting_identifiers=conflicting,
     )
 
 
-def _ranked_entities(session: Session, config: AppConfig, query: str) -> list[dict]:
-    """Every party/client that matched, best first — what the pages are cut from."""
-    query = (query or "").strip()
-    if not query:
+def entity_candidates(
+    session: Session,
+    query: str,
+    *,
+    identifiers: dict[str, str] | None = None,
+) -> list[EntityCandidate]:
+    """Every known client/party that could be ``query``, strongest first.
+
+    The ranking is total and deterministic — score, then entity type, then id — so
+    two calls with the same query cut a page in the same place.
+    """
+    normalized_query = normalize_entity_name(query)
+    wanted = _normalize_identifiers(identifiers)
+    if not normalized_query and not wanted and not (query or "").strip():
         return []
-    scored: dict[tuple[str, str], float] = {}  # (entity_type, id) -> score
+    scored: list[EntityCandidate] = []
+    for (entity_type, _entity_id), entity in _candidate_pool(session, query, identifiers).items():
+        candidate = _score_candidate(session, entity_type, entity, normalized_query, wanted)
+        if candidate is not None:
+            scored.append(candidate)
+    scored.sort(key=lambda item: (-item.score, item.entity_type, item.entity_id))
+    return scored
 
-    # Semantic: nearest already-indexed chunks -> their documents -> the entities
-    # already resolved on those documents.
-    try:
-        from knowledge_index.search_backend import OpenSearchIndex
 
-        vector = embed_text(query, config)
-        for rank, hit in enumerate(OpenSearchIndex(config).matter_hits_by_vector(vector, size=40)):
-            document_id = (hit.get("_source") or {}).get("document_id")
-            document = session.get(Document, document_id) if document_id else None
-            for mention in (document.parties or []) if document else []:
-                entity_id = mention.get("party_id")
-                entity_type = mention.get("entity_type")
-                if entity_id and entity_type:
-                    key = (entity_type, entity_id)
-                    scored[key] = max(scored.get(key, 0.0), 1.0 / (10 + rank))
-    except Exception:
-        pass
+def _entity_matter_ids(session: Session, entity_type: str, entity_id: str) -> list[str]:
+    """The matters an entity already appears on — the evidence that makes a link
+    reviewable, and the reason cross-matter identity is the point: "show me
+    everything for this client" is unanswerable while each matter mints its own copy."""
+    if entity_type == "client":
+        statement = select(MatterClient.matter_id).where(MatterClient.client_id == entity_id)
+    else:
+        statement = select(MatterParty.matter_id).where(MatterParty.party_id == entity_id)
+    return sorted({matter_id for matter_id in session.scalars(statement) if matter_id})
 
-    # Lexical: entity name contains the query (a boost).
-    for party in session.scalars(
-        select(Party)
-        .where(Party.name.ilike(f"%{query}%"))
-        .order_by(Party.name, Party.id)
-        .limit(30)
-    ):
-        scored[("party", party.id)] = scored.get(("party", party.id), 0.0) + 0.5
-    for client in session.scalars(
-        select(Client)
-        .where(Client.name.ilike(f"%{query}%"))
-        .order_by(Client.name, Client.id)
-        .limit(30)
-    ):
-        scored[("client", client.id)] = scored.get(("client", client.id), 0.0) + 0.5
 
-    # Identifier: shared-identifier match (the entity analogue of the matter ref leg).
-    for ident in session.scalars(
-        select(EntityIdentifier)
-        .where(EntityIdentifier.value.ilike(f"%{query}%"))
-        .order_by(EntityIdentifier.value, EntityIdentifier.id)
-        .limit(30)
-    ):
-        key = (ident.entity_type, ident.entity_id)
-        scored[key] = scored.get(key, 0.0) + 1.0
-
-    # (type, id) breaks score ties, so pages cut in the same place every call.
-    ranked = sorted(scored.items(), key=lambda item: (-item[1], item[0]))
-    results: list[dict] = []
-    for (entity_type, entity_id), score in ranked:
-        entity = session.get(Client if entity_type == "client" else Party, entity_id)
-        if entity is None:
-            continue
-        results.append(
-            {
-                "id": entity.id,
-                "entity_type": entity_type,
-                "name": entity.name,
-                "kind": entity.kind,
-                "identifiers": entity.identifiers or {},
-                "match_score": round(score, 4),
-            }
+def _candidate_row(
+    session: Session, candidate: EntityCandidate, *, matter_id: str | None
+) -> dict:
+    """The tool payload for one candidate: what makes it the same entity, not just
+    its name. Counts are exact; the matter list is a named sample of them."""
+    entity = session.get(_entity_model(candidate.entity_type), candidate.entity_id)
+    matter_ids = _entity_matter_ids(session, candidate.entity_type, candidate.entity_id)
+    sample = matter_ids[:_ENTITY_MATTER_SAMPLE]
+    references: list[str] = []
+    for candidate_matter_id in sample:
+        matter = session.get(Matter, candidate_matter_id)
+        if matter is not None:
+            references.append((matter.reference_numbers or [matter.title])[0])
+    document_count = (
+        session.scalar(
+            select(func.count()).select_from(Document).where(Document.matter_id.in_(matter_ids))
         )
-    return results
+        or 0
+        if matter_ids
+        else 0
+    )
+    row = {
+        "id": candidate.entity_id,
+        "entity_type": candidate.entity_type,
+        "name": candidate.name,
+        "kind": candidate.kind,
+        "aliases": list((entity.aliases or []) if entity is not None else []),
+        "identifiers": _entity_identifier_rows(
+            session, candidate.entity_type, candidate.entity_id
+        ),
+        "matched_identifiers": candidate.matched_identifiers,
+        "conflicting_identifiers": candidate.conflicting_identifiers,
+        "matter_count": len(matter_ids),
+        "matter_refs": references,
+        "matter_refs_are_sample": len(matter_ids) > len(sample),
+        "document_count": document_count,
+        "match": {
+            "score": candidate.score,
+            "verdict": candidate.verdict,
+            "means": _ENTITY_VERDICTS[candidate.verdict],
+            "components": candidate.components,
+        },
+    }
+    if matter_id:
+        row["appears_in_this_matter"] = matter_id in matter_ids
+    return row
 
 
-_ENTITY_NAME_SUFFIXES = frozenset(
-    "ag gmbh kg se sa nv bv ab oy plc llp llc lp ltd inc corp co pc pllc "
-    "gbr ohg ug mbh sarl sas spa srl".split()
-)
+def search_entities_page(
+    session: Session,
+    query: str,
+    *,
+    limit: int = 8,
+    offset: int = 0,
+    identifiers: dict[str, str] | None = None,
+    matter_id: str | None = None,
+) -> Page:
+    """One page of ranked candidates, each carrying its evidence.
+
+    Scoring runs over the whole candidate set before the window is cut, so
+    ``offset`` walks one ranking and ``page.total`` is the real number of
+    candidates. The per-row evidence (identifiers, matters, counts) is gathered only
+    for the rows actually returned."""
+    page = Page.slice(
+        entity_candidates(session, query, identifiers=identifiers),
+        offset=max(0, offset),
+        limit=limit,
+    )
+    page.items = [_candidate_row(session, item, matter_id=matter_id) for item in page.items]
+    return page
 
 
-def _normalize_entity_name(text: str) -> str:
-    """Lowercased, punctuation-free, trailing-legal-suffix-free form of a name.
-
-    Used ONLY to judge whether a search_entities query plausibly looked for a
-    party — never to merge entities (merging stays the agent's call, and the
-    deterministic net in ``_resolve_document_parties`` matches verbatim names)."""
-    tokens = re.sub(r"[^\w\s]", " ", (text or "").lower()).split()
-    while tokens and tokens[-1] in _ENTITY_NAME_SUFFIXES:
-        tokens.pop()
-    return " ".join(tokens)
+def search_entities(
+    session: Session,
+    query: str,
+    *,
+    limit: int = 8,
+    offset: int = 0,
+    identifiers: dict[str, str] | None = None,
+    matter_id: str | None = None,
+) -> list[dict]:
+    """``search_entities_page`` without the page block."""
+    return search_entities_page(
+        session,
+        query,
+        limit=limit,
+        offset=offset,
+        identifiers=identifiers,
+        matter_id=matter_id,
+    ).items
 
 
 def entity_search_covered(name: str, searched_queries: set[str]) -> bool:
     """True when one of the agent's search_entities queries covered this party:
-    after normalization, one string contains the other ("Vantage Prime Bank"
+    after normalization, one name's tokens contain the other's ("Vantage Prime Bank"
     covers "Vantage Prime Bank AG"). A name that normalizes to nothing needs no
     search."""
-    normalized = _normalize_entity_name(name)
+    normalized = normalize_entity_name(name)
     if not normalized:
         return True
+    wanted = name_tokens(normalized)
     for query in searched_queries:
-        candidate = _normalize_entity_name(query)
-        if candidate and (candidate in normalized or normalized in candidate):
+        candidate = name_tokens(normalize_entity_name(query))
+        if candidate and (candidate <= wanted or wanted <= candidate):
             return True
     return False
 
 
+# ------------------------------------------------------------ creation without twins
+
+
+def _entity_alias_ledger(entity, surface_name: str) -> None:
+    """Record a surface form on the entity it resolved to.
+
+    This is how the corpus teaches the resolver: the second document that writes
+    "Nordwind Energie GmbH, Hamburg" resolves fuzzily, and every one after it
+    resolves exactly."""
+    normalized = normalize_entity_name(surface_name)
+    if not normalized or normalized == (entity.normalized_name or ""):
+        return
+    aliases = list(entity.aliases or [])
+    normalized_aliases = list(entity.normalized_aliases or [])
+    if normalized in normalized_aliases:
+        return
+    normalized_aliases.append(normalized)
+    if surface_name.strip() and surface_name.strip() not in aliases:
+        aliases.append(surface_name.strip())
+    # Reassigned rather than mutated: a JSON column tracks identity, not contents.
+    entity.aliases = aliases
+    entity.normalized_aliases = normalized_aliases
+
+
+def _corroboration(
+    session: Session,
+    candidate: EntityCandidate,
+    *,
+    matter_id: str | None,
+    sibling_entity_ids: set[str],
+) -> list[str]:
+    """Reasons beyond the name to believe a ``likely`` candidate is this entity.
+
+    A shared identifier is proof and never reaches here. These are the signals that
+    turn a strong name match into a link instead of a question: the entity is
+    already on this matter, or it shares a matter with somebody else this very
+    document names, or it acts for the same client this matter does."""
+    reasons: list[str] = []
+    matter_ids = set(_entity_matter_ids(session, candidate.entity_type, candidate.entity_id))
+    if matter_id and matter_id in matter_ids:
+        reasons.append("already_on_this_matter")
+    if matter_ids and sibling_entity_ids:
+        co_occurring = (
+            session.scalar(
+                select(func.count())
+                .select_from(MatterParty)
+                .where(
+                    MatterParty.matter_id.in_(matter_ids),
+                    MatterParty.party_id.in_(sibling_entity_ids),
+                )
+            )
+            or 0
+        ) + (
+            session.scalar(
+                select(func.count())
+                .select_from(MatterClient)
+                .where(
+                    MatterClient.matter_id.in_(matter_ids),
+                    MatterClient.client_id.in_(sibling_entity_ids),
+                )
+            )
+            or 0
+        )
+        if co_occurring:
+            reasons.append("shares_a_matter_with_another_party_on_this_document")
+    if matter_id and matter_ids:
+        this_matter_clients = set(
+            session.scalars(
+                select(MatterClient.client_id).where(MatterClient.matter_id == matter_id)
+            )
+        )
+        if this_matter_clients:
+            shared_client = session.scalar(
+                select(func.count())
+                .select_from(MatterClient)
+                .where(
+                    MatterClient.matter_id.in_(matter_ids - {matter_id}),
+                    MatterClient.client_id.in_(this_matter_clients),
+                )
+            )
+            if shared_client:
+                reasons.append("acts_on_another_matter_for_this_matter_s_client")
+    return reasons
+
+
+def link_decision(
+    session: Session,
+    candidates: list[EntityCandidate],
+    *,
+    entity_type: str,
+    matter_id: str | None,
+    sibling_entity_ids: set[str],
+) -> tuple[EntityCandidate | None, str, list[str]]:
+    """THE RULE, in one place, so it can be read, argued with, and tested.
+
+    A mention links to an entity the estate already holds when:
+
+    1. they share a typed identifier — proof, and it outranks every name signal;
+    2. the normalized names are identical, or the mention's name is already on the
+       entity's alias ledger, and no register identifier contradicts it. This is the
+       default path across matters, not a judgement the agent may decline: a firm
+       client has many matters, and 1,076 of 1,212 clients touching exactly one
+       matter is the inverse of what a firm looks like;
+    3. one name contains the other token-for-token AND something beyond the name
+       agrees (see ``_corroboration``).
+
+    Everything else escalates: the candidates go back to the agent with their
+    evidence and it decides. Creating alongside a candidate is allowed — different
+    companies genuinely share names — but it is recorded on the new row's
+    provenance, so "created a second entity for a name the estate already knows" is
+    a countable event rather than a suspicion.
+
+    Returns ``(entity, reason, corroboration)``; ``entity`` is None when nothing
+    links automatically.
+    """
+    same_type = [item for item in candidates if item.entity_type == entity_type]
+    ordered = same_type + [item for item in candidates if item.entity_type != entity_type]
+    for candidate in ordered:
+        if candidate.matched_identifiers:
+            return candidate, "shared_identifier", []
+    for candidate in ordered:
+        if candidate.verdict == "same_entity":
+            return candidate, "normalized_name", []
+    for candidate in ordered:
+        if candidate.verdict != "likely":
+            continue
+        reasons = _corroboration(
+            session, candidate, matter_id=matter_id, sibling_entity_ids=sibling_entity_ids
+        )
+        if reasons:
+            return candidate, "name_and_corroboration", reasons
+    return None, "no_confident_candidate", []
+
+
+def _identity_discriminator(
+    candidates: list[EntityCandidate], identifiers: dict[str, str]
+) -> str:
+    """What makes a new row a legitimately DIFFERENT entity from a same-named one.
+
+    Empty for almost everything. Non-empty only when the estate already holds this
+    normalized name and this mention carries a register identifier that contradicts
+    it — the one case where two rows with one name are the truth rather than the
+    bug, and the only thing the unique constraint will let through."""
+    conflicting = [item for item in candidates if item.conflicting_identifiers]
+    if not conflicting or not identifiers:
+        return ""
+    scheme, value = sorted(identifiers.items())[0]
+    return f"{scheme}:{value}"
+
+
+def resolve_or_create_entity(
+    session_factory: sessionmaker[Session],
+    *,
+    entity_type: str,
+    name: str,
+    kind: str,
+    identifiers: dict[str, str],
+    provenance: dict,
+    matter_id: str | None = None,
+    sibling_entity_ids: set[str] | None = None,
+    preferred_entity_id: str | None = None,
+) -> dict:
+    """Resolve one named party to exactly one row, committed before this returns.
+
+    Its own short session, for the same reason ``get_or_create_matter`` has one:
+    thousands of documents extract in parallel and the entity has to become visible
+    to the others the moment it exists, not when the calling stage's transaction
+    commits minutes later. That alone removes the pure race — 293 of the 973
+    duplicate creations happened within 60 seconds of the previous one.
+
+    Two further guards, because "unlikely" is not "impossible":
+    the advisory lock on the normalized name makes search-then-create atomic per
+    name, and the unique constraint on (normalized_name, identity_discriminator)
+    catches anything that reaches an insert anyway — a lock-key hash collision, a
+    non-Postgres deployment, a future caller that forgets — by turning the losing
+    insert into a re-select of the winner.
+    """
+    surface = (name or "").strip()
+    normalized = normalize_entity_name(surface)
+    identifiers = _normalize_identifiers(identifiers)
+    with session_factory() as session:
+        _advisory_xact_lock(session, f"entity:{entity_type}:{normalized}")
+        candidates = entity_candidates(session, surface, identifiers=identifiers)
+        entity, reason, corroboration = link_decision(
+            session,
+            candidates,
+            entity_type=entity_type,
+            matter_id=matter_id,
+            sibling_entity_ids=sibling_entity_ids or set(),
+        )
+        resolved = None
+        resolved_type = entity_type
+        if entity is not None:
+            resolved = session.get(_entity_model(entity.entity_type), entity.entity_id)
+            resolved_type = entity.entity_type
+        elif preferred_entity_id:
+            # The agent named a candidate the deterministic rule did not reach. It
+            # saw the evidence; honour it, and say which one said so. It may well have
+            # named a row from the other table — the same company is the client here
+            # and the counterparty there — so both are checked.
+            other_type = "party" if entity_type == "client" else "client"
+            for entity_type_candidate in (entity_type, other_type):
+                resolved = session.get(_entity_model(entity_type_candidate), preferred_entity_id)
+                if resolved is not None:
+                    resolved_type = entity_type_candidate
+                    reason = "agent_link"
+                    break
+        if resolved is not None:
+            if resolved_type != entity_type:
+                # The same real-world entity is the firm's client on one matter and a
+                # counterparty on another; the two live in different tables. Carry the
+                # identity across instead of minting an unrelated row for the twin.
+                resolved = _mirror_entity(
+                    session, resolved, entity_type=entity_type, provenance=provenance
+                )
+            _entity_alias_ledger(resolved, surface)
+            for scheme, value in identifiers.items():
+                _ensure_identifier(session, entity_type, resolved.id, scheme, value)
+            session.commit()
+            return {
+                "id": resolved.id,
+                "entity_type": entity_type,
+                "created": False,
+                "reason": reason,
+                "corroboration": corroboration,
+            }
+
+        model = _entity_model(entity_type)
+        discriminator = _identity_discriminator(candidates, identifiers)
+        shadowed = [
+            {"id": item.entity_id, "name": item.name, "score": item.score, "verdict": item.verdict}
+            for item in candidates[:5]
+        ]
+        record = dict(provenance)
+        record["resolution"] = {
+            "decision": "created",
+            "reason": reason,
+            # Countable: `select count(*) from clients where
+            # provenance #>> '{resolution,reason}' <> 'no_confident_candidate'`
+            # is the number of times insertion made a second row for a name the
+            # estate already knew.
+            "shadowed_candidates": shadowed,
+        }
+        entity_row = model(
+            name=surface,
+            kind=kind,
+            aliases=[],
+            normalized_aliases=[],
+            identity_discriminator=discriminator,
+            identifiers=dict(identifiers),
+            provenance=record,
+        )
+        session.add(entity_row)
+        try:
+            session.flush()
+        except IntegrityError as conflict:
+            session.rollback()
+            return _reselect_after_conflict(
+                session_factory,
+                conflict,
+                entity_type=entity_type,
+                normalized=normalized,
+                discriminator=discriminator,
+                surface=surface,
+                identifiers=identifiers,
+            )
+        for scheme, value in identifiers.items():
+            _ensure_identifier(session, entity_type, entity_row.id, scheme, value)
+        session.commit()
+        if shadowed:
+            log.info(
+                "entity created alongside %d known candidate(s): %r (%s)",
+                len(shadowed),
+                surface,
+                entity_type,
+            )
+        return {
+            "id": entity_row.id,
+            "entity_type": entity_type,
+            "created": True,
+            "reason": reason,
+            "corroboration": [],
+        }
+
+
+def _reselect_after_conflict(
+    session_factory: sessionmaker[Session],
+    conflict: IntegrityError,
+    *,
+    entity_type: str,
+    normalized: str,
+    discriminator: str,
+    surface: str,
+    identifiers: dict[str, str],
+) -> dict:
+    """The loser of a race reads the winner's row instead of raising.
+
+    Reached only when two creators got past the advisory lock — a non-Postgres
+    deployment, or a key collision. The constraint decided; this reports what it
+    decided."""
+    model = _entity_model(entity_type)
+    with session_factory() as session:
+        winner = session.scalar(
+            select(model).where(
+                model.normalized_name == normalized,
+                model.identity_discriminator == discriminator,
+            )
+        )
+        if winner is None:  # pragma: no cover - the constraint fired for another reason
+            raise conflict
+        _entity_alias_ledger(winner, surface)
+        for scheme, value in identifiers.items():
+            _ensure_identifier(session, entity_type, winner.id, scheme, value)
+        session.commit()
+        return {
+            "id": winner.id,
+            "entity_type": entity_type,
+            "created": False,
+            "reason": "lost_creation_race",
+            "corroboration": [],
+        }
+
+
+def _mirror_entity(session: Session, source, *, entity_type: str, provenance: dict):
+    """The counterpart row for an entity that is a client here and a party there.
+
+    Clients and parties are separate tables by design (docs/concepts/data-model.md),
+    so one company can need a row in each. It gets the same name, aliases and
+    identifiers, so both rows resolve from either spelling and the pair is
+    recognizable as one entity rather than as two unrelated ones."""
+    model = _entity_model(entity_type)
+    existing = session.scalar(
+        select(model).where(
+            model.normalized_name == source.normalized_name,
+            model.identity_discriminator == source.identity_discriminator,
+        )
+    )
+    if existing is not None:
+        return existing
+    record = dict(provenance)
+    record["resolution"] = {"decision": "mirrored", "from": source.id}
+    mirror = model(
+        name=source.name,
+        kind=source.kind,
+        aliases=list(source.aliases or []),
+        normalized_aliases=list(source.normalized_aliases or []),
+        identity_discriminator=source.identity_discriminator,
+        identifiers=dict(source.identifiers or {}),
+        provenance=record,
+    )
+    session.add(mirror)
+    session.flush()
+    for row in _entity_identifier_rows(session, "client" if entity_type == "party" else "party", source.id):
+        _ensure_identifier(session, entity_type, mirror.id, row["scheme"], row["value"])
+    return mirror
+
+
+def _ensure_identifier(
+    session: Session, entity_type: str, entity_id: str, scheme: str, value: str
+) -> None:
+    """Idempotent promotion of one typed identifier onto an entity."""
+    scheme = str(scheme).strip().lower()
+    value = str(value).strip()
+    if not scheme or not value:
+        return
+    exists = session.scalar(
+        select(EntityIdentifier).where(
+            EntityIdentifier.entity_type == entity_type,
+            EntityIdentifier.entity_id == entity_id,
+            EntityIdentifier.scheme == scheme,
+            EntityIdentifier.value == value,
+        )
+    )
+    if exists is None:
+        session.add(
+            EntityIdentifier(
+                entity_type=entity_type, entity_id=entity_id, scheme=scheme, value=value
+            )
+        )
+
+
 def party_resolution_tools(
     session: Session,
-    config: AppConfig,
     seen_ids: set[str],
     searched_queries: set[str] | None = None,
+    *,
+    matter_id: str | None = None,
 ) -> list[AgentTool]:
-    """The tool the extraction agent uses to resolve a party to a firm-wide entity:
-    search the firm's known parties/clients (semantic-first, exactly like
-    search_matters), then the agent links (reuses an id) or creates a new one.
+    """The tool the extraction agent uses to resolve a party to a firm-wide entity.
 
     ``seen_ids`` accumulates every id the agent is shown, so the stage can reject an
-    existing_id the agent never actually saw (the "name alone is not enough" guard).
-    ``searched_queries`` accumulates every query the agent ran, so the stage can
-    equally reject a CREATE for a party the agent never searched — without it,
-    create is the frictionless default and the entity layer fills with twins
-    (the 2026-08-01 audit: 63% duplicate party rows, 23.7% reuse)."""
+    existing_id the agent never actually saw. ``searched_queries`` accumulates every
+    query it ran, so the stage can equally reject a CREATE for a party it never
+    searched — without that, create is the frictionless default.
+
+    Neither guard was ever the weak link, though. The tool told the truth about a
+    search that could not find what it was looking for, and the agent believed it.
+    """
 
     def _search(args: dict) -> str:
         needle = str(args.get("query", "")).strip()
@@ -1041,10 +1699,10 @@ def party_resolution_tools(
         page = (
             search_entities_page(
                 session,
-                config,
                 needle,
                 limit=int(args.get("limit", 8) or 8),
                 offset=int(args.get("offset", 0) or 0),
+                matter_id=matter_id,
             )
             if needle
             else Page()
@@ -1057,17 +1715,19 @@ def party_resolution_tools(
         AgentTool(
             name="search_entities",
             description=(
-                "Search the firm's already-known parties and clients. Ranks by semantic "
-                "similarity of where entities appear, plus name and identifier matches. "
-                "Returns candidates with id, entity_type (party|client), name, kind and "
-                "identifiers. Call it before deciding a party is new: reuse a candidate's "
-                "id (as existing_id) ONLY when it is genuinely the same real-world entity "
-                "— a matching name alone is not enough, because different companies share "
-                "names."
+                "Search the firm's already-known parties and clients by name or register "
+                "identifier. Matching is on the normalized name, so a shorter or longer "
+                "form of the same name still finds it ('Nexford' finds 'Nexford Industrial "
+                "Holdings Inc.'), and every name form already seen for an entity is "
+                "searchable too. Each candidate arrives with the evidence: matching and "
+                "conflicting identifiers, how many matters it appears on and which, "
+                "whether it is already on THIS document's matter, and match.verdict — "
+                "same_entity means the estate already holds it, so reuse its id; likely "
+                "means judge it against the evidence; distinct means it shares the name "
+                "but carries a conflicting register number and is a different company."
                 + _AGENT_PAGINATION
-                + " Creating a duplicate of an entity that was simply on page 2 is the "
-                "most expensive mistake here, so check has_more before deciding a party "
-                "is new."
+                + " A firm client appears across many matters, so finding a candidate on "
+                "another matter is normal and is a reason to link, not a reason to create."
             ),
             parameters={
                 "type": "object",
