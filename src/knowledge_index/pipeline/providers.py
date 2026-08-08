@@ -171,7 +171,7 @@ def chat_json(
     system: str,
     user: str,
     schema: type[SchemaT],
-    max_output_tokens: int = 2000,
+    max_output_tokens: int | None = None,
     trace_tags: list[str] | None = None,
 ) -> SchemaT:
     """One structured chat completion, validated against the stage's schema.
@@ -190,7 +190,17 @@ def chat_json(
         json={
             "model": model,
             "temperature": 0.0,  # pipeline output is deterministic by design
-            "max_tokens": max_output_tokens,
+            # No output cap by default. This model reasons before it answers, and
+            # a cap truncates the reasoning rather than shortening the answer:
+            # measured on one classification, 12,000 tokens went entirely into a
+            # 29,904-character reasoning trace and `content` came back None. That
+            # surfaces as ModelOutputInvalid, the document's extraction is lost,
+            # and — because the matter's practice area is set by the first
+            # document that survives — an unlucky survivor defines the matter (a
+            # $700M term loan filed under Real Property Law because a mortgage
+            # form won the lottery). 1,441 documents were quarantined this way in
+            # one 51k run. A cap here buys nothing the stage timeout does not.
+            **({"max_tokens": max_output_tokens} if max_output_tokens else {}),
             "response_format": {"type": "json_object"},
             "messages": [
                 {
@@ -227,7 +237,7 @@ def chat_agent(
     tools: list[AgentTool],
     final_schema: type[SchemaT],
     max_iters: int = 6,
-    max_output_tokens: int = 1500,
+    max_output_tokens: int | None = None,
     max_tool_result_chars: int = 6000,
     result_validator: Callable[[SchemaT], str | None] | None = None,
     trace_tags: list[str] | None = None,
@@ -300,7 +310,7 @@ def chat_agent(
             json={
                 "model": model,
                 "temperature": 0.0,  # pipeline output is deterministic by design
-                "max_tokens": max_output_tokens,
+                    **({"max_tokens": max_output_tokens} if max_output_tokens else {}),
                 "tools": tool_specs,
                 "tool_choice": tool_choice,
                 "messages": messages,
