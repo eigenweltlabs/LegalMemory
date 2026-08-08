@@ -96,6 +96,36 @@ def test_racing_creations_of_different_entities_all_land(
     assert len({item["id"] for item in results}) == 8
 
 
+def test_two_bare_legal_forms_are_not_one_company(factory: sessionmaker[Session]) -> None:
+    """The constraint's failure mode, tested from the other side.
+
+    An extraction agent that leaves a mention as its bare form gives the resolver a
+    name with nothing but legal-form tokens in it. If those strip to an empty key,
+    every such mention keys identically and the constraint stops being a guard against
+    twins and starts being a merge of unrelated companies — the exact harm this change
+    exists to prevent, inverted.
+    """
+    first = resolve_or_create_entity(
+        factory,
+        entity_type="party",
+        name="GmbH & Co. KG",
+        kind="legal_entity",
+        identifiers={},
+        provenance=PROVENANCE,
+    )
+    second = resolve_or_create_entity(
+        factory,
+        entity_type="party",
+        name="The Company",
+        kind="legal_entity",
+        identifiers={},
+        provenance=PROVENANCE,
+    )
+    assert first["id"] != second["id"]
+    with factory() as session:
+        assert session.scalar(select(func.count()).select_from(Party)) == 2
+
+
 def test_the_constraint_refuses_a_twin_even_without_the_lock(
     session: Session, factory: sessionmaker[Session]
 ) -> None:
@@ -112,6 +142,37 @@ def test_the_constraint_refuses_a_twin_even_without_the_lock(
     with pytest.raises(IntegrityError):
         session.flush()
     session.rollback()
+
+
+def test_the_counterpart_row_is_raced_for_too(factory: sessionmaker[Session]) -> None:
+    """A company that is a counterparty on one matter and the client on another needs a
+    row in each table, and that second row is an insert like any other.
+
+    The advisory lock cannot serialize these: it is keyed on the MENTION's normalized
+    name, and three mentions reaching one entity through its alias ledger hold three
+    different keys. So the constraint is what decides, and the losers have to come back
+    with the winner rather than failing their documents.
+    """
+    with factory() as session:
+        session.add(
+            Party(
+                name="Nordwind Energie GmbH",
+                kind="legal_entity",
+                normalized_aliases=["nordwind energie hamburg", "nordwind energie bremen"],
+            )
+        )
+        session.commit()
+
+    results = _race(
+        factory,
+        ["Nordwind Energie", "Nordwind Energie GmbH, Hamburg", "Nordwind Energie, Bremen"],
+        "client",
+    )
+
+    assert len({item["id"] for item in results}) == 1
+    with factory() as session:
+        assert session.scalar(select(func.count()).select_from(Client)) == 1
+        assert session.scalar(select(func.count()).select_from(Party)) == 1
 
 
 def test_a_creator_that_loses_the_insert_reads_the_winner(

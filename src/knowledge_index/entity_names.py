@@ -74,6 +74,14 @@ def normalize_entity_name(name: str | None) -> str:
 
     Token order is preserved so the value stays readable in the database and in a
     tool result; order-insensitivity is the comparison's job, not the string's.
+
+    Stripping only happens when something survives it. A mention the extraction agent
+    left as a bare form — "GmbH & Co. KG", "The Company", "S.A." — has every one of
+    its tokens on the two lists above, and returning "" for it would key EVERY such
+    mention to the same value. Under the uniqueness constraint that is not a missing
+    match, it is a silent merge: the second unrelated company written that way becomes
+    the first one. The legal form is noise around an identity, not when it is all the
+    identity there is.
     """
     text = (name or "").strip().lower()
     if not text:
@@ -85,12 +93,13 @@ def normalize_entity_name(name: str | None) -> str:
     text = "".join(char for char in text if not unicodedata.combining(char))
     text = _JOINING_PUNCTUATION.sub("", text)
     text = _PUNCTUATION.sub(" ", text)
+    all_tokens = text.split()
     tokens = [
         token
-        for token in text.split()
+        for token in all_tokens
         if token not in LEGAL_FORM_TOKENS and token not in CONNECTOR_TOKENS
     ]
-    return " ".join(tokens)
+    return " ".join(tokens or all_tokens)
 
 
 def name_tokens(normalized: str) -> frozenset[str]:

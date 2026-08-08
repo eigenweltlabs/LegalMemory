@@ -1622,14 +1622,26 @@ def _mirror_entity(session: Session, source, *, entity_type: str, provenance: di
     Clients and parties are separate tables by design (docs/concepts/data-model.md),
     so one company can need a row in each. It gets the same name, aliases and
     identifiers, so both rows resolve from either spelling and the pair is
-    recognizable as one entity rather than as two unrelated ones."""
+    recognizable as one entity rather than as two unrelated ones.
+
+    This is an insert like any other, so it degrades the same way. The advisory lock
+    upstream is keyed on the MENTION's normalized name, and the entity this mirrors
+    can have reached the mention by an alias or a corroborated partial match — so two
+    resolvers can be here for one company at once without ever contending. The
+    constraint settles it; the savepoint is what lets the loser keep the transaction
+    it is standing in and read the winner instead of failing the document."""
     model = _entity_model(entity_type)
-    existing = session.scalar(
-        select(model).where(
-            model.normalized_name == source.normalized_name,
-            model.identity_discriminator == source.identity_discriminator,
+    source_type = "client" if entity_type == "party" else "party"
+
+    def _existing():
+        return session.scalar(
+            select(model).where(
+                model.normalized_name == source.normalized_name,
+                model.identity_discriminator == source.identity_discriminator,
+            )
         )
-    )
+
+    existing = _existing()
     if existing is not None:
         return existing
     record = dict(provenance)
@@ -1643,9 +1655,16 @@ def _mirror_entity(session: Session, source, *, entity_type: str, provenance: di
         identifiers=dict(source.identifiers or {}),
         provenance=record,
     )
-    session.add(mirror)
-    session.flush()
-    for row in _entity_identifier_rows(session, "client" if entity_type == "party" else "party", source.id):
+    try:
+        with session.begin_nested():
+            session.add(mirror)
+            session.flush()
+    except IntegrityError:
+        winner = _existing()
+        if winner is None:  # pragma: no cover - the constraint fired for another reason
+            raise
+        return winner
+    for row in _entity_identifier_rows(session, source_type, source.id):
         _ensure_identifier(session, entity_type, mirror.id, row["scheme"], row["value"])
     return mirror
 

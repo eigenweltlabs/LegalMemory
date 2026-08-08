@@ -95,6 +95,22 @@ hash and one `Extraction` provenance row per document. An untyped result is reco
 honestly (`doc_type = NULL`) with the fingerprint of the scope that judged it, so a
 later, richer ontology re-types exactly those documents.
 
+Parties are searched by the agent (`search_entities`) but resolved by rule, so one
+real company is one row across every matter it appears on. A mention links to an
+entity the firm already holds when the two share a typed identifier, when their
+normalized names are identical or the mention's name is already on that entity's
+alias ledger, or when one name contains the other token-for-token *and* something
+beyond the name agrees — the entity is already on this matter, shares a matter with
+another party named on this document, or acts on another matter for this matter's
+client. Anything weaker is left to the agent, and a new entity created next to a
+known same-name candidate records that candidate on its own `provenance.resolution`,
+so it stays countable. Two companies that genuinely share a name are kept apart by a
+contradicting register identifier, which is the only thing the uniqueness constraint
+on the identity key admits as a second row. `role = client` means the party the firm
+acts for: the firm itself is recorded as `advisor` when [`firm.name`](#configuration)
+is set, an entity already carrying a role on the matter keeps it, and on an imported
+matter the practice-management client outranks any document-level claim.
+
 ### Extract decisions (`extract_decisions`)
 
 Reads the `structured_json` artifact's `revisions` and `comments`. With no revision
@@ -251,13 +267,15 @@ unfinished sync run: a stranded run would otherwise stop indexing silently.
 
 ## Configuration
 
-All fields live under `pipeline.*` in the saved configuration; scalar fields can be
-pinned by environment variables using the `KI_` prefix and `__` as the nesting
-delimiter (an environment-pinned setting refuses console edits with a 409 rather than
-silently losing them).
+All fields live under `pipeline.*` in the saved configuration, except `firm.*` as
+noted; scalar fields can be pinned by environment variables using the `KI_` prefix and
+`__` as the nesting delimiter (an environment-pinned setting refuses console edits with
+a 409 rather than silently losing them).
 
 | Field | Env var | Default | Effect |
 | --- | --- | --- | --- |
+| `firm.name` | `KI_FIRM__NAME` | `""` | Whose appliance this is — the one fact no document states. The firm is on its own letterhead, signs its own engagement letters and is copied on every mail, so extraction reads it as a party; naming it here records it as `advisor` instead of as the firm's own client. Empty and inert by default: an appliance that has not been told whose it is must not guess, and a wrong name here would demote a real client. |
+| `firm.aliases` | `KI_FIRM__ALIASES` | `[]` | The other forms the firm writes itself in — the short letterhead name, the historical partnership name, the English rendering. Compared the same way entity names are, so legal forms and punctuation need not be repeated. |
 | `pipeline.max_file_mb` | `KI_PIPELINE__MAX_FILE_MB` | 512 | Fetch limit; a larger blob raises `ArtifactTooLarge` and quarantines deterministically. |
 | `pipeline.claim_timeout_seconds` | `KI_PIPELINE__CLAIM_TIMEOUT_SECONDS` | 900 | A `running` claim older than this is failed as `StaleClaim` and retried. |
 | `pipeline.retry_base_seconds` | `KI_PIPELINE__RETRY_BASE_SECONDS` | 5 | Base of the exponential backoff (`base × 2^(attempts−1)`). |

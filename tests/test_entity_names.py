@@ -64,5 +64,18 @@ def test_unrelated_names_score_nothing() -> None:
     assert _score("Nordwind Energie", "Kensington Bank") == (0.0, "")
 
 
-def test_a_name_that_is_only_a_legal_form_normalizes_to_nothing() -> None:
-    assert normalize_entity_name("GmbH & Co. KG") == ""
+def test_a_name_that_is_only_a_legal_form_keeps_it() -> None:
+    """Stripping a name down to nothing would key every such mention identically, and
+    under the uniqueness constraint that merges unrelated companies rather than merely
+    failing to tell them apart."""
+    assert normalize_entity_name("GmbH & Co. KG") == "gmbh and co kg"
+    assert normalize_entity_name("The Company") == "the company"
+    assert normalize_entity_name("GmbH & Co. KG") != normalize_entity_name("The Company")
+    # Only when there is nothing else. A real name still sheds its form.
+    assert normalize_entity_name("Nordwind Energie GmbH & Co. KG") == "nordwind energie"
+
+
+def test_nothing_in_makes_nothing_out() -> None:
+    assert normalize_entity_name("") == ""
+    assert normalize_entity_name(None) == ""
+    assert normalize_entity_name("   ") == ""
