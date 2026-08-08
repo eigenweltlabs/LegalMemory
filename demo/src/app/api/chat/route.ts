@@ -124,10 +124,13 @@ export async function POST(request: Request) {
       system: system ? `${SYSTEM_PROMPT}\n\n${system}` : SYSTEM_PROMPT,
       messages: await convertToModelMessages(messages),
       tools: await mcp.tools({ schemas: CHAT_TOOL_SCHEMAS }),
-      // Search, then read, then answer is three steps at minimum, and a
-      // follow-up read of a second document is normal. Bounded so a model that
-      // starts looping stops on its own.
-      stopWhen: stepCountIs(12),
+      // A cross-matter sweep ("every matter where…") legitimately spends
+      // dozens of steps paging through search results and correspondence
+      // before it can answer; 12 made the agent stop mid-gather with no
+      // answer at all. The bound exists only so a model that starts looping
+      // stops on its own, so it is sized for the heaviest legitimate task,
+      // not the typical one.
+      stopWhen: stepCountIs(60),
       prepareStep: ({ steps }) => traverseOnce(steps),
       onFinish: async () => {
         await mcp.close();
