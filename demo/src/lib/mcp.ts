@@ -46,6 +46,14 @@ export type McpClient = Awaited<ReturnType<typeof openMcpClient>>;
 const searchFilters = {
   matter_id: z.string().optional().describe("Restrict to one matter."),
   doc_type: z.string().optional().describe("Ontology node id for a document type."),
+  practice_area: z
+    .string()
+    .optional()
+    .describe(
+      "Ontology node id for a practice area; matches the whole subtree, so a parent " +
+        "area covers its children. Resolve the id with list_taxonomies first. This is " +
+        "how a question about a practice is answered in one call.",
+    ),
   only_final: z
     .boolean()
     .optional()
@@ -93,9 +101,19 @@ export const CHAT_TOOL_SCHEMAS = {
   },
   list_matters: {
     inputSchema: z.object({
+      practice_area: z
+        .string()
+        .optional()
+        .describe("Ontology node id; matches the whole subtree. From list_taxonomies."),
       limit: z.number().int().min(1).max(50).optional(),
       offset: z.number().int().min(0).optional().describe("Continue from page.next_offset."),
     }),
+  },
+  // The filters above take ontology node ids, and nothing else in this surface
+  // produces one. Without this tool "every matter in the antitrust practice"
+  // has no filtered form and degrades into reading the estate matter by matter.
+  list_taxonomies: {
+    inputSchema: z.object({}),
   },
 } as const;
 
