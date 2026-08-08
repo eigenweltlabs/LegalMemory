@@ -188,8 +188,22 @@ class OpenSearchIndex:
         strict_filter = _combined_filter(scope, filters)
         size = _oversample(limit)
         if query_vector is None:
+            # A metadata search returns DOCUMENTS, so it must page over documents.
+            # Without the collapse below this asked for `_oversample(limit)` CHUNKS
+            # and let the caller dedupe them: one 800-chunk offering memorandum then
+            # consumed the whole window and the rest of the matter was never seen —
+            # a matter with 33 documents returned 16, and `has_more` said false
+            # because the collapse, not the corpus, had run out. Collapsing in the
+            # index makes `size` count versions, so `limit` means what it says.
+            #
+            # The sort below is the collapse's tiebreaker as well as the caller's
+            # order, and it is a total order, so paging stays stable.
+            # Small headroom over the window: the ACL is already applied inside the
+            # query, so the SQL re-verify only drops rows the index has gone stale
+            # on. A handful covers that without going back to 5x oversampling.
             body: dict = {
-                "size": size,
+                "size": min(max(limit + 10, 20), 2500),
+                "collapse": {"field": "document_version_id"},
                 **_SOURCE_EXCLUDES,
                 "query": strict_filter,
                 # F6 date-trust guard: after O10, undated docs carry a null
@@ -642,11 +656,12 @@ def _combined_filter(scope: CompiledAccessScope, filters: SearchFilters) -> dict
     date_range = _date_range(filters.date_from, filters.date_to)
     if date_range:
         clauses.append({"range": {"doc_date": date_range}})
-    if filters.only_final:
-        # VersionStatus.FINAL / EXECUTED — authoritative versions only. All three
-        # legs inherit this because they share this strict filter. It ANDs with any
-        # version_status term above, so draft + only_final yields no hits (not an error).
-        clauses.append({"terms": {"version_status": ["final", "executed"]}})
+    # only_final is deliberately NOT a clause here. It selects a VERSION, and which
+    # version is authoritative is a fact about the document's other versions, which
+    # a per-chunk term filter cannot see: `version_status in {final, executed}` hid
+    # every single-version draft too, even though nothing supersedes it. It is
+    # applied after materialization, where the document's siblings are known —
+    # see RetrievalService._drop_superseded.
     return {"bool": {"filter": clauses}}
 
 

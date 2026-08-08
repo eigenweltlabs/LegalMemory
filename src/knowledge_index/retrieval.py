@@ -74,8 +74,17 @@ class SearchHit:
     matched_identifiers: list[str] = field(default_factory=list)
     citations: list[dict] = field(default_factory=list)
 
-    def as_dict(self) -> dict:
-        return {
+    def as_dict(self, *, include_match: bool = True) -> dict:
+        """The row a list-shaped tool returns.
+
+        ``include_match`` is False for the metadata filter, which has no query:
+        there ``score`` is always 0.0, ``matched_identifiers`` always empty, and
+        ``excerpt`` is the first 320 characters of whichever chunk happened to
+        come back — a spreadsheet's column headers as often as anything
+        responsive. Shipping those three invites the caller to read meaning into
+        noise, and charges it tokens per row for the privilege.
+        """
+        row = {
             "document_id": self.document_id,
             "project_id": self.project_id,
             "version_id": self.version_id,
@@ -89,15 +98,17 @@ class SearchHit:
             "parties": self.parties,
             "identifiers": self.identifiers,
             "version_status": self.version_status,
-            "score": round(self.score, 6),
-            "excerpt": self.excerpt,
             "source_paths": self.source_paths,
-            "matched_identifiers": self.matched_identifiers,
             # No embedded citation record: the row already carries the hit's
             # full identity (document_id, version_id, matter_id, source_paths)
             # — which is what a caller needs to open or cite it. The citation
             # record itself comes from get_document.
         }
+        if include_match:
+            row["score"] = round(self.score, 6)
+            row["excerpt"] = self.excerpt
+            row["matched_identifiers"] = self.matched_identifiers
+        return row
 
 
 @dataclass(frozen=True)
@@ -187,8 +198,14 @@ class RetrievalService:
         offset: int = 0,
         scope: CompiledAccessScope | None = None,
     ) -> Page:
-        """``search_filter`` plus an exact ``has_more``, via one extra hit."""
-        return Page.probe(
+        """``search_filter`` plus an exact ``has_more``, via one extra hit.
+
+        Now that the index collapses per version, running out of rows means the
+        result set ended rather than that the chunk window did — so a page that
+        is not full also fixes ``total`` exactly, which is what a caller asking
+        "what is in this matter" actually wants to know.
+        """
+        page = Page.probe(
             self.search_filter(
                 principals=principals,
                 filters=filters,
@@ -199,6 +216,9 @@ class RetrievalService:
             offset=offset,
             limit=limit,
         )
+        if not page.has_more:
+            page.total = offset + len(page.items)
+        return page
 
     def suggest_for_empty(
         self,
@@ -1131,6 +1151,35 @@ class RetrievalService:
                 scope=scope,
             )
 
+    def _drop_superseded(self, hits: list[SearchHit]) -> list[SearchHit]:
+        """Apply ``only_final``: keep the authoritative version of each document.
+
+        A version is dropped only when the SAME document has a final/executed
+        version and this is not it. A document whose only version is a draft is
+        kept — nothing supersedes it, and hiding it made whole matters look
+        smaller than they are (12 documents returning 10) for no reason a caller
+        could see.
+        """
+        if not hits:
+            return hits
+        # One query for the whole page: latest_final_version_id is a cache and is
+        # not always populated, so authority is read from the versions themselves.
+        document_ids = {hit.document_id for hit in hits}
+        rows = self.session.execute(
+            select(DocumentVersion.document_id, DocumentVersion.id, DocumentVersion.status)
+            .where(DocumentVersion.document_id.in_(document_ids))
+        ).all()
+        authoritative: dict[str, set[str]] = {}
+        for document_id, version_id, status in rows:
+            if status in ("final", "executed"):
+                authoritative.setdefault(document_id, set()).add(version_id)
+        return [
+            hit
+            for hit in hits
+            if hit.document_id not in authoritative
+            or hit.version_id in authoritative[hit.document_id]
+        ]
+
     def _select_document_version(
         self, document_id: str, version_id: str | None
     ) -> tuple[Document, DocumentVersion] | None:
@@ -1260,9 +1309,10 @@ class RetrievalService:
             rows = index.search(
                 query_vector=None, scope=scope, filters=filters, limit=window
             )
-            return self._materialize_metadata(
-                rows, principals=principals, limit=window
-            )[offset:]
+            hits = self._materialize_metadata(rows, principals=principals, limit=window)
+            if filters.only_final:
+                hits = self._drop_superseded(hits)
+            return hits[offset:]
 
         query_terms = _terms(query)
         query_cf = query.casefold()
@@ -1340,6 +1390,8 @@ class RetrievalService:
 
         if retrieval.rerank_enabled:
             hits = self._rerank(query, hits)
+        if filters.only_final:
+            hits = self._drop_superseded(hits)
         return hits[offset:window]
 
     def _materialize_metadata(

@@ -121,11 +121,16 @@ def create_mcp_server(
         title="Exact metadata search",
         tags={"read"},
         description=(
-            "List documents using exact legal metadata filters. Use before semantic search "
-            "when the matter, document type, status, language, or date range is known. Each "
+            "List documents using exact legal metadata filters. This is the ENUMERATION "
+            "tool: one row per document version, ordered by date, complete. Use it — not "
+            "semantic search — for 'what is in this matter', 'which documents of this "
+            "type', 'how many', and any question whose answer is a set. Each "
             "hit carries the document's metadata (title, doc_type_label, doc_date, "
             "matter_ref, parties with roles, identifiers, version_status, source_paths) "
-            "and ids; read a hit with get_document for its citation record. "
+            "and ids; read a hit with get_document for its text and citation record. "
+            "Rows carry no excerpt or score: no query ran, so there is nothing to excerpt "
+            "or rank — open a document to see what it says. When page.has_more is false, "
+            "page.total is the exact number of matching documents. "
             "only_final=true restricts to authoritative final/executed versions; the default "
             "searches every version including drafts and redlines. identifier is an EXACT "
             "match on a legal identifier (case number, Aktenzeichen, HRB, statute ref). "
@@ -181,10 +186,13 @@ def create_mcp_server(
                     principals=principals, filters=filters, limit=limit, offset=offset
                 )
                 page = Page(
-                    items=[hit.as_dict() for hit in found.items],
+                    # No query ran, so score/excerpt/matched_identifiers would be
+                    # 0.0, a first-320-characters slice and [] on every row.
+                    items=[hit.as_dict(include_match=False) for hit in found.items],
                     offset=found.offset,
                     limit=found.limit,
                     has_more=found.has_more,
+                    total=found.total,
                 )
                 audit.update(
                     result_count=len(page.items),
@@ -219,7 +227,11 @@ def create_mcp_server(
             "Results are ranked by relevance, so paging returns steadily weaker matches: "
             "when a page stops answering the question, narrow the filters instead of "
             "paging further. Each page re-ranks the whole window, so offset + limit must "
-            "stay within 500 and pages are only stable while the index is unchanged."
+            "stay within 500 and pages are only stable while the index is unchanged. "
+            "This tool RANKS; it does not enumerate. When the answer is a set — which "
+            "matters, how many, list every document of a kind, everything in a matter — "
+            "use search_filter, which returns one row per document with an exact total. "
+            "A relevance page is a sample and never an inventory, however full it looks."
             + _PAGINATION_CONTRACT
         )
     )
