@@ -240,6 +240,42 @@ function unwrap<T>(value: unknown): T | null {
   return (payload ?? null) as T | null;
 }
 
+interface PageBlock {
+  offset: number;
+  limit: number;
+  returned: number;
+  has_more: boolean;
+  next_offset: number | null;
+  total?: number;
+}
+
+/**
+ * The rows and the page block out of a paginated tool result.
+ *
+ * Every list-shaped tool returns `{results, page}` rather than a bare list, so
+ * a caller can tell a full page from the end of the corpus. The array form is
+ * still accepted: this demo talks to whatever appliance it is pointed at, and
+ * an older one still answers with a plain list.
+ */
+function unwrapPage<T>(value: unknown): { rows: T[]; page: PageBlock | null } {
+  const payload = unwrap<unknown>(value);
+  if (Array.isArray(payload)) return { rows: payload as T[], page: null };
+  if (payload != null && typeof payload === "object" && "results" in payload) {
+    const envelope = payload as { results?: unknown; page?: PageBlock };
+    if (Array.isArray(envelope.results)) {
+      return { rows: envelope.results as T[], page: envelope.page ?? null };
+    }
+  }
+  return { rows: [], page: null };
+}
+
+/** "12 documents" or "12 of 137 documents" — never a count that implies a total. */
+function pagedCount(shown: number, page: PageBlock | null, noun: string): string {
+  if (page?.total != null && page.total > shown) return `${shown} of ${page.total} ${noun}`;
+  if (page?.has_more) return `first ${shown} ${noun}`;
+  return `${shown} ${noun}`;
+}
+
 interface Citation {
   document?: { id?: string; title?: string };
 }
@@ -276,6 +312,7 @@ export const DocumentGraphUI = makeAssistantToolUI<
       root_document?: RelatedDocument;
       related_documents?: RelatedDocument[];
       edges?: Edge[];
+      page?: PageBlock;
     }>(result);
     const root = data?.root_document;
     const related = data?.related_documents ?? [];
@@ -315,7 +352,7 @@ export const DocumentGraphUI = makeAssistantToolUI<
         slug="document-graph"
         icon={Network}
         eyebrow="Document graph"
-        title={`${related.length} related`}
+        title={pagedCount(related.length, data?.page ?? null, "related")}
       >
         <DocumentGraph
           rootTitle={root.title || rootId}
@@ -336,17 +373,14 @@ export const SearchResultsUI = makeAssistantToolUI<{ query?: string }, unknown>(
     if (status.type === "running" || result == null) {
       return <Running label={args?.query ? `Searching "${args.query}"` : "Searching"} />;
     }
-    const raw = unwrap<
-      Array<{
-        document_id: string;
-        title?: string | null;
-        excerpt?: string | null;
-        doc_type_label?: string | null;
-        source_paths?: string[];
-        score?: number;
-      }>
-    >(result);
-    if (!Array.isArray(raw)) return null;
+    const { rows: raw, page } = unwrapPage<{
+      document_id: string;
+      title?: string | null;
+      excerpt?: string | null;
+      doc_type_label?: string | null;
+      source_paths?: string[];
+      score?: number;
+    }>(result);
 
     // One row per document. Retrieval ranks chunks, so a long document that
     // matches in four places is four hits — correct for the model, and for a
@@ -367,7 +401,15 @@ export const SearchResultsUI = makeAssistantToolUI<{ query?: string }, unknown>(
     }
 
     return (
-      <Card slug="search" collapsible icon={Search} eyebrow="Search" title={`${hits.length} documents`}>
+      <Card
+        slug="search"
+        collapsible
+        icon={Search}
+        eyebrow="Search"
+        // "first 8 documents" when more matched: the header is the only place a
+        // reader learns this was a page rather than the estate's whole answer.
+        title={pagedCount(hits.length, page, "documents")}
+      >
         {hits.map((hit) => (
           <DocumentRow
             key={hit.document_id}
@@ -401,21 +443,25 @@ export const MattersUI = makeAssistantToolUI<Record<string, never>, unknown>({
     if (status.type === "running" || result == null) {
       return <Running label="Reading the matter list" />;
     }
-    const matters = unwrap<
-      Array<{
-        id: string;
-        title?: string | null;
-        reference_numbers?: string[];
-        practice_area?: { label?: string; path?: string[] } | null;
-        matter_kind?: { label?: string } | null;
-        visible_versions?: number;
-        citations?: Citation[];
-      }>
-    >(result);
-    if (!Array.isArray(matters) || !matters.length) return null;
+    const { rows: matters, page } = unwrapPage<{
+      id: string;
+      title?: string | null;
+      reference_numbers?: string[];
+      practice_area?: { label?: string; path?: string[] } | null;
+      matter_kind?: { label?: string } | null;
+      visible_versions?: number;
+      citations?: Citation[];
+    }>(result);
+    if (!matters.length) return null;
 
     return (
-      <Card slug="matters" collapsible icon={Scale} eyebrow="Matters" title={`${matters.length} matters`}>
+      <Card
+        slug="matters"
+        collapsible
+        icon={Scale}
+        eyebrow="Matters"
+        title={pagedCount(matters.length, page, "matters")}
+      >
         {matters.map((matter) => {
           // The ontology walk, shown as the path it took. A practice area is a
           // node in a tree here, not a free-text label, and the path is what

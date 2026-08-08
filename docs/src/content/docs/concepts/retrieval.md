@@ -15,8 +15,15 @@ A semantic query passes through these steps in order:
 4. Fuse the legs with reciprocal rank fusion (RRF).
 5. Multiply each candidate's score by its version-status boost.
 6. Re-verify each candidate against SQL and collapse to one result per document.
-7. Optionally rerank the top candidates with an LLM.
-8. Return the top `limit` hits.
+7. Optionally rerank the leading candidates with an LLM.
+8. Return the requested window — `hits[offset : offset + limit]`.
+
+Every step from 3 onwards is sized for the whole window (`offset + limit`), not
+just the page: collapse and the SQL re-verify drop rows *after* the index has
+ranked them, so an offset cannot be pushed down into OpenSearch. Ranked paging
+is therefore re-ranking rather than a cursor — pages are stable while the index
+is unchanged, and `offset + limit` is capped at 500 (`_MAX_RANKED_WINDOW`),
+above which the call raises rather than quietly returning a short page.
 
 ### Scope compilation
 
@@ -55,7 +62,12 @@ Three ranked legs run over the chunk index (`OpenSearchIndex.multi_search` in `s
 | `semantic` | `knn` on the query embedding, with the strict filter passed as the kNN `filter` (pre-filtered approximate kNN) | `embedding` (HNSW) |
 | `identifier` | `match` on the query text | `identifiers_text`, the space-joined identifiers extracted for the document at ingest, so a pasted case number, Aktenzeichen, or statute reference matches the document that carries it. The query is not parsed with regexes |
 
-Each leg requests an oversampled window of `min(max(limit * 5, 50), 500)` hits.
+Each leg requests an oversampled window of `min(max(n * 5, 50), 2500)` hits, where
+`n` is the whole requested window (`offset + limit`), not the page size. The
+ceiling has to clear the deepest window a paginated caller can ask for: fusion,
+collapse and the ACL re-verify all shrink the candidate set, so a leg that
+stopped at 500 chunks could not honestly answer whether a page at offset 400
+exists. A first-page search is unaffected — `limit: 8` still asks for 400.
 
 Decision records are not one of the fused legs. `search_decisions` is a separate method (and MCP tool) that scores `DecisionRecord` rows in SQL by token overlap between the query and the record's locus, change summary, and rationale text, after checking each record's evidence sources against the caller's principals.
 
@@ -98,7 +110,7 @@ With `retrieval.collapse_per_document: true` (default), surviving candidates are
 
 ### Optional reranker
 
-With `retrieval.rerank_enabled: true`, the top 20 collapsed hits are sent in one call to the model assigned as `retrieval.rerank_model`, which returns a relevance score from 0 to 10 per version id. Those scores replace the fused scores and determine the final order; hits the model does not score are dropped. On a gateway error the call raises; there is no silent fallback to the fused order. When the reranker is disabled (the default), the fused, boosted, collapsed order is returned directly and no LLM call happens on the query path; the query embedding is then the only synchronous model call.
+With `retrieval.rerank_enabled: true`, the top 20 collapsed hits are sent in one call to the model assigned as `retrieval.rerank_model`, which returns a relevance score from 0 to 10 per version id. Those scores replace the fused scores and determine the order of that prefix. Reranking reorders, it never drops: candidates the model failed to score, and everything past the 20-hit listing, follow in fused order. (It previously returned only what the model scored, so `limit: 50` with rerank on could not return more than 20 hits, and an unscored candidate vanished — which would also have made offset paging skip rows between pages.) On a gateway error the call raises; there is no silent fallback to the fused order. When the reranker is disabled (the default), the fused, boosted, collapsed order is returned directly and no LLM call happens on the query path; the query embedding is then the only synchronous model call.
 
 ### Metadata-only search
 

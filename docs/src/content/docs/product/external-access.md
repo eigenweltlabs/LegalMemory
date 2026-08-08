@@ -53,27 +53,74 @@ tool's name, short title, and tags.
 
 | Tool | What it does | Notable parameters |
 | --- | --- | --- |
-| `search_filter` | Lists documents by exact metadata filters, no query text. | `project_id`, `matter_id`, `doc_type`, `version_status`, `language`, `date_from`/`date_to`, `clause_type`, `limit` (default 20, capped 100) |
-| `search_semantic` | Hybrid semantic + lexical search over chunks, ACL-filtered before ranking. | `query`, the same metadata filters, `limit` (default 8, capped 100) |
+| `search_filter` | Lists documents by exact metadata filters, no query text. | `project_id`, `matter_id`, `doc_type`, `version_status`, `language`, `date_from`/`date_to`, `clause_type`, `limit` (default 20, capped 100), `offset` |
+| `search_semantic` | Hybrid semantic + lexical search over chunks, ACL-filtered before ranking. | `query`, the same metadata filters, `limit` (default 8, capped 100), `offset` (see the ranked-window cap below) |
 | `get_document` | Reads one authorized document version as paginated text. | `document_id`, `version_id`, `offset`, `max_chars` (1–50,000; default 30,000), `include_structured_metadata`; returns a `content_page` cursor with `next_offset`/`has_more` |
 | `download_document` | Exports the exact original binary via a short-lived download link (see below). | `document_id`, `version_id`, `source_object_id`, `inline_blob` (embeds the base64 blob instead of only linking) |
-| `find_related_documents` | Stored relations plus labeled shared-thread and shared-matter context, with graph-ready edges. | `document_id`, `include_same_matter` (default true), `limit` (capped 250) |
-| `traverse` | Low-level walk of stored relation edges (`supersedes`, `annex_of`, `references`, `responds_to`, `belongs_to_thread`). | `entity_type`, `entity_id`, `limit` (capped 250) |
-| `list_matters` | Matters containing at least one version visible to the caller. | `limit` (capped 250), `practice_area` (Area-of-Law node id, subtree semantics) |
-| `billing_rollup` | Invoiced total plus hours/fees per UTBMS task code for one matter. | `matter_id`; fails closed if any invoice lacks exact provenance |
-| `list_invoices` | A matter's invoices (number, date, total) with per-invoice citations. | `matter_id` |
-| `resolve_entity` | Resolves a party/client name or identifier (LEI, HRB, VAT) to known entities. | `query`; results without an authorized citation are withheld |
-| `search_decisions` | Searches anonymized drafting and negotiation rationale. | `query`, `limit` (capped 100) |
-| `list_taxonomies` | The active document-type ontology scope plus task types and practice areas. | none |
-| `ontology_search` | Finds document-type ontology nodes by name, synonym, or definition. | `query` (12 results) |
-| `ontology_roots` | Top-level branches of the active document-type ontology. | none |
-| `ontology_children` | Children of one ontology node, one level at a time. | `node_id` |
+| `find_related_documents` | Stored relations plus labeled shared-thread and shared-matter context, with graph-ready edges. | `document_id`, `include_same_matter` (default true), `limit` (capped 250), `offset`; `page.total` is exact and the edge lists cover the current page |
+| `traverse` | Low-level walk of stored relation edges (`supersedes`, `annex_of`, `references`, `responds_to`, `belongs_to_thread`). | `entity_type`, `entity_id`, `limit` (capped 250), `offset`; the limit counts *visible* edges |
+| `list_matters` | Matters containing at least one version visible to the caller. | `limit` (capped 250), `offset`, `practice_area` (Area-of-Law node id, subtree semantics); the limit counts *visible* matters, and no `total` is reported |
+| `billing_rollup` | Invoiced total plus hours/fees per UTBMS task code for one matter. | `matter_id`; fails closed if any invoice lacks exact provenance. Not paginated — the rollup covers every invoice |
+| `list_invoices` | A matter's invoices (number, date, total) with per-invoice citations. | `matter_id`, `limit` (capped 250), `offset`; `page.total` is the matter's exact invoice count |
+| `resolve_entity` | Resolves a party/client name or identifier (LEI, HRB, VAT) to known entities. | `query`, `limit` (capped 100), `offset`; results without an authorized citation are withheld, so a short page can still have `has_more` |
+| `search_decisions` | Searches anonymized drafting and negotiation rationale. | `query`, `limit` (capped 100), `offset`; `page.total` is exact |
+| `list_taxonomies` | The active document-type ontology scope plus task types and practice areas. | none. Not paginated — returns the roots and the top two practice-area levels, with `ontology.visible_nodes` as the true node count |
+| `ontology_search` | Finds document-type ontology nodes by name, synonym, or definition. | `query`, `limit` (default 12, capped 100), `offset`; `page.total` is exact |
+| `ontology_roots` | Top-level branches of the active document-type ontology. | none. Not paginated — returns every root, with `complete: true` |
+| `ontology_children` | Children of one ontology node, one level at a time. | `node_id`, `limit` (capped 250), `offset`; `page.total` is the node's exact child count |
 | `ontology_node` | Full detail for one node: definition, synonyms, path, parents. | `node_id` |
-| `preview_search_scope` | Compiles the caller's ACL (plus optional selections) into the exact scope that constrains retrieval before scoring. | `project_ids`, `document_ids`; tagged `scope` rather than `read` |
+| `preview_search_scope` | Compiles the caller's ACL (plus optional selections) into the exact scope that constrains retrieval before scoring. | `project_ids`, `document_ids`, `limit` (capped 500), `offset`; tagged `scope` rather than `read`. `project_count`/`document_count` are always the whole scope; the enumerated documents are paged |
 
 Search-shaped tools accept a `doc_type` that matches the named ontology node
 **and its whole subtree**; `clause_type` additionally narrows the search to
 clause chunks.
+
+### Pagination
+
+Every list-shaped tool returns `{results, page}` rather than a bare list, and
+says so in its own description as well as in the server instructions. A bare
+list cannot distinguish "that is everything" from "that is the first 20 of
+1,300", so a caller holding exactly `limit` rows had no way to tell whether the
+corpus continued — it either stopped early or re-issued the same call with a
+larger limit until it hit the cap.
+
+```json
+{
+  "results": [ … ],
+  "page": {
+    "offset": 0, "limit": 20, "returned": 20,
+    "has_more": true, "next_offset": 20,
+    "total": 137
+  }
+}
+```
+
+- `has_more` is always exact. The next page is the same call with
+  `offset = page.next_offset`; `next_offset` is `null` on the last page.
+- `total` appears **only where it can be counted without doing the work of
+  every page** — a SQL count (`list_invoices`), or a set the tool already
+  materialized in full (`search_decisions`, `find_related_documents`,
+  `ontology_search`, `ontology_children`). It is absent from the index-backed
+  searches and from `list_matters`, where counting means authorizing every
+  candidate in the estate. Branch on `has_more`, not on the row count.
+- **The limit counts rows the caller receives.** `list_matters` and `traverse`
+  filter by access control *before* applying it. Previously both applied a SQL
+  `LIMIT` first and dropped unauthorized rows afterwards, so a caller asking for
+  100 matters got however many of the first 100 titles it happened to be allowed
+  to see — and nothing alphabetically later was reachable at any limit.
+- **A limit above the cap is clamped, not rejected**, and the effective value is
+  echoed in `page.limit`. A negative `offset` or a `limit` below 1 is refused
+  outright.
+- **The ranked-window cap.** `search_semantic` and `search_filter` re-rank the
+  whole window on every call, so `offset + limit` must stay within 500; past
+  that they raise rather than clamp, pointing the caller at `matter_id`,
+  `doc_type`, `party`, or a date range. Ranked pages are stable only while the
+  index is unchanged — this is re-ranking, not a cursor.
+- `get_document` paginates by **character**, not by row, and keeps its own
+  `content_page` block (`offset`, `returned_chars`, `total_chars`, `has_more`,
+  `next_offset`).
+- Tools whose description says **NOT PAGINATED** return their complete result in
+  one call and may be treated as a total.
 
 ### Citations
 

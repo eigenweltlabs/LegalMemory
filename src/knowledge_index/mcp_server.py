@@ -14,7 +14,7 @@ from fastmcp import FastMCP
 from fastmcp.dependencies import CurrentHeaders
 from fastmcp.tools.tool import ToolResult
 from mcp.types import BlobResourceContents, EmbeddedResource, ResourceLink, TextContent
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from knowledge_index.config import AppConfig
@@ -22,10 +22,55 @@ from knowledge_index.mcp_auth import resolve_mcp_identity
 from knowledge_index.db.models import AuditEvent, BillingInvoice
 from knowledge_index.downloads import DownloadTokenStore
 from knowledge_index.retrieval import RetrievalService, SearchFilters
+from knowledge_index.retrieval_types import Page
 from knowledge_index.permissions import AccessService
 from knowledge_index.taxonomies import (
     TaskType,
 )
+
+# Appended verbatim to every list-shaped tool's description. One identical
+# paragraph across the surface is deliberate: a model that learns the contract
+# once applies it everywhere, whereas per-tool phrasing invites the reader to
+# assume each tool differs. The last sentence is the one that matters — a full
+# page used to be indistinguishable from the end of the corpus, and callers
+# routinely concluded a matter was empty because the first page was all they
+# ever asked for.
+_PAGINATION_CONTRACT = (
+    " PAGINATION: returns {results, page}, not a bare list. page = {offset, limit, "
+    "returned, has_more, next_offset, and total where it can be counted exactly}. "
+    "When page.has_more is true there ARE more matches: call again with "
+    "offset=page.next_offset and identical filters to get the next page. A full "
+    "page is never evidence that the result set ended — only has_more=false is. "
+    "Never state or imply a count, a total, or 'that is all of them' from a single "
+    "page unless page.has_more is false or page.total says otherwise."
+)
+
+# Same idea, for the handful of tools whose result really is complete.
+_COMPLETE_RESULT = (
+    " NOT PAGINATED: this returns the complete set in one call, so the result is "
+    "exhaustive and may be treated as a total."
+)
+
+
+def _paged(page: Page, **extra) -> dict:
+    """The response envelope every paginated tool returns."""
+    return {"results": page.items, "page": page.as_dict(), **extra}
+
+
+def _page_bounds(limit: int, offset: int, *, max_limit: int) -> tuple[int, int]:
+    """Validate a page request, clamping the limit and rejecting nonsense.
+
+    The limit is clamped rather than rejected because the effective value is
+    echoed back in ``page.limit`` and ``has_more`` stays exact — a caller that
+    asked for 5,000 rows gets a smaller page and an explicit way to continue,
+    which is strictly better than an error. A negative offset or limit is a bug
+    in the caller and is refused outright.
+    """
+    if offset < 0:
+        raise ValueError("offset must be non-negative")
+    if limit < 1:
+        raise ValueError("limit must be at least 1")
+    return min(limit, max_limit), offset
 
 
 def create_mcp_server(
@@ -48,7 +93,14 @@ def create_mcp_server(
             "identity. Every evidence-bearing result contains citations. Cite the exact "
             "citations[].project.id (or explicitly say no project), citations[].document.id, "
             "citations[].version.id, and citations[].source_objects[].id/path. Never make a "
-            "factual claim from a result without a non-empty citations array."
+            "factual claim from a result without a non-empty citations array. "
+            "EVERY LIST-SHAPED TOOL IS PAGINATED and returns {results, page} rather than a "
+            "bare list; page.has_more=true means more matches exist, and the next page is "
+            "the same call with offset=page.next_offset. One page is a sample, not an "
+            "inventory: before answering a question that turns on completeness — how many, "
+            "every, all, none, the full list, is X absent — either page until has_more is "
+            "false or say plainly which part of the set you looked at. Tools whose "
+            "description says NOT PAGINATED already return everything."
         ),
         mask_error_details=False,
     )
@@ -76,7 +128,9 @@ def create_mcp_server(
             "restricts to 'chunk' (document body), 'profile', or 'clause' chunks. "
             "practice_area filters by an Area of Law ontology node id with SUBTREE semantics "
             "(a parent area matches its children) — it restricts to documents in matters of "
-            "that practice area."
+            "that practice area. Results are ordered by document date, newest first, so "
+            "paging through them walks the matter's timeline backwards."
+            + _PAGINATION_CONTRACT
         )
     )
     def search_filter(
@@ -94,11 +148,13 @@ def create_mcp_server(
         clause_type: str | None = None,
         practice_area: str | None = None,
         limit: int = 20,
+        offset: int = 0,
         headers: dict[str, str] = CurrentHeaders(),
-    ) -> list[dict]:
+    ) -> dict:
         with audited_call(
             session_factory, "mcp.search_filter", headers, config_provider=config_provider
         ) as (principals, audit):
+            limit, offset = _page_bounds(limit, offset, max_limit=100)
             session, retrieval = service()
             try:
                 filters = SearchFilters(
@@ -116,15 +172,24 @@ def create_mcp_server(
                     chunk_kind=chunk_kind or ("clause" if clause_type else None),
                     practice_area=practice_area,
                 )
-                result = [
-                    hit.as_dict()
-                    for hit in retrieval.search_filter(
-                        principals=principals, filters=filters, limit=min(limit, 100)
-                    )
-                ]
-                result = _with_empty_result_help(result, retrieval, principals, filters)
-                audit.update(result_count=len(result), filters=_active_filters(filters))
-                return result
+                found = retrieval.search_filter_page(
+                    principals=principals, filters=filters, limit=limit, offset=offset
+                )
+                page = Page(
+                    items=[hit.as_dict() for hit in found.items],
+                    offset=found.offset,
+                    limit=found.limit,
+                    has_more=found.has_more,
+                )
+                audit.update(
+                    result_count=len(page.items),
+                    has_more=page.has_more,
+                    offset=offset,
+                    filters=_active_filters(filters),
+                )
+                return _paged(
+                    page, **_empty_result_help(page, retrieval, principals, filters)
+                )
             finally:
                 session.close()
 
@@ -143,7 +208,12 @@ def create_mcp_server(
             "identifier; party matches a resolved party_id or exact canonical name; chunk_kind "
             "restricts to 'chunk' (body), 'profile', or 'clause' chunks. practice_area filters "
             "by an Area of Law ontology node id with SUBTREE semantics (a parent area matches "
-            "its children), restricting to documents in matters of that practice area."
+            "its children), restricting to documents in matters of that practice area. "
+            "Results are ranked by relevance, so paging returns steadily weaker matches: "
+            "when a page stops answering the question, narrow the filters instead of "
+            "paging further. Each page re-ranks the whole window, so offset + limit must "
+            "stay within 500 and pages are only stable while the index is unchanged."
+            + _PAGINATION_CONTRACT
         )
     )
     def search_semantic(
@@ -160,8 +230,9 @@ def create_mcp_server(
         clause_type: str | None = None,
         practice_area: str | None = None,
         limit: int = 8,
+        offset: int = 0,
         headers: dict[str, str] = CurrentHeaders(),
-    ) -> list[dict]:
+    ) -> dict:
         with audited_call(
             session_factory,
             "mcp.search_semantic",
@@ -171,6 +242,7 @@ def create_mcp_server(
             principals,
             audit,
         ):
+            limit, offset = _page_bounds(limit, offset, max_limit=100)
             session, retrieval = service()
             try:
                 filters = SearchFilters(
@@ -186,19 +258,29 @@ def create_mcp_server(
                     chunk_kind=chunk_kind or ("clause" if clause_type else None),
                     practice_area=practice_area,
                 )
-                result = [
-                    hit.as_dict()
-                    for hit in retrieval.search_semantic(
-                        query, principals=principals, filters=filters, limit=min(limit, 100)
-                    )
-                ]
-                result = _with_empty_result_help(result, retrieval, principals, filters)
+                found = retrieval.search_semantic_page(
+                    query,
+                    principals=principals,
+                    filters=filters,
+                    limit=limit,
+                    offset=offset,
+                )
+                page = Page(
+                    items=[hit.as_dict() for hit in found.items],
+                    offset=found.offset,
+                    limit=found.limit,
+                    has_more=found.has_more,
+                )
                 audit.update(
-                    result_count=len(result),
+                    result_count=len(page.items),
+                    has_more=page.has_more,
+                    offset=offset,
                     filters=_active_filters(filters),
                     **_query_fingerprint(query),
                 )
-                return result
+                return _paged(
+                    page, **_empty_result_help(page, retrieval, principals, filters)
+                )
             finally:
                 session.close()
 
@@ -207,11 +289,15 @@ def create_mcp_server(
         tags={"read"},
         description=(
             "Read one authorized document version as compact text with exact citations. Use "
-            "document_id/version_id from search results. Text is paginated to avoid tool-output "
-            "truncation; continue with content_page.next_offset when has_more is true. Do NOT "
-            "use this to download or reconstruct Word/Excel/PDF files—call download_document "
-            "for the exact original binary. Structured Docling metadata is omitted unless "
-            "include_structured_metadata is explicitly requested."
+            "document_id/version_id from search results. Do NOT use this to download or "
+            "reconstruct Word/Excel/PDF files—call download_document for the exact original "
+            "binary. Structured Docling metadata is omitted unless "
+            "include_structured_metadata is explicitly requested. PAGINATION: the text is "
+            "paginated by CHARACTER, not by row, so the shape differs from the list tools. "
+            "content_page = {offset, returned_chars, total_chars, has_more, next_offset}; "
+            "while content_page.has_more is true you are holding a PREFIX of the document, "
+            "so call again with offset=content_page.next_offset until has_more is false "
+            "before concluding a term or clause is absent from the document."
         )
     )
     def get_document(
@@ -393,13 +479,20 @@ def create_mcp_server(
             "document graph'. Prefer this over repeated semantic searches. It returns stored "
             "document relations plus independently labeled shared-thread and shared-matter "
             "context, graph-ready edges, and an exact citation for every visible document. "
-            "Shared-matter context is not represented as an inferred legal reference."
+            "Shared-matter context is not represented as an inferred legal reference. "
+            "PAGINATION: related documents arrive in related_documents (stored relations "
+            "first, then shared-matter/thread context) with a page block alongside — "
+            "{offset, limit, returned, has_more, next_offset, total}. total is the exact "
+            "number of related documents you may see; edges and explicit_edges cover the "
+            "documents on THIS page only. When page.has_more is true, call again with "
+            "offset=page.next_offset before concluding the graph is complete."
         )
     )
     def find_related_documents(
         document_id: str,
         include_same_matter: bool = True,
         limit: int = 50,
+        offset: int = 0,
         headers: dict[str, str] = CurrentHeaders(),
     ) -> dict | None:
         with audited_call(
@@ -410,17 +503,21 @@ def create_mcp_server(
             target_type="document",
             target_id=document_id,
         ) as (principals, audit):
+            limit, offset = _page_bounds(limit, offset, max_limit=250)
             session, retrieval = service()
             try:
                 result = retrieval.find_related_documents(
                     document_id,
                     principals=principals,
                     include_same_matter=include_same_matter,
-                    limit=min(max(limit, 0), 250),
+                    limit=limit,
+                    offset=offset,
                 )
                 audit.update(
                     found=result is not None,
                     result_count=result["result_count"] if result else 0,
+                    has_more=bool(result and result["page"]["has_more"]),
+                    offset=offset,
                     include_same_matter=include_same_matter,
                 )
                 return result
@@ -436,15 +533,19 @@ def create_mcp_server(
             "common user request 'show/find all related documents' or a document graph, call "
             "find_related_documents instead because it resolves document endpoints and also "
             "includes clearly labeled shared-matter/thread context. Each edge here includes "
-            "exact citations for both authorized endpoints."
+            "exact citations for both authorized endpoints. Only edges whose BOTH endpoints "
+            "you may see are returned, and the limit counts those — an edge hidden by access "
+            "control does not consume a slot in your page."
+            + _PAGINATION_CONTRACT
         )
     )
     def traverse(
         entity_type: str,
         entity_id: str,
         limit: int = 100,
+        offset: int = 0,
         headers: dict[str, str] = CurrentHeaders(),
-    ) -> list[dict]:
+    ) -> dict:
         with audited_call(
             session_factory,
             "mcp.traverse",
@@ -453,13 +554,22 @@ def create_mcp_server(
             target_type=entity_type,
             target_id=entity_id,
         ) as (principals, audit):
+            limit, offset = _page_bounds(limit, offset, max_limit=250)
             session, retrieval = service()
             try:
-                result = retrieval.traverse(
-                    entity_type, entity_id, principals=principals, limit=min(limit, 250)
+                page = retrieval.traverse_page(
+                    entity_type,
+                    entity_id,
+                    principals=principals,
+                    limit=limit,
+                    offset=offset,
                 )
-                audit["result_count"] = len(result)
-                return result
+                audit.update(
+                    result_count=len(page.items),
+                    has_more=page.has_more,
+                    offset=offset,
+                )
+                return _paged(page)
             finally:
                 session.close()
 
@@ -470,24 +580,41 @@ def create_mcp_server(
             "List matters that contain at least one version visible to the caller, including "
             "the exact project and every authorized document-version/source-object citation. "
             "practice_area filters by an Area of Law ontology node id with SUBTREE semantics "
-            "(a parent area matches its children) — find node ids via list_taxonomies."
+            "(a parent area matches its children) — find node ids via list_taxonomies. "
+            "Ordered by matter title; the limit counts matters you can actually see, so a "
+            "full page means a full page. A firm typically has hundreds to thousands of "
+            "matters: this tool is for browsing them, and finding one specific matter is "
+            "faster with search_semantic or a search_filter on its identifier. No total is "
+            "reported here — counting visible matters costs the same as fetching every page "
+            "— so use page.has_more, and never answer 'how many matters' from one page."
+            + _PAGINATION_CONTRACT
         )
     )
     def list_matters(
         limit: int = 100,
+        offset: int = 0,
         practice_area: str | None = None,
         headers: dict[str, str] = CurrentHeaders(),
-    ) -> list[dict]:
+    ) -> dict:
         with audited_call(
             session_factory, "mcp.list_matters", headers, config_provider=config_provider
         ) as (principals, audit):
+            limit, offset = _page_bounds(limit, offset, max_limit=250)
             session, retrieval = service()
             try:
-                result = retrieval.list_matters(
-                    principals=principals, limit=min(limit, 250), practice_area=practice_area
+                page = retrieval.list_matters_page(
+                    principals=principals,
+                    limit=limit,
+                    offset=offset,
+                    practice_area=practice_area,
                 )
-                audit.update(result_count=len(result), practice_area=practice_area)
-                return result
+                audit.update(
+                    result_count=len(page.items),
+                    has_more=page.has_more,
+                    offset=offset,
+                    practice_area=practice_area,
+                )
+                return _paged(page)
             finally:
                 session.close()
 
@@ -497,7 +624,9 @@ def create_mcp_server(
         description=(
             "Roll up a matter's billing: invoiced total plus hours and fees per UTBMS task "
             "code. Restricted to matters the caller can see and fails closed if any invoice "
-            "lacks an exact project/document/source-object citation."
+            "lacks an exact project/document/source-object citation. Covers every invoice on "
+            "the matter in one call — the totals are complete, not a page."
+            + _COMPLETE_RESULT
         )
     )
     def billing_rollup(matter_id: str, headers: dict[str, str] = CurrentHeaders()) -> dict:
@@ -508,8 +637,7 @@ def create_mcp_server(
 
             session, retrieval = service()
             try:
-                visible = {m["id"] for m in retrieval.list_matters(principals=principals, limit=1000)}
-                if matter_id not in visible:
+                if not retrieval.matter_visible(matter_id, principals):
                     audit["result_count"] = 0
                     return {"matter_id": matter_id, "authorized": False}
                 result = _rollup(session, matter_id)
@@ -531,21 +659,46 @@ def create_mcp_server(
         tags={"read"},
         description=(
             "List a matter's invoices (number, date, total). Restricted to matters the caller "
-            "can see; every invoice includes its exact project/document/source-object citation."
+            "can see; every invoice includes its exact project/document/source-object "
+            "citation. Ordered by invoice date, oldest first, with page.total giving the "
+            "matter's exact invoice count. For an invoiced total across the whole matter "
+            "call billing_rollup instead of summing pages by hand."
+            + _PAGINATION_CONTRACT
         )
     )
-    def list_invoices(matter_id: str, headers: dict[str, str] = CurrentHeaders()) -> list[dict]:
+    def list_invoices(
+        matter_id: str,
+        limit: int = 100,
+        offset: int = 0,
+        headers: dict[str, str] = CurrentHeaders(),
+    ) -> dict:
         with audited_call(
             session_factory, "mcp.list_invoices", headers, config_provider=config_provider
         ) as (principals, audit):
+            limit, offset = _page_bounds(limit, offset, max_limit=250)
             session, retrieval = service()
             try:
-                visible = {m["id"] for m in retrieval.list_matters(principals=principals, limit=1000)}
-                if matter_id not in visible:
+                if not retrieval.matter_visible(matter_id, principals):
                     audit["result_count"] = 0
-                    return []
+                    return _paged(Page(items=[], offset=offset, limit=limit, total=0))
+                total = (
+                    session.scalar(
+                        select(func.count())
+                        .select_from(BillingInvoice)
+                        .where(BillingInvoice.matter_id == matter_id)
+                    )
+                    or 0
+                )
                 invoices = session.scalars(
-                    select(BillingInvoice).where(BillingInvoice.matter_id == matter_id)
+                    select(BillingInvoice)
+                    .where(BillingInvoice.matter_id == matter_id)
+                    # Total order, so the same offset means the same invoice on
+                    # every call; invoice_date alone repeats within a billing run.
+                    .order_by(
+                        BillingInvoice.invoice_date.nullslast(), BillingInvoice.id
+                    )
+                    .offset(offset)
+                    .limit(limit)
                 ).all()
                 result = []
                 for invoice in invoices:
@@ -568,8 +721,17 @@ def create_mcp_server(
                             "citations": citations,
                         }
                     )
-                audit["result_count"] = len(result)
-                return result
+                page = Page(
+                    items=result,
+                    offset=offset,
+                    limit=limit,
+                    has_more=offset + len(result) < total,
+                    total=total,
+                )
+                audit.update(
+                    result_count=len(result), has_more=page.has_more, offset=offset
+                )
+                return _paged(page)
             finally:
                 session.close()
 
@@ -579,18 +741,33 @@ def create_mcp_server(
         description=(
             "Resolve a party or client name or identifier (LEI, HRB, VAT) to the firm's known "
             "entities, including entities that share an identifier. Results without an exact "
-            "authorized project/document/source-object citation are withheld."
+            "authorized project/document/source-object citation are withheld, so a page can "
+            "be shorter than the limit while more matches remain — read page.has_more rather "
+            "than the row count. Different companies do share names: several results is a "
+            "real answer, not a failure to disambiguate, so page rather than assume the first "
+            "hit is the one meant."
+            + _PAGINATION_CONTRACT
         )
     )
-    def resolve_entity(query: str, headers: dict[str, str] = CurrentHeaders()) -> list[dict]:
+    def resolve_entity(
+        query: str,
+        limit: int = 20,
+        offset: int = 0,
+        headers: dict[str, str] = CurrentHeaders(),
+    ) -> dict:
         with audited_call(
             session_factory, "mcp.resolve_entity", headers, config_provider=config_provider
         ) as (principals, audit):
             from knowledge_index.pipeline.billing import resolve_entity as _resolve
 
+            limit, offset = _page_bounds(limit, offset, max_limit=100)
             session, retrieval = service()
             try:
-                raw = _resolve(session, query)
+                # Ask the resolver for the whole window plus the probe row, then
+                # drop entities the caller holds no citation for. Filtering after
+                # the fetch is why `has_more` here comes from the probe and not
+                # from a count: the count would include withheld entities.
+                raw = _resolve(session, query, limit=offset + limit + 1)
                 result = []
                 for item in raw:
                     citations = retrieval.citations_for_party_or_client(
@@ -611,8 +788,25 @@ def create_mcp_server(
                             "citations": citations,
                         }
                     )
-                audit.update(result_count=len(result), **_query_fingerprint(query))
-                return result
+                # `result` starts at the first authorized entity, not at `offset`,
+                # so the window is cut here rather than by Page.probe (which
+                # expects an already-offset list). No total: the resolver was
+                # asked only as deep as this window, so len(result) is a bound on
+                # the matches, not a count of them.
+                window = result[offset : offset + limit]
+                page = Page(
+                    items=window,
+                    offset=offset,
+                    limit=limit,
+                    has_more=len(result) > offset + len(window),
+                )
+                audit.update(
+                    result_count=len(page.items),
+                    has_more=page.has_more,
+                    offset=offset,
+                    **_query_fingerprint(query),
+                )
+                return _paged(page)
             finally:
                 session.close()
 
@@ -622,14 +816,18 @@ def create_mcp_server(
         description=(
             "Search anonymized drafting and negotiation rationale. Underlying evidence remains "
             "protected by the source document ACL. Every result includes the exact evidence "
-            "project, document version, and source object citation."
+            "project, document version, and source object citation. Ranked by lexical match, "
+            "best first; page.total is the exact number of authorized records that matched, "
+            "so it is a sound basis for 'how often has the firm reasoned about X'."
+            + _PAGINATION_CONTRACT
         )
     )
     def search_decisions(
         query: str,
         limit: int = 20,
+        offset: int = 0,
         headers: dict[str, str] = CurrentHeaders(),
-    ) -> list[dict]:
+    ) -> dict:
         with audited_call(
             session_factory,
             "mcp.search_decisions",
@@ -639,13 +837,19 @@ def create_mcp_server(
             principals,
             audit,
         ):
+            limit, offset = _page_bounds(limit, offset, max_limit=100)
             session, retrieval = service()
             try:
-                result = retrieval.search_decisions(
-                    query, principals=principals, limit=min(limit, 100)
+                page = retrieval.search_decisions_page(
+                    query, principals=principals, limit=limit, offset=offset
                 )
-                audit.update(result_count=len(result), **_query_fingerprint(query))
-                return result
+                audit.update(
+                    result_count=len(page.items),
+                    has_more=page.has_more,
+                    offset=offset,
+                    **_query_fingerprint(query),
+                )
+                return _paged(page)
             finally:
                 session.close()
 
@@ -656,7 +860,11 @@ def create_mcp_server(
             "The active document-type ontology and the stable auxiliary taxonomies. "
             "Document types are a hierarchy, not a flat list: browse it with "
             "ontology_children or find a node with ontology_search, then pass the "
-            "node id as the doc_type filter (it matches the node's whole subtree)."
+            "node id as the doc_type filter (it matches the node's whole subtree). "
+            "Returns the ontology's ROOTS and the top two levels of practice areas, "
+            "not every node — ontology.visible_nodes is the true node count, and the "
+            "deeper levels are reached with ontology_children/ontology_search."
+            + _COMPLETE_RESULT
         ),
     )
     def list_taxonomies(headers: dict[str, str] = CurrentHeaders()) -> dict:
@@ -697,45 +905,82 @@ def create_mcp_server(
             "Find document-type ontology nodes by name, synonym, or definition. Use the "
             "returned node id as the doc_type filter in search_filter/search_semantic — "
             "the filter matches the node AND everything below it (an interior node like "
-            "'Agreements' covers every agreement type)."
+            "'Agreements' covers every agreement type). Ranked best-match first (exact "
+            "label, then prefix, then substring, then synonym, then definition), and "
+            "page.total is the exact number of nodes that matched."
+            + _PAGINATION_CONTRACT
         ),
     )
-    def ontology_search(query: str, headers: dict[str, str] = CurrentHeaders()) -> list[dict]:
+    def ontology_search(
+        query: str,
+        limit: int = 12,
+        offset: int = 0,
+        headers: dict[str, str] = CurrentHeaders(),
+    ) -> dict:
         with audited_call(
             session_factory, "mcp.ontology_search", headers, config_provider=config_provider
         ) as (_principals, audit):
-            results = config_provider().doc_ontology().search(query, limit=12)
-            audit.update(result_count=len(results), query=query)
-            return results
+            limit, offset = _page_bounds(limit, offset, max_limit=100)
+            # The ontology is an in-memory artifact, so asking for the whole
+            # match set costs no more than asking for a page of it — which is
+            # what makes an exact total free here.
+            results = config_provider().doc_ontology().search(query, limit=None)
+            page = Page.slice(results, offset=offset, limit=limit)
+            audit.update(
+                result_count=len(page.items),
+                has_more=page.has_more,
+                offset=offset,
+                query=query,
+            )
+            return _paged(page)
 
     @mcp.tool(
         title="Ontology top-level branches",
         tags={"read"},
-        description="Top-level branches of the active document-type ontology.",
+        description=(
+            "Top-level branches of the active document-type ontology — every root, in one "
+            "call. Descend from a root with ontology_children."
+            + _COMPLETE_RESULT
+        ),
     )
-    def ontology_roots(headers: dict[str, str] = CurrentHeaders()) -> list[dict]:
+    def ontology_roots(headers: dict[str, str] = CurrentHeaders()) -> dict:
         with audited_call(
             session_factory, "mcp.ontology_roots", headers, config_provider=config_provider
         ) as (_principals, audit):
             results = config_provider().doc_ontology().roots()
             audit["result_count"] = len(results)
-            return results
+            return {"results": results, "complete": True}
 
     @mcp.tool(
         title="Descend the ontology one level",
         tags={"read"},
         description=(
             "Children of one ontology node, with definitions — descend the document-type "
-            "hierarchy one level at a time. A child count of 0 marks a leaf."
+            "hierarchy one level at a time. A child count of 0 marks a leaf. page.total is "
+            "the node's exact number of visible children, so a node whose children you have "
+            "not fully paged is a subtree you have not fully seen."
+            + _PAGINATION_CONTRACT
         ),
     )
-    def ontology_children(node_id: str, headers: dict[str, str] = CurrentHeaders()) -> list[dict]:
+    def ontology_children(
+        node_id: str,
+        limit: int = 100,
+        offset: int = 0,
+        headers: dict[str, str] = CurrentHeaders(),
+    ) -> dict:
         with audited_call(
             session_factory, "mcp.ontology_children", headers, config_provider=config_provider
         ) as (_principals, audit):
+            limit, offset = _page_bounds(limit, offset, max_limit=250)
             results = config_provider().doc_ontology().children(node_id)
-            audit.update(result_count=len(results), node_id=node_id)
-            return results
+            page = Page.slice(results, offset=offset, limit=limit)
+            audit.update(
+                result_count=len(page.items),
+                has_more=page.has_more,
+                offset=offset,
+                node_id=node_id,
+            )
+            return _paged(page)
 
     @mcp.tool(
         title="Read one ontology node",
@@ -755,12 +1000,20 @@ def create_mcp_server(
         tags={"scope"},
         description=(
             "Compile the caller's ACL and optional project/document selections into the exact "
-            "scope that will constrain hybrid/vector retrieval before scoring."
+            "scope that will constrain hybrid/vector retrieval before scoring. "
+            "project_count and document_count are ALWAYS the exact size of the compiled "
+            "scope — they are the answer to 'how much can I see'. The enumerated "
+            "document_ids and their citations are paginated because a scope routinely "
+            "covers tens of thousands of documents: documents = {results, page} with the "
+            "same page contract as the other tools, and the projects list is complete. "
+            "Do not infer scope size from len(documents.results); read document_count."
         ),
     )
     def preview_search_scope(
         project_ids: list[str] | None = None,
         document_ids: list[str] | None = None,
+        limit: int = 100,
+        offset: int = 0,
         headers: dict[str, str] = CurrentHeaders(),
     ) -> dict:
         with audited_call(
@@ -769,6 +1022,7 @@ def create_mcp_server(
             headers,
             config_provider=config_provider,
         ) as (principals, audit):
+            limit, offset = _page_bounds(limit, offset, max_limit=500)
             session = session_factory()
             try:
                 scope = AccessService(session).compile_scope(
@@ -777,31 +1031,41 @@ def create_mcp_server(
                     document_ids=document_ids or [],
                 )
                 retrieval = RetrievalService(session, config_provider())
+                # Citations are built only for the documents on this page. The
+                # unpaginated form fetched every citation in the caller's whole
+                # scope to answer a question about its size, which the exact
+                # counts below already answer.
+                in_scope = list(scope.document_ids)
+                documents = Page.slice(in_scope, offset=offset, limit=limit)
                 result = {
                     "fingerprint": scope.fingerprint,
                     "project_count": len(scope.project_ids),
                     "document_count": len(scope.document_ids),
                     "project_ids": list(scope.project_ids),
-                    "document_ids": list(scope.document_ids),
                     "projects": [
                         project
                         for project_id in scope.project_ids
                         if (project := retrieval.project_reference(project_id)) is not None
                     ],
-                    "citations": _merge_citations(
-                        [
-                            citation
-                            for document_id in scope.document_ids
-                            for citation in retrieval.citations_for_document(
-                                document_id, principals
-                            )
-                        ]
+                    "documents": _paged(
+                        documents,
+                        citations=_merge_citations(
+                            [
+                                citation
+                                for document_id in documents.items
+                                for citation in retrieval.citations_for_document(
+                                    document_id, principals
+                                )
+                            ]
+                        ),
                     ),
                 }
                 audit.update(
                     fingerprint=scope.fingerprint,
                     project_count=len(scope.project_ids),
                     document_count=len(scope.document_ids),
+                    offset=offset,
+                    has_more=documents.has_more,
                 )
                 return result
             finally:
@@ -977,39 +1241,44 @@ def _download_base_url(headers: dict[str, str]) -> str:
     return f"{scheme}://{host}"
 
 
-def _with_empty_result_help(
-    result: list[dict],
+def _empty_result_help(
+    page: Page,
     retrieval,
     principals: set[str],
     filters: SearchFilters,
-) -> list[dict]:
-    """Turn an empty filtered result into an actionable one.
+) -> dict:
+    """Extra envelope keys that turn an empty filtered result into an actionable one.
 
     An empty list does not distinguish a misspelled filter from an empty matter
     from something the caller may not see, so a client either guesses again or
     abandons the matter — both measured on real agent traffic, where 41 filter
     calls returned nothing and the caller almost never recovered. When filters were
-    set and nothing matched, one advisory row is returned carrying the values that
-    WOULD have matched in this caller's own scope.
+    set and nothing matched, this returns the values that WOULD have matched in
+    this caller's own scope.
 
-    Shaped so it cannot be mistaken for a hit: no ``citations``, and the server's
-    own instructions forbid a factual claim from a result without them.
+    It lands in its own ``no_results`` key rather than inside ``results``. It used
+    to be smuggled in as a lone advisory row with no ``citations``, relying on the
+    server instructions to stop a caller treating it as a hit; a sibling key
+    cannot be miscounted as a result at all — which also keeps ``page.returned``
+    honest, since an advisory is not a row.
+
+    Only ever consulted for the first page: an empty page at a non-zero offset
+    means the caller paged past the end, which the filters already explained.
     """
-    if result or not any(
+    if page.items or page.offset or not any(
         getattr(filters, name, None) for name in ("party", "identifier", "doc_type", "matter_id")
     ):
-        return result
+        return {}
     try:
         suggestions = retrieval.suggest_for_empty(principals=principals, filters=filters)
     except Exception:  # never turn a clean empty result into an error
-        return result
+        return {}
     applied = sorted(
         name
         for name in ("party", "identifier", "doc_type", "matter_id")
         if getattr(filters, name, None)
     )
     advisory = {
-        "no_results": True,
         "filters_applied": applied,
         "message": (
             "No documents matched those filters in your access scope. These values exist "
@@ -1025,7 +1294,7 @@ def _with_empty_result_help(
     }
     if suggestions:
         advisory["did_you_mean"] = suggestions
-    return [advisory]
+    return {"no_results": advisory}
 
 
 def _active_filters(filters: SearchFilters) -> dict:

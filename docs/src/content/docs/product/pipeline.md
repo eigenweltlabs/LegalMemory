@@ -344,10 +344,15 @@ document titles, and the first 8 000 characters of converted text.
 
 Tools:
 
-- `search_matters(query)`: ranks existing matters by semantic similarity over
-  already-indexed chunks, title substring, and reference-number match.
+- `search_matters(query, limit=8, offset=0)`: ranks existing matters by semantic
+  similarity over already-indexed chunks, title substring, and reference-number
+  match. Returns `{results, page}`; the whole candidate set is ranked before the
+  page is cut, so `page.total` is exact and an `offset` walks the same ranking.
+  A full page with `has_more` is explicitly *not* grounds to create a new matter —
+  that mistake splits one file in two, so the tool description says so.
 - `peek_matter(matter_id)`: one matter's references, practice area, folders, and a
-  sample of document titles.
+  sample of document titles — with `document_count` (the true total) and
+  `document_titles_are_sample`, so a 12-title list is not read as the whole matter.
 - `list_folder()`: the ±2-level neighbourhood again.
 - `create_matter(reference_number, title)`: get-or-create, committed in its own
   session immediately so concurrently classifying documents of the same matter see it
@@ -375,10 +380,14 @@ model I/O and must not hold a transaction):
 
 - `list_folder(path)`: look inside any folder, including the name-only siblings;
   `/` lists the source root.
-- `search_documents(query)`: corpus-wide document search (semantic + title) for
-  targets outside the neighbourhood.
-- `open_file(path)`: pageable converted text of any listed file, with its own
-  tracked-changes digest. If the target has not converted yet, the stage pulls its
+- `search_documents(query, limit=10, offset=0)`: corpus-wide document search
+  (semantic + title) for targets outside the neighbourhood. Returns
+  `{results, page}` with an exact `page.total`.
+- `open_file(path, offset, max_chars)`: pageable converted text of any listed file,
+  with its own tracked-changes digest. The result carries `has_more` and
+  `next_offset` rather than leaving the model to compare `offset + returned_chars`
+  against `total_chars` — a long file read once used to look like a file read
+  whole. If the target has not converted yet, the stage pulls its
   `fetch`/`convert` forward through the normal claim machinery
   (`ensure_source_object_ready`), bounded by `inline_conversion_budget_seconds` and
   `inline_conversion_slots`, observing rather than duplicating a claim another worker

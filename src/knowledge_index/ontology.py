@@ -271,12 +271,16 @@ class OntologyScope:
 
     # -- lexical search: retrieval-time filter discovery only ----------------
 
-    def search(self, query: str, *, limit: int = 12) -> list[dict]:
+    def search(self, query: str, *, limit: int | None = 12) -> list[dict]:
         """Deterministic lexical search over the visible set.
 
         Ranking: exact label > label prefix > label substring > synonym
         substring > definition substring; ties broken alphabetically. No
         embeddings, no model calls — same query, same result, always.
+
+        ``limit=None`` returns every match. The whole artifact is already in
+        memory, so a caller that wants to page the matches (and report how many
+        there were) does not pay for the completeness.
         """
         needle = " ".join(query.lower().split())
         if not needle:
@@ -300,7 +304,7 @@ class OntologyScope:
                 scored.append((-score, node.label, node_id))
         scored.sort()
         results = []
-        for _neg, _label, node_id in scored[:limit]:
+        for _neg, _label, node_id in (scored if limit is None else scored[:limit]):
             detail = self.describe(node_id)
             detail["path"] = self.path_labels(node_id)
             results.append(detail)

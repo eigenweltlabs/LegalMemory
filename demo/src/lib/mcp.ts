@@ -51,6 +51,12 @@ const searchFilters = {
     .optional()
     .describe("Only authoritative final/executed versions. Default false searches drafts too."),
   limit: z.number().int().min(1).max(20).optional().describe("Results to return; prefer 5-8."),
+  offset: z
+    .number()
+    .int()
+    .min(0)
+    .optional()
+    .describe("Skip this many results. Pass page.next_offset to continue a search."),
 };
 
 export const CHAT_TOOL_SCHEMAS = {
@@ -82,12 +88,14 @@ export const CHAT_TOOL_SCHEMAS = {
       document_id: z.string().describe("The document whose relations to trace."),
       include_same_matter: z.boolean().optional(),
       limit: z.number().int().min(1).max(50).optional(),
+      offset: z.number().int().min(0).optional().describe("Continue from page.next_offset."),
     }),
   },
   list_matters: {
-    // An empty object, not an absent schema: a tool with no arguments still
-    // needs a declared shape or the provider has nothing to emit.
-    inputSchema: z.object({}),
+    inputSchema: z.object({
+      limit: z.number().int().min(1).max(50).optional(),
+      offset: z.number().int().min(0).optional().describe("Continue from page.next_offset."),
+    }),
   },
 } as const;
 

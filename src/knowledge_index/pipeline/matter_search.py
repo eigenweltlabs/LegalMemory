@@ -40,12 +40,44 @@ from knowledge_index.pipeline.folder_context import (
     revisions_digest,
 )
 from knowledge_index.pipeline.providers import AgentTool, embed_text
+from knowledge_index.retrieval_types import Page
+
+# The classification and relation agents see the same pagination contract as the
+# external MCP surface, in fewer words: these agents run per document, thousands
+# of times, and every token of tool description is paid on each one.
+_AGENT_PAGINATION = (
+    " Returns {results, page}; when page.has_more is true, more candidates exist "
+    "— call again with offset=page.next_offset before concluding there are none."
+)
 
 
-def search_documents(session: Session, config: AppConfig, query: str, *, limit: int = 10) -> list[dict]:
+def _agent_page(page: Page) -> str:
+    """The JSON an agent tool hands back for a paginated result."""
+    return json.dumps({"results": page.items, "page": page.as_dict()}, ensure_ascii=False)
+
+
+def search_documents(
+    session: Session, config: AppConfig, query: str, *, limit: int = 10, offset: int = 0
+) -> list[dict]:
     """Find documents anywhere in the index by title or topic — used by the relation
     agent to locate a referenced master contract, judgment, or exhibit filed under a
     different folder or matter. Returns metadata only (no full text)."""
+    return Page.slice(
+        _ranked_documents(session, config, query), offset=max(0, offset), limit=limit
+    ).items
+
+
+def search_documents_page(
+    session: Session, config: AppConfig, query: str, *, limit: int = 10, offset: int = 0
+) -> Page:
+    """``search_documents`` with an exact candidate total."""
+    return Page.slice(
+        _ranked_documents(session, config, query), offset=max(0, offset), limit=limit
+    )
+
+
+def _ranked_documents(session: Session, config: AppConfig, query: str) -> list[dict]:
+    """Every document that matched, best first — the set the pages are cut from."""
     query = (query or "").strip()
     if not query:
         return []
@@ -61,12 +93,16 @@ def search_documents(session: Session, config: AppConfig, query: str, *, limit: 
     except Exception:
         pass
     for document in session.scalars(
-        select(Document).where(Document.title.ilike(f"%{query}%")).limit(20)
+        select(Document)
+        .where(Document.title.ilike(f"%{query}%"))
+        .order_by(Document.title, Document.id)
+        .limit(20)
     ):
         scored[document.id] = scored.get(document.id, 0.0) + 0.4
 
     results: list[dict] = []
-    for document_id, _score in sorted(scored.items(), key=lambda item: item[1], reverse=True)[:limit]:
+    # Document id breaks score ties, so the same query cuts pages in the same place.
+    for document_id, _score in sorted(scored.items(), key=lambda item: (-item[1], item[0])):
         document = session.get(Document, document_id)
         if document is None:
             continue
@@ -167,14 +203,20 @@ def open_source_file(
     text = str(payload.get("text") or "")
     offset = max(0, min(int(offset), len(text)))
     max_chars = max(1000, min(int(max_chars), 20000))
+    end = min(len(text), offset + max_chars)
     result = {
         "ref": source_object.id,
         "path": source_object.path,
         "filename": source_object.name,
         "offset": offset,
-        "returned_chars": min(max_chars, max(0, len(text) - offset)),
+        "returned_chars": max(0, end - offset),
         "total_chars": len(text),
-        "text": text[offset : offset + max_chars],
+        # The agent had to derive continuation from offset + returned_chars <
+        # total_chars, which is exactly the arithmetic a reader skips — so a long
+        # file read once looked like a file read whole.
+        "has_more": end < len(text),
+        "next_offset": end if end < len(text) else None,
+        "text": text[offset:end],
     }
     # the text above is the ACCEPTED view — a markup is only recognizable by its
     # tracked changes, so a compact digest rides along for the relation agent
@@ -216,9 +258,14 @@ def relation_tools(
 
     def find_documents(args: dict) -> str:
         with session_factory() as session:
-            return json.dumps(
-                search_documents(session, config, str(args.get("query", ""))),
-                ensure_ascii=False,
+            return _agent_page(
+                search_documents_page(
+                    session,
+                    config,
+                    str(args.get("query", "")),
+                    limit=int(args.get("limit", 10) or 10),
+                    offset=int(args.get("offset", 0) or 0),
+                )
             )
 
     def open_file(args: dict) -> str:
@@ -262,11 +309,25 @@ def relation_tools(
             description=(
                 "Find documents anywhere in the index by title or topic — use it to locate a "
                 "referenced master contract, judgment, or exhibit that lives in another folder "
-                "or matter."
+                "or matter. Best match first."
+                + _AGENT_PAGINATION
             ),
             parameters={
                 "type": "object",
-                "properties": {"query": {"type": "string"}},
+                "properties": {
+                    "query": {"type": "string"},
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 50,
+                        "description": "Documents per page (default 10).",
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "Skip this many documents; use page.next_offset.",
+                    },
+                },
                 "required": ["query"],
             },
             handler=find_documents,
@@ -275,8 +336,10 @@ def relation_tools(
             name="open_file",
             description=(
                 "Open a file from the supplied directory listing by its exact path. Returns "
-                "the stable source ref required for relationships plus converted text. Use "
-                "offset to continue reading a long file."
+                "the stable source ref required for relationships plus converted text. The "
+                "text is paginated by character: while has_more is true you are holding only "
+                "the START of the file, so call again with offset=next_offset before "
+                "concluding a reference or party is not in it."
             ),
             parameters={
                 "type": "object",
@@ -331,6 +394,7 @@ def search_matters(
     query: str,
     *,
     limit: int = 8,
+    offset: int = 0,
     include_semantic: bool = True,
 ) -> list[dict]:
     """Rank existing matters against a free-text query (party, ref, title, topic).
@@ -338,7 +402,43 @@ def search_matters(
     ``include_semantic=False`` skips the embedding leg for callers that must stay
     cheap — the create-time replay runs under the matter-create lock, and an
     embedding call per holder serialized the whole cold-start classify wave
-    (measured 2026-08-01: 1,057 connections queued on the advisory lock)."""
+    (measured 2026-08-01: 1,057 connections queued on the advisory lock).
+
+    Every candidate is scored before the window is cut, so ``offset`` walks the
+    same ranking rather than re-running a different one, and ``search_matters_page``
+    can report how many candidates there were."""
+    return Page.slice(
+        _ranked_matters(session, config, query, include_semantic=include_semantic),
+        offset=max(0, offset),
+        limit=limit,
+    ).items
+
+
+def search_matters_page(
+    session: Session,
+    config: AppConfig,
+    query: str,
+    *,
+    limit: int = 8,
+    offset: int = 0,
+    include_semantic: bool = True,
+) -> Page:
+    """``search_matters`` with an exact candidate total."""
+    return Page.slice(
+        _ranked_matters(session, config, query, include_semantic=include_semantic),
+        offset=max(0, offset),
+        limit=limit,
+    )
+
+
+def _ranked_matters(
+    session: Session,
+    config: AppConfig,
+    query: str,
+    *,
+    include_semantic: bool = True,
+) -> list[dict]:
+    """Every matter that matched, best first — the set the pages are cut from."""
     query = (query or "").strip()
     if not query:
         return []
@@ -362,17 +462,20 @@ def search_matters(
 
     # Lexical: matter title contains the query.
     for matter in session.scalars(
-        select(Matter).where(Matter.title.ilike(f"%{query}%")).limit(30)
+        select(Matter)
+        .where(Matter.title.ilike(f"%{query}%"))
+        .order_by(Matter.title, Matter.id)
+        .limit(30)
     ):
         scored[matter.id] = scored.get(matter.id, 0.0) + 0.5
 
-    # Exact-ish: reference number substring over a bounded scan.
-    needle = query.upper()
-    for matter in session.scalars(select(Matter).limit(2000)):
-        if any(needle in (ref or "").upper() for ref in (matter.reference_numbers or [])):
-            scored[matter.id] = scored.get(matter.id, 0.0) + 1.0
+    # Exact-ish: reference number substring.
+    for matter_id in _matters_by_reference_substring(session, query):
+        scored[matter_id] = scored.get(matter_id, 0.0) + 1.0
 
-    ranked = sorted(scored.items(), key=lambda item: item[1], reverse=True)[:limit]
+    # Matter id breaks score ties so the ranking — and therefore any page cut
+    # from it — is the same on two calls with the same query.
+    ranked = sorted(scored.items(), key=lambda item: (-item[1], item[0]))
     results: list[dict] = []
     for matter_id, score in ranked:
         matter = session.get(Matter, matter_id)
@@ -384,15 +487,65 @@ def search_matters(
     return results
 
 
-def peek_matter(session: Session, matter_id: str) -> dict:
+def _matters_by_reference_substring(session: Session, query: str) -> list[str]:
+    """Ids of matters carrying a reference number containing ``query``.
+
+    reference_numbers is a jsonb array, so on Postgres the substring test runs
+    inside SQL over every matter. This used to be a Python scan over
+    ``select(Matter).limit(2000)`` with no ORDER BY: past 2,000 matters, whether
+    a given Aktenzeichen was findable at all depended on physical row order.
+    SQLite has no jsonb functions, so tests keep the scan — ordered, and over the
+    whole table, which is small in that setting.
+    """
+    needle = (query or "").strip().upper()
+    if not needle:
+        return []
+    if session.bind is not None and session.bind.dialect.name == "postgresql":
+        statement = text(
+            "SELECT id FROM matters WHERE EXISTS ("
+            "  SELECT 1 FROM jsonb_array_elements_text(matters.reference_numbers) AS ref"
+            "  WHERE upper(ref) LIKE :needle"
+            ") ORDER BY id"
+        )
+        return list(
+            session.scalars(statement.bindparams(needle=f"%{needle}%")).all()
+        )
+    return [
+        matter.id
+        for matter in session.scalars(select(Matter).order_by(Matter.id))
+        if any(needle in (ref or "").upper() for ref in (matter.reference_numbers or []))
+    ]
+
+
+def peek_matter(session: Session, matter_id: str, *, title_limit: int = 12) -> dict:
     matter = session.get(Matter, matter_id) if matter_id else None
     if matter is None:
         return {"error": "matter not found"}
     summary = _matter_summary(session, matter)
     titles = session.scalars(
-        select(Document.title).where(Document.matter_id == matter.id).limit(12)
+        select(Document.title)
+        .where(Document.matter_id == matter.id)
+        .order_by(Document.title, Document.id)
+        .limit(title_limit)
     ).all()
     summary["document_titles"] = [title for title in titles if title]
+    # document_count is the matter's true document total; document_titles is at
+    # most `title_limit` of them. Counted separately from member_documents, which
+    # counts source-object assignments — a different number, and comparing the
+    # two would mislabel a matter as sampled or as complete at random. Stated in
+    # the payload so the agent does not read a 12-title list as the matter's
+    # entire contents.
+    summary["document_count"] = (
+        session.scalar(
+            select(func.count())
+            .select_from(Document)
+            .where(Document.matter_id == matter.id)
+        )
+        or 0
+    )
+    summary["document_titles_are_sample"] = summary["document_count"] > len(
+        summary["document_titles"]
+    )
     return summary
 
 
@@ -516,13 +669,19 @@ def classification_tools(
 
     def run_search(args: dict) -> str:
         query = str(args.get("query", ""))
-        results = search_matters(session, config, query)
-        seen.update(result["id"] for result in results)
+        page = search_matters_page(
+            session,
+            config,
+            query,
+            limit=int(args.get("limit", 8) or 8),
+            offset=int(args.get("offset", 0) or 0),
+        )
+        seen.update(result["id"] for result in page.items)
         last_call[0] = "search_matters"
         if query.strip():
             last_queries.append(query.strip())
             del last_queries[:-3]  # keep the tail; older queries are stale anyway
-        return json.dumps(results, ensure_ascii=False)
+        return _agent_page(page)
 
     def run_peek(args: dict) -> str:
         result = peek_matter(session, str(args.get("matter_id", "")))
@@ -633,7 +792,12 @@ def classification_tools(
             description=(
                 "Search the firm's existing matters by any text: a party name, a reference "
                 "number (Aktenzeichen), a matter title, or a topic. Returns candidate matters "
-                "with their reference numbers, titles, practice area and folders."
+                "with their reference numbers, titles, practice area and folders, best match "
+                "first."
+                + _AGENT_PAGINATION
+                + " An empty results list means no matter matched — that is when to create "
+                "one. A full page with has_more=true does NOT: page or re-query first, "
+                "because creating a matter that already exists splits one file in two."
             ),
             parameters={
                 "type": "object",
@@ -641,7 +805,18 @@ def classification_tools(
                     "query": {
                         "type": "string",
                         "description": "Party, reference number, title, or topic to search for.",
-                    }
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 50,
+                        "description": "Candidates per page (default 8).",
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "Skip this many candidates; use page.next_offset.",
+                    },
                 },
                 "required": ["query"],
             },
@@ -661,7 +836,10 @@ def classification_tools(
             name="peek_matter",
             description=(
                 "Show one matter in detail by its id (from a search_matters result): title, "
-                "reference numbers, practice area, folders and a sample of its document titles."
+                "reference numbers, practice area, folders and a sample of its document "
+                "titles. document_count is the matter's true number of documents; "
+                "document_titles is at most 12 of them, and "
+                "document_titles_are_sample=true means you are seeing a sample."
             ),
             parameters={
                 "type": "object",
@@ -708,7 +886,9 @@ def classification_tools(
     return tools
 
 
-def search_entities(session: Session, config: AppConfig, query: str, *, limit: int = 8) -> list[dict]:
+def search_entities(
+    session: Session, config: AppConfig, query: str, *, limit: int = 8, offset: int = 0
+) -> list[dict]:
     """Rank the firm's known parties/clients against a free-text name — the entity
     analogue of search_matters, and semantic-first for the same reason.
 
@@ -719,6 +899,22 @@ def search_entities(session: Session, config: AppConfig, query: str, *, limit: i
     documents and therefore the same candidate, in any language, with no
     normalization rules. Lexical name and identifier matches are boosts, not the whole
     search. Skips the semantic leg cleanly on a cold index."""
+    return Page.slice(
+        _ranked_entities(session, config, query), offset=max(0, offset), limit=limit
+    ).items
+
+
+def search_entities_page(
+    session: Session, config: AppConfig, query: str, *, limit: int = 8, offset: int = 0
+) -> Page:
+    """``search_entities`` with an exact candidate total."""
+    return Page.slice(
+        _ranked_entities(session, config, query), offset=max(0, offset), limit=limit
+    )
+
+
+def _ranked_entities(session: Session, config: AppConfig, query: str) -> list[dict]:
+    """Every party/client that matched, best first — what the pages are cut from."""
     query = (query or "").strip()
     if not query:
         return []
@@ -743,19 +939,33 @@ def search_entities(session: Session, config: AppConfig, query: str, *, limit: i
         pass
 
     # Lexical: entity name contains the query (a boost).
-    for party in session.scalars(select(Party).where(Party.name.ilike(f"%{query}%")).limit(30)):
+    for party in session.scalars(
+        select(Party)
+        .where(Party.name.ilike(f"%{query}%"))
+        .order_by(Party.name, Party.id)
+        .limit(30)
+    ):
         scored[("party", party.id)] = scored.get(("party", party.id), 0.0) + 0.5
-    for client in session.scalars(select(Client).where(Client.name.ilike(f"%{query}%")).limit(30)):
+    for client in session.scalars(
+        select(Client)
+        .where(Client.name.ilike(f"%{query}%"))
+        .order_by(Client.name, Client.id)
+        .limit(30)
+    ):
         scored[("client", client.id)] = scored.get(("client", client.id), 0.0) + 0.5
 
     # Identifier: shared-identifier match (the entity analogue of the matter ref leg).
     for ident in session.scalars(
-        select(EntityIdentifier).where(EntityIdentifier.value.ilike(f"%{query}%")).limit(30)
+        select(EntityIdentifier)
+        .where(EntityIdentifier.value.ilike(f"%{query}%"))
+        .order_by(EntityIdentifier.value, EntityIdentifier.id)
+        .limit(30)
     ):
         key = (ident.entity_type, ident.entity_id)
         scored[key] = scored.get(key, 0.0) + 1.0
 
-    ranked = sorted(scored.items(), key=lambda item: item[1], reverse=True)[:limit]
+    # (type, id) breaks score ties, so pages cut in the same place every call.
+    ranked = sorted(scored.items(), key=lambda item: (-item[1], item[0]))
     results: list[dict] = []
     for (entity_type, entity_id), score in ranked:
         entity = session.get(Client if entity_type == "client" else Party, entity_id)
@@ -828,10 +1038,20 @@ def party_resolution_tools(
         needle = str(args.get("query", "")).strip()
         if searched_queries is not None and needle:
             searched_queries.add(needle)
-        results = search_entities(session, config, needle) if needle else []
-        for row in results:
+        page = (
+            search_entities_page(
+                session,
+                config,
+                needle,
+                limit=int(args.get("limit", 8) or 8),
+                offset=int(args.get("offset", 0) or 0),
+            )
+            if needle
+            else Page()
+        )
+        for row in page.items:
             seen_ids.add(row["id"])
-        return json.dumps(results, ensure_ascii=False)
+        return _agent_page(page)
 
     return [
         AgentTool(
@@ -844,6 +1064,10 @@ def party_resolution_tools(
                 "id (as existing_id) ONLY when it is genuinely the same real-world entity "
                 "— a matching name alone is not enough, because different companies share "
                 "names."
+                + _AGENT_PAGINATION
+                + " Creating a duplicate of an entity that was simply on page 2 is the "
+                "most expensive mistake here, so check has_more before deciding a party "
+                "is new."
             ),
             parameters={
                 "type": "object",
@@ -851,7 +1075,18 @@ def party_resolution_tools(
                     "query": {
                         "type": "string",
                         "description": "Party name or identifier to search for.",
-                    }
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 50,
+                        "description": "Candidates per page (default 8).",
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "Skip this many candidates; use page.next_offset.",
+                    },
                 },
                 "required": ["query"],
             },

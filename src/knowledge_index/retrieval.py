@@ -32,13 +32,24 @@ from knowledge_index.db.models import (
 )
 from knowledge_index.permissions import AccessService, CompiledAccessScope
 from knowledge_index.pipeline.providers import chat_json, embed_text, usage_stage
-from knowledge_index.retrieval_types import SearchFilters
+from knowledge_index.retrieval_types import Page, SearchFilters
 
 # Smallest slice of ranked documents authorized per bulk round-trip. Each batch
 # costs a fixed handful of set-based statements no matter how many rows it covers,
 # so batches are sized generously: index rows that turn out stale or unauthorized
 # must not force a second round for a page that one round could have filled.
 _VERIFY_BATCH_MIN = 24
+
+# How many leading hits the LLM rerank is allowed to reorder. Everything behind
+# this keeps its fused order (and is still returned — see _rerank).
+_RERANK_WINDOW = 20
+
+# Deepest window (offset + limit) the ranked search path will serve. Ranked
+# pagination is re-ranking, not a cursor: every page re-runs fusion over a
+# candidate pool sized for the whole window, so cost grows with depth. Past this
+# the honest answer is "narrow the filters", not a slower page — and saying so
+# beats clamping, which is the silent truncation this whole change removes.
+_MAX_RANKED_WINDOW = 500
 
 
 @dataclass
@@ -137,6 +148,7 @@ class RetrievalService:
         principals: set[str],
         filters: SearchFilters | None = None,
         limit: int = 20,
+        offset: int = 0,
         scope: CompiledAccessScope | None = None,
     ) -> list[SearchHit]:
         return self._search(
@@ -144,7 +156,30 @@ class RetrievalService:
             principals=principals,
             filters=filters or SearchFilters(),
             limit=limit,
+            offset=offset,
             scope=scope,
+        )
+
+    def search_filter_page(
+        self,
+        *,
+        principals: set[str],
+        filters: SearchFilters | None = None,
+        limit: int = 20,
+        offset: int = 0,
+        scope: CompiledAccessScope | None = None,
+    ) -> Page:
+        """``search_filter`` plus an exact ``has_more``, via one extra hit."""
+        return Page.probe(
+            self.search_filter(
+                principals=principals,
+                filters=filters,
+                limit=limit + 1,
+                offset=offset,
+                scope=scope,
+            ),
+            offset=offset,
+            limit=limit,
         )
 
     def suggest_for_empty(
@@ -179,6 +214,7 @@ class RetrievalService:
         principals: set[str],
         filters: SearchFilters | None = None,
         limit: int = 20,
+        offset: int = 0,
         scope: CompiledAccessScope | None = None,
     ) -> list[SearchHit]:
         if not query.strip():
@@ -188,7 +224,32 @@ class RetrievalService:
             principals=principals,
             filters=filters or SearchFilters(),
             limit=limit,
+            offset=offset,
             scope=scope,
+        )
+
+    def search_semantic_page(
+        self,
+        query: str,
+        *,
+        principals: set[str],
+        filters: SearchFilters | None = None,
+        limit: int = 20,
+        offset: int = 0,
+        scope: CompiledAccessScope | None = None,
+    ) -> Page:
+        """``search_semantic`` plus an exact ``has_more``, via one extra hit."""
+        return Page.probe(
+            self.search_semantic(
+                query,
+                principals=principals,
+                filters=filters,
+                limit=limit + 1,
+                offset=offset,
+                scope=scope,
+            ),
+            offset=offset,
+            limit=limit,
         )
 
     def get_document(
@@ -296,12 +357,17 @@ class RetrievalService:
         principals: set[str],
         include_same_matter: bool = True,
         limit: int = 50,
+        offset: int = 0,
     ) -> dict | None:
         """Return graph-ready document context with explicit relation provenance.
 
         Stored graph edges remain distinguishable from deterministic context edges
         derived from a shared matter or thread.  Every returned document is independently
         authorization-checked and carries an exact citation.
+
+        The whole related set is resolved and authorized before it is paged, so
+        ``page.total`` is the exact number of visible related documents and the
+        edge lists are consistent with the documents on the returned page.
         """
 
         root = self.session.get(Document, document_id)
@@ -419,7 +485,10 @@ class RetrievalService:
                 item["document_id"],
             )
         )
-        related = related[: max(0, limit)]
+        # Page after sorting: `related` holds every visible related document, so
+        # the count below is exact rather than "as many as the limit allowed".
+        page = Page.slice(related, offset=max(0, offset), limit=max(0, limit))
+        related = page.items
         visible_ids = {item["document_id"] for item in related} | {root.id}
         citations_by_document = {
             root.id: root_summary["citations"],
@@ -480,7 +549,10 @@ class RetrievalService:
             "edges": [*visible_explicit_edges, *context_edges],
             "explicit_edges": visible_explicit_edges,
             "include_same_matter": include_same_matter,
+            # Rows on THIS page. page.total is how many exist in total — the two
+            # differ exactly when has_more is true.
             "result_count": len(related),
+            "page": page.as_dict(),
         }
 
     def traverse(
@@ -490,23 +562,24 @@ class RetrievalService:
         *,
         principals: set[str],
         limit: int = 100,
+        offset: int = 0,
     ) -> list[dict]:
+        """Stored relation edges whose BOTH endpoints the caller may see.
+
+        The limit is applied to visible edges, not to the rows read from SQL.
+        It used to be a SQL ``LIMIT`` ahead of the visibility filter, so a caller
+        asking for 100 edges got however many of the first 100 rows happened to
+        be visible — often far fewer, with no way to reach the rest. Rows are now
+        read in ordered batches and filtered as they come, until the requested
+        page is full or the edges run out.
+        """
         if not self._entity_visible(entity_type, entity_id, principals):
             return []
-        relations = self.session.scalars(
-            select(Relation)
-            .where(
-                ((Relation.from_type == entity_type) & (Relation.from_id == entity_id))
-                | ((Relation.to_type == entity_type) & (Relation.to_id == entity_id))
-            )
-            .limit(limit)
-        ).all()
+        relations = self._visible_relations(
+            entity_type, entity_id, principals=principals, limit=limit, offset=offset
+        )
         visible: list[dict] = []
         for relation in relations:
-            if not self._entity_visible(relation.from_type, relation.from_id, principals):
-                continue
-            if not self._entity_visible(relation.to_type, relation.to_id, principals):
-                continue
             visible.append(
                 {
                     "kind": relation.kind,
@@ -527,66 +600,254 @@ class RetrievalService:
             )
         return visible
 
+    def traverse_page(
+        self,
+        entity_type: str,
+        entity_id: str,
+        *,
+        principals: set[str],
+        limit: int = 100,
+        offset: int = 0,
+    ) -> Page:
+        """``traverse`` plus an exact ``has_more``, via one extra visible edge."""
+        return Page.probe(
+            self.traverse(
+                entity_type,
+                entity_id,
+                principals=principals,
+                limit=limit + 1,
+                offset=offset,
+            ),
+            offset=offset,
+            limit=limit,
+        )
+
+    def _visible_relations(
+        self,
+        entity_type: str,
+        entity_id: str,
+        *,
+        principals: set[str],
+        limit: int,
+        offset: int,
+    ) -> list[Relation]:
+        """Relation rows with both endpoints visible, filtered before the limit.
+
+        Ordered by id so a page is reproducible; the underlying query has no
+        natural order and an unordered offset can repeat and skip rows.
+        """
+        if limit <= 0:
+            return []
+        statement = (
+            select(Relation)
+            .where(
+                ((Relation.from_type == entity_type) & (Relation.from_id == entity_id))
+                | ((Relation.to_type == entity_type) & (Relation.to_id == entity_id))
+            )
+            .order_by(Relation.id)
+        )
+        wanted = offset + limit
+        kept: list[Relation] = []
+        scanned = 0
+        batch_size = max(wanted, _VERIFY_BATCH_MIN)
+        while len(kept) < wanted:
+            batch = self.session.scalars(
+                statement.offset(scanned).limit(batch_size)
+            ).all()
+            if not batch:
+                break
+            scanned += len(batch)
+            for relation in batch:
+                if not self._entity_visible(
+                    relation.from_type, relation.from_id, principals
+                ):
+                    continue
+                if not self._entity_visible(
+                    relation.to_type, relation.to_id, principals
+                ):
+                    continue
+                kept.append(relation)
+                if len(kept) >= wanted:
+                    break
+            if len(batch) < batch_size:
+                break
+        return kept[offset:]
+
+    def matter_visible(self, matter_id: str, principals: set[str]) -> bool:
+        """Whether the caller can see any document version filed under a matter.
+
+        The billing tools used to answer this by listing the first 1,000 matters
+        by title and testing membership, so a matter sorting after that prefix
+        was reported as unauthorized to a caller who could in fact read it.
+        """
+        return bool(matter_id) and bool(self.citations_for_matter(matter_id, principals))
+
     def list_matters(
         self,
         *,
         principals: set[str],
         limit: int = 100,
+        offset: int = 0,
         practice_area: str | None = None,
     ) -> list[dict]:
         """Matters visible to the caller; ``practice_area`` filters by ontology
-        node with SUBTREE semantics (a parent area matches its children)."""
+        node with SUBTREE semantics (a parent area matches its children).
+
+        Ordered by title, and the limit counts matters the caller can actually
+        see. The limit used to be a SQL ``LIMIT`` on all matters, applied before
+        both the practice-area filter and the per-matter visibility check, so
+        ``limit=100`` on a corpus of 1,300 matters examined the first 100 titles
+        and returned whichever subset survived — everything alphabetically later
+        was unreachable at any limit. Rows are now scanned in ordered batches and
+        filtered as they come, until the page is full or the matters run out.
+        """
+        if limit <= 0:
+            return []
         try:
             area_scope = self.config.ontology_facet("area_of_law")
             service_scope = self.config.ontology_facet("service")
         except ValueError:
             area_scope = None
             service_scope = None
-        matters = self.session.scalars(select(Matter).order_by(Matter.title).limit(limit)).all()
+
+        statement = select(Matter).order_by(Matter.title, Matter.id)
+        if practice_area is not None:
+            # SUBTREE semantics pushed into SQL: the node's descendants are a set
+            # the ontology can enumerate once, instead of an ancestors() call per
+            # scanned row. An unresolvable facet or an empty subtree matches
+            # nothing, exactly as the per-row check did.
+            subtree = self._practice_area_subtree(area_scope, practice_area)
+            if not subtree:
+                return []
+            statement = statement.where(Matter.practice_area.in_(sorted(subtree)))
+
+        offset = max(0, offset)
+        wanted = offset + limit
+        visible: list[Matter] = []
+        scanned = 0
+        batch_size = max(wanted, _VERIFY_BATCH_MIN)
+        citations_by_matter: dict[str, list[dict]] = {}
+        while len(visible) < wanted:
+            batch = self.session.scalars(
+                statement.offset(scanned).limit(batch_size)
+            ).all()
+            if not batch:
+                break
+            scanned += len(batch)
+            for matter in batch:
+                citations = self.citations_for_matter(matter.id, principals)
+                if not citations:
+                    continue
+                citations_by_matter[matter.id] = citations
+                visible.append(matter)
+                if len(visible) >= wanted:
+                    break
+            if len(batch) < batch_size:
+                break
+
         result: list[dict] = []
-        for matter in matters:
-            if practice_area is not None and (
-                area_scope is None
-                or matter.practice_area is None
-                or practice_area not in area_scope.ancestors(matter.practice_area)
-            ):
-                continue
-            citations = self.citations_for_matter(matter.id, principals)
-            if citations:
-                area_payload = None
-                if matter.practice_area:
-                    area_payload = {
-                        "id": matter.practice_area,
-                        "label": area_scope.label_of(matter.practice_area)
-                        if area_scope
+        for matter in visible[offset:]:
+            citations = citations_by_matter[matter.id]
+            area_payload = None
+            if matter.practice_area:
+                area_payload = {
+                    "id": matter.practice_area,
+                    "label": area_scope.label_of(matter.practice_area)
+                    if area_scope
+                    else None,
+                    "path": area_scope.path_labels(matter.practice_area)
+                    if area_scope and matter.practice_area in area_scope.visible
+                    else [],
+                }
+            result.append(
+                {
+                    "id": matter.id,
+                    "project_id": matter.project_id,
+                    "project": self.project_reference(matter.project_id),
+                    "title": matter.title,
+                    "reference_numbers": matter.reference_numbers,
+                    "practice_area": area_payload,
+                    "matter_kind": {
+                        "id": matter.matter_kind,
+                        "label": service_scope.label_of(matter.matter_kind)
+                        if service_scope
                         else None,
-                        "path": area_scope.path_labels(matter.practice_area)
-                        if area_scope and matter.practice_area in area_scope.visible
-                        else [],
                     }
-                result.append(
-                    {
-                        "id": matter.id,
-                        "project_id": matter.project_id,
-                        "project": self.project_reference(matter.project_id),
-                        "title": matter.title,
-                        "reference_numbers": matter.reference_numbers,
-                        "practice_area": area_payload,
-                        "matter_kind": {
-                            "id": matter.matter_kind,
-                            "label": service_scope.label_of(matter.matter_kind)
-                            if service_scope
-                            else None,
-                        }
-                        if matter.matter_kind
-                        else None,
-                        "visible_versions": len(citations),
-                        "citations": citations,
-                    }
-                )
+                    if matter.matter_kind
+                    else None,
+                    "visible_versions": len(citations),
+                    "citations": citations,
+                }
+            )
         return result
 
-    def search_decisions(self, query: str, *, principals: set[str], limit: int = 20) -> list[dict]:
+    def list_matters_page(
+        self,
+        *,
+        principals: set[str],
+        limit: int = 100,
+        offset: int = 0,
+        practice_area: str | None = None,
+    ) -> Page:
+        """``list_matters`` plus an exact ``has_more``, via one extra matter.
+
+        No ``total``: counting visible matters means running the per-matter
+        authorization check over every matter in the estate, which is the cost of
+        every page at once. ``has_more`` answers the question a caller actually
+        has, for the price of one extra row.
+        """
+        return Page.probe(
+            self.list_matters(
+                principals=principals,
+                limit=limit + 1,
+                offset=offset,
+                practice_area=practice_area,
+            ),
+            offset=offset,
+            limit=limit,
+        )
+
+    def _practice_area_subtree(self, area_scope, practice_area: str) -> set[str]:
+        """Every visible Area-of-Law node id at or below ``practice_area``."""
+        if area_scope is None:
+            return set()
+        return {
+            node_id
+            for node_id in area_scope.visible
+            if practice_area in area_scope.ancestors(node_id)
+        }
+
+    def search_decisions(
+        self, query: str, *, principals: set[str], limit: int = 20, offset: int = 0
+    ) -> list[dict]:
+        """Anonymized drafting rationale, ranked lexically and ACL-filtered.
+
+        Every authorized record is scored before the page is cut, so an offset
+        page is exact and ``search_decisions_page`` can report a real total.
+        """
+        return Page.slice(
+            self._scored_decisions(query, principals),
+            offset=max(0, offset),
+            limit=limit,
+        ).items
+
+    def search_decisions_page(
+        self, query: str, *, principals: set[str], limit: int = 20, offset: int = 0
+    ) -> Page:
+        """``search_decisions`` with an exact total.
+
+        Every authorized record has to be scored to rank any of them, so the size
+        of the result set is already known by the time the page is cut — unlike
+        the index-backed searches, this one can say how many matches exist.
+        """
+        return Page.slice(
+            self._scored_decisions(query, principals),
+            offset=max(0, offset),
+            limit=limit,
+        )
+
+    def _scored_decisions(self, query: str, principals: set[str]) -> list[dict]:
+        """Every authorized decision record matching ``query``, best first."""
         terms = _terms(query)
         rows = self.session.scalars(select(DecisionRecord)).all()
         scored: list[tuple[float, DecisionRecord, dict]] = []
@@ -619,7 +880,9 @@ class RetrievalService:
             score = _lexical_score(terms, _terms(haystack))
             if not terms or score > 0:
                 scored.append((score, row, citation))
-        scored.sort(key=lambda item: item[0], reverse=True)
+        # Record id breaks score ties, so two calls that page through the same
+        # result set cut it at the same places.
+        scored.sort(key=lambda item: (-item[0], item[1].id))
         return [
             {
                 "id": row.id,
@@ -635,7 +898,7 @@ class RetrievalService:
                 "score": round(score, 6),
                 "citations": [citation],
             }
-            for score, row, citation in scored[:limit]
+            for score, row, citation in scored
         ]
 
     def project_reference(self, project_id: str | None) -> dict | None:
@@ -805,13 +1068,31 @@ class RetrievalService:
         principals: set[str],
         filters: SearchFilters,
         limit: int,
+        offset: int = 0,
         scope: CompiledAccessScope | None = None,
     ) -> list[SearchHit]:
+        if offset < 0:
+            raise ValueError("offset must be non-negative")
+        if limit < 0:
+            raise ValueError("limit must be non-negative")
+        # +1 because the paged callers ask for one extra hit to decide has_more;
+        # a caller sitting exactly on the cap must not be refused for the probe.
+        if offset + limit > _MAX_RANKED_WINDOW + 1:
+            raise ValueError(
+                f"offset + limit must not exceed {_MAX_RANKED_WINDOW} for ranked search "
+                "(every page re-ranks the whole window). Narrow the search with "
+                "matter_id, doc_type, party, or a date range instead of paging deeper."
+            )
         # Query embedding and the optional rerank are both spend on the read path;
         # they belong to "search", not to whichever ingestion stage ran last.
         with usage_stage("search"):
             return self._search_opensearch(
-                query=query, principals=principals, filters=filters, limit=limit, scope=scope
+                query=query,
+                principals=principals,
+                filters=filters,
+                limit=limit,
+                offset=offset,
+                scope=scope,
             )
 
     def _select_document_version(
@@ -896,6 +1177,7 @@ class RetrievalService:
         principals: set[str],
         filters: SearchFilters,
         limit: int,
+        offset: int = 0,
         scope: CompiledAccessScope | None = None,
     ) -> list[SearchHit]:
         """Fuse ACL-scoped ranked legs, collapse version sprawl, re-verify in SQL.
@@ -927,12 +1209,21 @@ class RetrievalService:
             )
         index = OpenSearchIndex(self.config)
 
+        # Everything below ranks and authorizes the whole window (the page the
+        # caller asked for plus everything ahead of it) and slices at the end.
+        # An offset cannot be pushed into the index: the rows the index skips are
+        # not the rows the caller has already seen, because collapse and the ACL
+        # re-verify drop rows after the index has ranked them.
+        window = offset + limit
+
         # Metadata-only search: no query, so no legs to fuse — deterministic order.
         if not query or not query.strip():
             rows = index.search(
-                query_vector=None, scope=scope, filters=filters, limit=limit
+                query_vector=None, scope=scope, filters=filters, limit=window
             )
-            return self._materialize_metadata(rows, principals=principals, limit=limit)
+            return self._materialize_metadata(
+                rows, principals=principals, limit=window
+            )[offset:]
 
         query_terms = _terms(query)
         query_cf = query.casefold()
@@ -946,7 +1237,7 @@ class RetrievalService:
         # version-status boost, collapse and rerank all reorder, and a pool the size
         # of the answer can only ever surface what a single leg already ranked in its
         # own top-`limit`. The ranking stages need room to work.
-        pool = max(limit * retrieval.candidate_pool_factor, limit)
+        pool = max(window * retrieval.candidate_pool_factor, window)
         # A zero-weight leg is a disabled leg: it must not be embedded, queried, or
         # allowed to contribute candidates. It previously still filled result slots
         # at score 0.0, so "lexical off" quietly returned lexical hits ranked last.
@@ -1002,15 +1293,15 @@ class RetrievalService:
             query_terms=query_terms,
             collapse=retrieval.collapse_per_document,
             max_per_document=retrieval.max_chunks_per_document,
-            # _rerank reorders the fused top-20, so with rerank on the top 20 must
-            # be exact, not just the top `limit`.
-            needed=max(limit, 20) if retrieval.rerank_enabled else limit,
+            # _rerank reorders the fused top-`_RERANK_WINDOW`, so with rerank on
+            # that prefix must be exact, not just the top `window`.
+            needed=max(window, _RERANK_WINDOW) if retrieval.rerank_enabled else window,
         )
         hits.sort(key=lambda item: item.score, reverse=True)
 
         if retrieval.rerank_enabled:
             hits = self._rerank(query, hits)
-        return hits[:limit]
+        return hits[offset:window]
 
     def _materialize_metadata(
         self, rows: list[dict], *, principals: set[str], limit: int
@@ -1283,12 +1574,23 @@ class RetrievalService:
         return document.latest_final_version_id if document else None
 
     def _rerank(self, query: str, hits: list[SearchHit]) -> list[SearchHit]:
-        """LLM rerank the top-20 fused candidates with ``retrieval.rerank_model``.
+        """LLM rerank the leading fused candidates with ``retrieval.rerank_model``.
+
+        Reordering is confined to the first ``_RERANK_WINDOW`` hits — that is the
+        listing the model is shown — but nothing is dropped. This used to return
+        only what the model scored, which silently discarded two classes of hit:
+        everything past the window (so ``limit=50`` with rerank on could never
+        return more than 20 results) and any candidate inside the window the
+        model failed to emit a score for. Both are now appended in fused order
+        behind the scored ones, so rerank changes the order of a result set and
+        never its membership — which is what makes offset paging over it
+        coherent.
 
         On gateway error this raises — no silent fallback to the fused order."""
         if not hits:
             return hits
-        candidates = hits[:20]
+        candidates = hits[:_RERANK_WINDOW]
+        tail = hits[_RERANK_WINDOW:]
         by_version = {hit.version_id: hit for hit in candidates}
         listing = "\n".join(
             f"[{hit.version_id}] {hit.title or ''}: {hit.excerpt}" for hit in candidates
@@ -1310,14 +1612,17 @@ class RetrievalService:
             max_output_tokens=8000,
         )
         scored: list[SearchHit] = []
+        rated: set[str] = set()
         for entry in result.scores:
             hit = by_version.get(entry.id)
-            if hit is None:
+            if hit is None or entry.id in rated:
                 continue
             hit.score = entry.score
+            rated.add(entry.id)
             scored.append(hit)
         scored.sort(key=lambda item: item.score, reverse=True)
-        return scored
+        unrated = [hit for hit in candidates if hit.version_id not in rated]
+        return [*scored, *unrated, *tail]
 
     def _citation(
         self,
