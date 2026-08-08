@@ -163,7 +163,7 @@ def test_search_entities_tool_pages(factory) -> None:
     session = factory()
     try:
         seen: set[str] = set()
-        tool = party_resolution_tools(session, AppConfig(), seen)[0]
+        tool = party_resolution_tools(session, seen)[0]
         payload = json.loads(tool.handler({"query": "Nordwind", "limit": 4}))
         assert len(payload["results"]) == 4
         assert payload["page"]["has_more"] is True

@@ -227,6 +227,36 @@ class RetrievalConfig(BaseModel):
     clause_embeddings: bool = True
 
 
+class FirmConfig(BaseModel):
+    """Whose appliance this is — the one fact the entity layer cannot infer.
+
+    The firm appears on its own documents constantly: it signs the engagement letter,
+    it is on the letterhead, it is copied on every mail. Extraction read that as a
+    party and, 16 times on the 9,288-document run, filed the firm itself as a client
+    of the firm. There is no signal in a document that says "this one is us", so the
+    deployment says it once here and the insertion pipeline enforces it structurally
+    (pipeline.runner._effective_party_role) instead of asking a model not to.
+
+    Empty by default and inert when empty: an appliance nobody has told whose it is
+    must not guess, and a wrong name here would silently demote a real client.
+    ``aliases`` carries the other forms a firm writes itself in — the short name on
+    the letterhead, the historical partnership name, the English rendering.
+    """
+
+    name: str = ""
+    aliases: list[str] = Field(default_factory=list)
+
+    def is_self(self, candidate: str | None) -> bool:
+        """Whether a name on a document is this firm, compared the way entities are."""
+        from knowledge_index.entity_names import normalize_entity_name
+
+        normalized = normalize_entity_name(candidate)
+        if not normalized:
+            return False
+        known = {normalize_entity_name(form) for form in [self.name, *self.aliases]}
+        return normalized in known - {""}
+
+
 class EnvironmentConfig(BaseModel):
     """Caps that keep the RL-environment builder sparse and firm-specific."""
 
@@ -684,6 +714,7 @@ class AppConfig(BaseSettings):
     artifact_dir: Path = Path(".ki/artifacts")
     # The gateway model the reference /api/ask assistant plans and answers with.
     ask_model: str = Field(default_factory=_default_llm)
+    firm: FirmConfig = Field(default_factory=FirmConfig)
     pipeline: PipelineConfig = Field(default_factory=PipelineConfig)
     retrieval: RetrievalConfig = Field(default_factory=RetrievalConfig)
     environments: EnvironmentConfig = Field(default_factory=EnvironmentConfig)
