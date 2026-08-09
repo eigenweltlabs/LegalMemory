@@ -425,6 +425,14 @@ AREA_OF_LAW_INSTRUCTION = (
     "that best describes the practice area of the whole matter (not just this document) "
     "and put it in practice_area_node. Prefer the most specific fitting entry; null when "
     "genuinely unclear — never guess.\n"
+    "Call list_folder() FIRST and decide from the FOLDER, not from the document in front "
+    "of you. You see one file; the area is a property of the whole matter, and one file "
+    "cannot show it. A clinical trial agreement read alone is a contract, so matters full "
+    "of trial agreements, IRB memos and consent forms were filed under Contract Law — but "
+    "every transactional matter is contracts, which is why that answer carries no "
+    "information. The folder does show it: read the sibling filenames and ask which "
+    "practice group would staff this matter, then pick the area for THAT. What this "
+    "document IS belongs in the document type; what the MATTER is about belongs here.\n"
 )
 
 FILE_RELATION_SYSTEM = (
