@@ -39,11 +39,11 @@ import json
 from datetime import UTC, datetime
 
 from pydantic import BaseModel, Field
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from knowledge_index.config import AppConfig
-from knowledge_index.pipeline.providers import AgentTool
+from knowledge_index.pipeline.providers import AgentTool, chat_agent
 from knowledge_index.entity_names import normalize_entity_name
 from knowledge_index.db.models import (
     Artifact,
@@ -51,6 +51,7 @@ from knowledge_index.db.models import (
     DocumentVersion,
     DocumentVersionSource,
     FirmPerson,
+    FirmPracticeGroup,
     Matter,
     MatterProfileQueue,
     MatterTeam,
@@ -570,7 +571,7 @@ def profile_matter(session: Session, config: AppConfig, matter_id: str) -> Matte
         if resolved := service_scope.resolve(profile.matter_kind_node):
             matter.matter_kind = resolved
     matter.lifecycle = profile.lifecycle
-    apply_team(session, matter, profile)
+    apply_team(session, config, matter, profile)
     matter.profile = {
         "instrument": profile.instrument,
         "group_evidence": profile.group_evidence,
@@ -600,11 +601,122 @@ def normalize_group(value: str | None) -> str | None:
     if not value:
         return None
     group = value.strip().strip(" ,.-")
-    for suffix in (" Practice Group", " Practice", " Group", " Department", " Team"):
-        if group.endswith(suffix):
+    # Case-insensitively: a document writes "the Energy Enforcement &
+    # Investigations practice group" mid-sentence as readily as it writes
+    # "Energy Enforcement & Investigations Practice Group" in a letterhead, and
+    # a case-sensitive match kept the first one's trailing noun — leaving a
+    # group that matched nothing and no one.
+    lowered = group.casefold()
+    for suffix in (" practice group", " practice", " group", " department", " team"):
+        if lowered.endswith(suffix):
             group = group[: -len(suffix)].strip()
             break
-    return group.replace(" and ", " & ") or None
+    return group.replace(" and ", " & ").replace(" And ", " & ") or None
+
+
+class GroupJudgement(BaseModel):
+    """Whether a newly-seen group name is one the firm already has."""
+
+    same_as: str | None = Field(
+        default=None,
+        description="The EXACT name of the existing group this one also names, "
+        "copied from the list you were given. null when it is a different group.",
+    )
+    reason: str = Field(
+        description="One sentence: what in the two names or the evidence settles it."
+    )
+
+
+GROUP_SYSTEM = (
+    "You decide whether two names refer to the same practice group of one law firm.\n\n"
+    "A firm writes its own org chart loosely. The same group appears as 'Capital "
+    "Markets', 'Capital Markets & Structured Finance' and 'the Capital Markets "
+    "team' across three documents, and all three are one book of business. But a "
+    "firm can equally run 'Capital Markets' and a separate 'Structured Finance' "
+    "group, and merging those loses the distinction the firm draws.\n\n"
+    "So judge on the evidence you are given, not on how similar the words look. A "
+    "longer name that names the shorter one plus a specialisation is usually the "
+    "same group described more fully. Two names that share no head noun are "
+    "usually different groups. When the evidence does not settle it, answer null: "
+    "a firm with one group too many is repairable, a firm that has silently "
+    "merged two of its practices is not."
+)
+
+
+def resolve_group(
+    session: Session,
+    config: AppConfig,
+    raw: str | None,
+    *,
+    evidence: str | None = None,
+) -> str | None:
+    """The firm's own name for a group, creating it the first time it is seen.
+
+    Search-then-create against `firm_practice_groups`, the same discipline the
+    people get. Three layers, cheapest first:
+
+    1. Normalisation — case, "and"/"&", a trailing "practice group" or
+       "department". Deterministic, and it catches most repeat spellings.
+    2. The alias list — a spelling some earlier document used and that was
+       already resolved onto a group. This is what stops the same judgement being
+       paid for on every matter.
+    3. A model, once, shown the groups this estate already has and the phrase the
+       document used. Only reached for a spelling never seen before, and its
+       answer is written back as an alias so it is never asked twice.
+
+    Returns the group's canonical name. Nothing is merged that the model does not
+    affirm: an unrecognised spelling becomes its own group rather than being
+    attached to the nearest-looking one.
+    """
+    normalized = normalize_group(raw)
+    if not normalized:
+        return None
+    key = normalize_entity_name(normalized)
+    if not key:
+        return None
+
+    existing = session.scalars(select(FirmPracticeGroup)).all()
+    for group in existing:
+        if group.normalized_name == key or key in (group.aliases or []):
+            return group.name
+
+    if existing:
+        try:
+            judgement = chat_agent(
+                config.pipeline.stage("classify_matter").model,
+                config,
+                system=GROUP_SYSTEM,
+                user=(
+                    f"THIS FIRM'S PRACTICE GROUPS AS ALREADY RECORDED:\n"
+                    + "\n".join(f"  {group.name}" for group in existing)
+                    + f"\n\nA DOCUMENT NAMES THIS GROUP: {normalized}"
+                    + (f"\nWHERE IT SAYS SO: {evidence}" if evidence else "")
+                    + "\n\nIs this one of the groups above, or a different one?"
+                ),
+                tools=[],
+                final_schema=GroupJudgement,
+                trace_tags=["practice_group"],
+            )
+        except Exception:  # noqa: BLE001 - an unjudged group is still a group
+            judgement = None
+        if judgement is not None and judgement.same_as:
+            wanted = normalize_entity_name(normalize_group(judgement.same_as) or "")
+            for group in existing:
+                if group.normalized_name == wanted:
+                    # Record the spelling so the next matter resolves for free.
+                    group.aliases = sorted({*(group.aliases or []), key})
+                    session.flush()
+                    return group.name
+
+    group = FirmPracticeGroup(
+        name=normalized,
+        normalized_name=key,
+        aliases=[],
+        provenance={"first_seen_as": raw, "evidence": evidence},
+    )
+    session.add(group)
+    session.flush()
+    return group.name
 
 
 ROLE_PRECEDENCE = (
@@ -617,7 +729,9 @@ ROLE_PRECEDENCE = (
 )
 
 
-def apply_team(session: Session, matter: Matter, profile: MatterProfile) -> None:
+def apply_team(
+    session: Session, config: AppConfig, matter: Matter, profile: MatterProfile
+) -> None:
     """Record who works the matter, and take the matter's group from its owner.
 
     People are resolved by normalised name so the same lawyer across forty matters
@@ -633,6 +747,7 @@ def apply_team(session: Session, matter: Matter, profile: MatterProfile) -> None
     """
     if not profile.team:
         return
+    evidence = profile.group_evidence
     wanted: dict[tuple[str, str], TeamMember] = {}
     for member in profile.team:
         key = (normalize_entity_name(member.name or ""), (member.role or "").strip())
@@ -647,8 +762,13 @@ def apply_team(session: Session, matter: Matter, profile: MatterProfile) -> None
             select(FirmPerson).where(FirmPerson.normalized_name == normalized)
         )
         if person is None:
-            person = FirmPerson(name=member.name.strip(), title=member.title,
-                                practice_group=normalize_group(member.practice_group))
+            person = FirmPerson(
+                name=member.name.strip(),
+                title=member.title,
+                practice_group=resolve_group(
+                    session, config, member.practice_group, evidence=evidence
+                ),
+            )
             session.add(person)
             session.flush()
         else:
@@ -658,13 +778,18 @@ def apply_team(session: Session, matter: Matter, profile: MatterProfile) -> None
             if person.title is None and member.title:
                 person.title = member.title
             if person.practice_group is None and member.practice_group:
-                person.practice_group = normalize_group(member.practice_group)
+                person.practice_group = resolve_group(
+                    session, config, member.practice_group, evidence=evidence
+                )
         session.add(MatterTeam(matter_id=matter.id, person_id=person.id, role=role))
         rank = next(
             (i for i, r in enumerate(ROLE_PRECEDENCE) if r in role.lower()),
             len(ROLE_PRECEDENCE),
         )
-        group = normalize_group(member.practice_group) or person.practice_group
+        group = (
+            resolve_group(session, config, member.practice_group, evidence=evidence)
+            or person.practice_group
+        )
         if group and rank < best_rank:
             owner_group, best_rank = group, rank
     if owner_group:

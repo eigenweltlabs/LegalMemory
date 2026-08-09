@@ -488,6 +488,42 @@ class FirmPerson(TimestampMixin, Base):
         return value
 
 
+class FirmPracticeGroup(TimestampMixin, Base):
+    """One of the firm's own practice groups, with every spelling it goes by.
+
+    A group is an entity, not a label, for the same reason a party is: the firm
+    writes it differently in every document that mentions it, and free strings
+    make each spelling its own group. Before this table an estate held "Capital
+    Markets", "Capital Markets & Structured Finance", "Capital Markets &
+    Regulatory" and "Structured Finance" as four separate books, so a caller
+    asking what the capital markets group has done got a quarter of it and no
+    indication the rest existed.
+
+    ``aliases`` is what makes resolution stick. Case, ampersands and the trailing
+    "practice group"/"department" fold deterministically into
+    ``normalized_name``; anything past that — whether "Private Funds" names the
+    Funds & Asset Management group or a real second book — is a judgement a model
+    makes once, against the groups already recorded, and the answer is written
+    here so it is never re-litigated.
+    """
+
+    __tablename__ = "firm_practice_groups"
+    __table_args__ = (
+        UniqueConstraint(
+            "normalized_name", name="uq_firm_practice_groups_normalized_name"
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    # The spelling the firm is taken to use, and what tool results show.
+    name: Mapped[str] = mapped_column(String(120))
+    normalized_name: Mapped[str] = mapped_column(Text)
+    # Other spellings resolved onto this group, normalized, including the ones a
+    # model judged equivalent. Looked up before any model is asked again.
+    aliases: Mapped[list | None] = mapped_column(JSONVariant, default=list)
+    provenance: Mapped[dict | None] = mapped_column(JSONVariant)
+
+
 class MatterTeam(TimestampMixin, Base):
     """Which firm people work a matter, and in what role.
 
