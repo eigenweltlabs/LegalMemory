@@ -610,7 +610,25 @@ def create_mcp_server(
             "List matters that contain at least one version visible to the caller. Each row "
             "carries the matter's identity (title, reference numbers, practice area, kind) "
             "and visible_versions — the COUNT of document versions you could cite. The "
-            "row also states what the matter IS and whether it happened: `instrument` "
+            "`firm_team` lists this firm's own people on the matter — name, role "
+            "('Responsible Partner', 'Billing Partner', 'Lead Associate'), title and "
+            "their practice group — so 'who ran this' and 'what has this partner "
+            "done' are answered from the row. firm_person=... filters to a lawyer's "
+            "matters by name or surname. These are FIRM people, never clients or "
+            "opposing counsel; counterparties are in `parties` on document rows. "
+            "`practice_group` is the FIRM'S OWN practice book — 'Banking & Finance', "
+            "'Capital Markets', 'Funds & Asset Management', 'Healthcare & Life "
+            "Sciences' — the group of the partner who owns the matter, taken from the "
+            "paperwork that names them. `practice_groups` lists EVERY group with "
+            "someone on the matter, and the practice_group=... filter matches any of "
+            "them, so a financing staffed jointly by Banking & Finance and Tax is "
+            "returned to either. WHEN A QUESTION NAMES A PRACTICE "
+            "('our Banking & Finance matters', 'our funds'), SCOPE WITH "
+            "practice_group, NOT practice_area: the group is how the firm organises "
+            "itself, the area is what body of law applies, and they differ. A matter "
+            "about corporate entity formation can be filed in Funds & Asset "
+            "Management. "
+            "The row also states what the matter IS and whether it happened: `instrument` "
             "(revolving credit facility, term loan B, senior notes offering, chapter 11, "
             "fund formation), `principal_document` (the file that constitutes the matter), "
             "`summary`, and `lifecycle` — executed | closed | terminated | dormant | "
@@ -642,6 +660,8 @@ def create_mcp_server(
         offset: int = 0,
         practice_area: str | None = None,
         lifecycle: str | None = None,
+        practice_group: str | None = None,
+        firm_person: str | None = None,
         headers: dict[str, str] = CurrentHeaders(),
     ) -> dict:
         with audited_call(
@@ -656,6 +676,8 @@ def create_mcp_server(
                     offset=offset,
                     practice_area=practice_area,
                     lifecycle=lifecycle,
+                    practice_group=practice_group,
+                    firm_person=firm_person,
                 )
                 audit.update(
                     result_count=len(page.items),

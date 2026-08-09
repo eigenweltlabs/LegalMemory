@@ -34,16 +34,20 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from knowledge_index.config import AppConfig
+from knowledge_index.entity_names import normalize_entity_name
 from knowledge_index.db.models import (
+    Artifact,
     Document,
     DocumentVersion,
     DocumentVersionSource,
+    FirmPerson,
     Matter,
     MatterProfileQueue,
+    MatterTeam,
     SourceObject,
 )
 
@@ -68,6 +72,32 @@ class VersionFamily(BaseModel):
         description="The filename that governs — the executed or final one. null "
         "when every version is a draft and none supersedes the others.",
     )
+
+
+class TeamMember(BaseModel):
+    """One of this firm's people working the matter."""
+
+    name: str = Field(description="Full name as written, e.g. 'Claudia Merritt'.")
+    role: str = Field(
+        description="Role ON THIS MATTER, as the document words it: 'Responsible "
+        "Partner', 'Billing Partner', 'Lead Associate', 'Working Associate', "
+        "'Supervising Partner', 'Of Counsel', 'Paralegal'. The role is per matter — "
+        "the same partner is responsible on one and supervising on another."
+    )
+    title: str | None = Field(
+        default=None,
+        description="Their standing at the firm: Partner, Of Counsel, Associate, "
+        "Paralegal. null when not stated.",
+    )
+    practice_group: str | None = Field(
+        default=None,
+        description="The person's practice group, copied VERBATIM where the document "
+        "attaches one to their name — 'Banking & Finance', 'Funds & Asset "
+        "Management', 'Litigation Department'. This is the firm's org chart, not an "
+        "area of law, and it is never inferred from the subject matter. null when "
+        "the documents do not state it.",
+    )
+    email: str | None = Field(default=None, description="Firm email if one appears.")
 
 
 class MatterProfile(BaseModel):
@@ -107,6 +137,19 @@ class MatterProfile(BaseModel):
         "executed agreement, the filed petition, the offering memorandum. null when "
         "no single document does.",
     )
+    team: list[TeamMember] = Field(
+        default_factory=list,
+        description="Everyone at THIS FIRM who works the matter. Return the COMPLETE "
+        "team including anyone already listed as known — this replaces the stored "
+        "team, so omitting a known member removes them. Add people the documents "
+        "name that the known list is missing. Never include client contacts, "
+        "opposing counsel or other side's advisers: only this firm's own people.",
+    )
+    group_evidence: str | None = Field(
+        default=None,
+        description="The filename and the phrase that named the responsible partner "
+        "and their group, so the claim can be checked.",
+    )
     summary: str = Field(
         description="One sentence: who, what, and whether it happened."
     )
@@ -138,6 +181,13 @@ PROFILE_SYSTEM = (
     "from the document that would record the outcome, and remember that a "
     "termination notice or UCC-3 release is usually the ordinary closing mechanics "
     "of a deal that DID happen.\n\n"
+    "The firm's PRACTICE GROUP is declared, not deduced. A new-matter memorandum, "
+    "engagement letter or conflict-check memo names the responsible partner and the "
+    "group beside them — 'Responsible Partner, Banking & Finance'. Copy that group "
+    "verbatim. It is the firm's org chart and it is not the same question as the area "
+    "of law: a matter whose subject is corporate entity formation can be filed in "
+    "Funds & Asset Management, and only the memo shows it. If no document names a "
+    "group, return null rather than inferring one from the subject.\n\n"
     "Group versions from the listing as a whole. Drafts, redlines, near-finals and "
     "execution copies of one agreement belong together, ordered earliest to latest, "
     "with the governing one named.\n\n"
@@ -183,6 +233,70 @@ def _folder_view(session: Session, matter: Matter) -> str:
     return "\n".join(lines)
 
 
+def _intake_text(session: Session, matter: Matter, limit: int = 4000) -> str:
+    """The opening of the document a matter uses to describe itself.
+
+    The pass otherwise reads no document text, deliberately. This is the one
+    exception, because the firm's practice group and responsible partner are
+    STATED in the intake paperwork and nowhere else — "Responsible Partner,
+    Banking & Finance" — and inferring a practice from subject matter is exactly
+    the mistake that filed a fund matter under Corporate. One document, its head
+    only.
+    """
+    rows = session.execute(
+        select(SourceObject.path, DocumentVersion.content_hash)
+        .join(DocumentVersionSource, DocumentVersionSource.source_object_id == SourceObject.id)
+        .join(DocumentVersion, DocumentVersion.id == DocumentVersionSource.version_id)
+        .join(Document, Document.id == DocumentVersion.document_id)
+        .where(Document.matter_id == matter.id)
+    ).all()
+    wanted = ("new-matter", "matter-intake", "conflict-check", "engagement-letter",
+              "engagement-memo", "deal-summary", "closing-memo")
+    ranked = [
+        (order, path, chash)
+        for path, chash in rows
+        for order, key in enumerate(wanted)
+        if key in path.rsplit("/", 1)[-1].lower()
+    ]
+    if not ranked:
+        return ""
+    _, path, chash = min(ranked)
+    artifact = session.scalar(
+        select(Artifact).where(
+            Artifact.content_hash == chash, Artifact.kind == "structured_json"
+        )
+    )
+    text = ((artifact.payload or {}).get("text") if artifact else "") or ""
+    return f"\n\nINTAKE DOCUMENT — {path.rsplit('/', 1)[-1]}:\n{text[:limit]}"
+
+
+def _known_team(session: Session, matter: Matter) -> str:
+    """Who is already recorded on this matter.
+
+    Given to the agent so a re-run is a review rather than a fresh guess: it can
+    confirm the people already known, and add the ones a newly-arrived document
+    names. Without this every pass would re-derive the team from scratch and the
+    membership would flap as documents land.
+    """
+    rows = session.execute(
+        select(FirmPerson.name, MatterTeam.role, FirmPerson.title, FirmPerson.practice_group)
+        .join(MatterTeam, MatterTeam.person_id == FirmPerson.id)
+        .where(MatterTeam.matter_id == matter.id)
+        .order_by(MatterTeam.role, FirmPerson.name)
+    ).all()
+    if not rows:
+        return "\n\nKNOWN FIRM TEAM: none recorded yet."
+    lines = [
+        f"  {name} — {role}" + (f", {title}" if title else "")
+        + (f" ({group})" if group else "")
+        for name, role, title, group in rows
+    ]
+    return (
+        "\n\nKNOWN FIRM TEAM (already recorded — confirm these and ADD anyone the "
+        "documents name that is missing):\n" + "\n".join(lines)
+    )
+
+
 def build_prompt(session: Session, matter: Matter, config: AppConfig) -> str:
     """The user turn: the matter's identity, its folder, and the area menu."""
     area_scope = (
@@ -198,7 +312,9 @@ def build_prompt(session: Session, matter: Matter, config: AppConfig) -> str:
         f"MATTER {ref}\nTITLE: {matter.title}\n\n"
         f"FOLDER ({len(_folder_view(session, matter).splitlines())} files) — "
         f"path [version status, document date] extracted title:\n"
-        f"{_folder_view(session, matter)}{menu}"
+        f"{_folder_view(session, matter)}"
+        f"{_intake_text(session, matter)}"
+        f"{_known_team(session, matter)}{menu}"
     )
 
 
@@ -306,8 +422,10 @@ def profile_matter(session: Session, config: AppConfig, matter_id: str) -> Matte
         if resolved := service_scope.resolve(profile.matter_kind_node):
             matter.matter_kind = resolved
     matter.lifecycle = profile.lifecycle
+    apply_team(session, matter, profile)
     matter.profile = {
         "instrument": profile.instrument,
+        "group_evidence": profile.group_evidence,
         "principal_document": profile.principal_document,
         "summary": profile.summary,
         "evidence": profile.evidence,
@@ -321,6 +439,89 @@ def profile_matter(session: Session, config: AppConfig, matter_id: str) -> Matte
         row.last_error = None
         session.delete(row)
     return profile
+
+
+def normalize_group(value: str | None) -> str | None:
+    """One spelling for a group a firm writes several ways.
+
+    "Healthcare & Life Sciences Practice Group", "Litigation Department" and
+    "Banking and Finance" all name a group whose members would otherwise not match
+    each other, or a caller's filter. The firm's own wording is kept, minus the
+    organisational suffix.
+    """
+    if not value:
+        return None
+    group = value.strip().strip(" ,.-")
+    for suffix in (" Practice Group", " Practice", " Group", " Department", " Team"):
+        if group.endswith(suffix):
+            group = group[: -len(suffix)].strip()
+            break
+    return group.replace(" and ", " & ") or None
+
+
+ROLE_PRECEDENCE = (
+    "responsible partner",
+    "relationship partner",
+    "billing partner",
+    "supervising partner",
+    "lead partner",
+    "partner",
+)
+
+
+def apply_team(session: Session, matter: Matter, profile: MatterProfile) -> None:
+    """Record who works the matter, and take the matter's group from its owner.
+
+    People are resolved by normalised name so the same lawyer across forty matters
+    is one row, and their title and group are filled in from whichever matter
+    happened to state them — a partner named without a group on one matter is still
+    that partner.
+
+    The matter's practice group is then the RESPONSIBLE PARTNER's group, falling
+    back down the seniority order. That is how a firm actually files: a matter
+    belongs to the book of the partner who owns it, which is why moving a partner
+    moves their matters. Deriving it from subject matter instead is what filed a
+    fund matter under Corporate.
+    """
+    if not profile.team:
+        return
+    wanted: dict[tuple[str, str], TeamMember] = {}
+    for member in profile.team:
+        key = (normalize_entity_name(member.name or ""), (member.role or "").strip())
+        if key[0] and key[1]:
+            wanted[key] = member
+
+    session.execute(delete(MatterTeam).where(MatterTeam.matter_id == matter.id))
+    owner_group = None
+    best_rank = len(ROLE_PRECEDENCE)
+    for (normalized, role), member in wanted.items():
+        person = session.scalar(
+            select(FirmPerson).where(FirmPerson.normalized_name == normalized)
+        )
+        if person is None:
+            person = FirmPerson(name=member.name.strip(), title=member.title,
+                                practice_group=normalize_group(member.practice_group))
+            session.add(person)
+            session.flush()
+        else:
+            # Later documents fill gaps but never overwrite: the first statement of
+            # someone's group is as good as the fortieth, and churn here would move
+            # every matter that partner owns.
+            if person.title is None and member.title:
+                person.title = member.title
+            if person.practice_group is None and member.practice_group:
+                person.practice_group = normalize_group(member.practice_group)
+        session.add(MatterTeam(matter_id=matter.id, person_id=person.id, role=role))
+        rank = next(
+            (i for i, r in enumerate(ROLE_PRECEDENCE) if r in role.lower()),
+            len(ROLE_PRECEDENCE),
+        )
+        group = normalize_group(member.practice_group) or person.practice_group
+        if group and rank < best_rank:
+            owner_group, best_rank = group, rank
+    if owner_group:
+        matter.practice_group = owner_group
+    session.flush()
 
 
 def apply_version_families(

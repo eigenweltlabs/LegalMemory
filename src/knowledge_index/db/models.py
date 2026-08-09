@@ -437,11 +437,75 @@ class Matter(TimestampMixin, Base):
     # without it must read every document of every candidate — which agents did
     # inconsistently, including terminated matters in answers about live deals.
     lifecycle: Mapped[str | None] = mapped_column(String(20))
+    # The firm's OWN practice book for this matter ("Banking & Finance", "Funds &
+    # Asset Management"), distinct from practice_area, which is the area of LAW: a
+    # matter whose subject is corporate entity formation can be filed in the funds
+    # group, and only the firm's paperwork shows that. Denormalised from the
+    # responsible partner's group in `matter_team` — a matter belongs to the group
+    # of the partner who owns it — and cached here so scoping a practice is one
+    # indexed predicate rather than a join.
+    practice_group: Mapped[str | None] = mapped_column(String(120), index=True)
     # The rest of the matter-level profile: what the deal IS, which document
     # constitutes it, a one-line summary, and the evidence behind each. JSON rather
     # than columns because the useful fields are still being learned and a rubric
     # should not mint a migration; promote a field only once something filters on it.
     profile: Mapped[dict | None] = mapped_column(JSONVariant)
+
+
+class FirmPerson(TimestampMixin, Base):
+    """A lawyer or professional AT the firm, as distinct from a party to a matter.
+
+    Kept apart from ``Party`` deliberately. A party is someone the firm deals with;
+    a firm person is someone the firm staffs with. They answer different questions
+    — "which matters involve Nexford" versus "which matters does Merritt run" — and
+    conflating them would let a party filter match the firm's own lawyers and put
+    counsel on the other side of their own deal.
+
+    The practice group lives HERE rather than on the matter because that is where
+    the firm puts it: the paperwork says "Priya Anand, Responsible Partner,
+    Litigation Department". A matter's group is the group of the partner who owns
+    it, which is why the same person's matters move together when they move.
+    """
+
+    __tablename__ = "firm_people"
+    __table_args__ = (
+        UniqueConstraint("normalized_name", name="uq_firm_people_normalized_name"),
+        Index("ix_firm_people_practice_group", "practice_group"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    name: Mapped[str] = mapped_column(Text)
+    normalized_name: Mapped[str] = mapped_column(Text)
+    # Seniority as the firm writes it: Partner, Of Counsel, Associate, Paralegal.
+    title: Mapped[str | None] = mapped_column(String(120))
+    practice_group: Mapped[str | None] = mapped_column(String(120))
+    email: Mapped[str | None] = mapped_column(String(255))
+    provenance: Mapped[dict | None] = mapped_column(JSONVariant)
+
+    @validates("name")
+    def _normalize(self, _key: str, value: str) -> str:
+        self.normalized_name = normalize_entity_name(value or "")
+        return value
+
+
+class MatterTeam(TimestampMixin, Base):
+    """Which firm people work a matter, and in what role.
+
+    Role is the role ON THIS MATTER — responsible partner, billing partner, lead
+    associate — not the person's title, because the same partner is responsible on
+    one matter and merely supervising on another. A person can hold more than one
+    role on a matter, so the role is part of the key.
+    """
+
+    __tablename__ = "matter_team"
+    __table_args__ = (
+        Index("ix_matter_team_person", "person_id", "role"),
+    )
+
+    matter_id: Mapped[str] = mapped_column(ForeignKey("matters.id"), primary_key=True)
+    person_id: Mapped[str] = mapped_column(ForeignKey("firm_people.id"), primary_key=True)
+    role: Mapped[str] = mapped_column(String(60), primary_key=True)
+    provenance: Mapped[dict | None] = mapped_column(JSONVariant)
 
 
 class MatterProfileQueue(Base):

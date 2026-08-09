@@ -9,10 +9,11 @@ from pathlib import Path
 
 from pydantic import BaseModel
 from pydantic import Field as PydanticField
-from sqlalchemy import select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session, attributes
 
 from knowledge_index.config import AppConfig
+from knowledge_index.entity_names import normalize_entity_name
 from knowledge_index.db.models import (
     Artifact,
     Blob,
@@ -21,9 +22,11 @@ from knowledge_index.db.models import (
     DocumentVersion,
     DocumentVersionSource,
     EvalRecord,
+    FirmPerson,
+    Matter,
     MatterClient,
     MatterParty,
-    Matter,
+    MatterTeam,
     Party,
     Project,
     Relation,
@@ -712,6 +715,8 @@ class RetrievalService:
         offset: int = 0,
         practice_area: str | None = None,
         lifecycle: str | None = None,
+        practice_group: str | None = None,
+        firm_person: str | None = None,
     ) -> list[dict]:
         """Matters visible to the caller; ``practice_area`` filters by ontology
         node with SUBTREE semantics (a parent area matches its children), and
@@ -738,6 +743,46 @@ class RetrievalService:
         statement = select(Matter).order_by(Matter.title, Matter.id)
         if lifecycle is not None:
             statement = statement.where(Matter.lifecycle == lifecycle)
+        if practice_group is not None:
+            # Matches ANY group working the matter, not only the owning partner's.
+            # A financing staffed by Banking & Finance with Tax and Real Estate
+            # alongside is a Tax matter to the tax partner asking what their group
+            # has touched, and answering "no" because the responsible partner sits
+            # elsewhere is how a practice loses sight of its own work. The matter's
+            # own group still counts, so the owner is never missed when the team is
+            # unrecorded.
+            #
+            # Case- and ampersand-insensitive: the firm writes "Banking & Finance",
+            # a caller may type "Banking and Finance", and neither should miss.
+            wanted = practice_group.lower().replace(" and ", " & ").strip()
+            folded = func.lower(func.replace(Matter.practice_group, " and ", " & "))
+            statement = statement.where(
+                or_(
+                    folded == wanted,
+                    Matter.id.in_(
+                        select(MatterTeam.matter_id)
+                        .join(FirmPerson, FirmPerson.id == MatterTeam.person_id)
+                        .where(
+                            func.lower(
+                                func.replace(FirmPerson.practice_group, " and ", " & ")
+                            )
+                            == wanted
+                        )
+                    ),
+                )
+            )
+        if firm_person is not None:
+            # "Which matters does Merritt run" — matched on the resolver's own
+            # normalisation so a surname, a full name and a differently-punctuated
+            # spelling all land on the same lawyer.
+            needle = normalize_entity_name(firm_person)
+            statement = statement.where(
+                Matter.id.in_(
+                    select(MatterTeam.matter_id)
+                    .join(FirmPerson, FirmPerson.id == MatterTeam.person_id)
+                    .where(FirmPerson.normalized_name.like(f"%{needle}%"))
+                )
+            )
         if practice_area is not None:
             # SUBTREE semantics pushed into SQL: the node's descendants are a set
             # the ontology can enumerate once, instead of an ancestors() call per
@@ -780,8 +825,24 @@ class RetrievalService:
             if len(batch) < batch_size:
                 break
 
+        page_matters = visible[offset:]
+        team_by_matter: dict[str, list[dict]] = {}
+        for matter_id, person_name, title, group, role in self.session.execute(
+            select(
+                MatterTeam.matter_id, FirmPerson.name, FirmPerson.title,
+                FirmPerson.practice_group, MatterTeam.role,
+            )
+            .join(FirmPerson, FirmPerson.id == MatterTeam.person_id)
+            .where(MatterTeam.matter_id.in_([m.id for m in page_matters] or [""]))
+            .order_by(MatterTeam.role, FirmPerson.name)
+        ).all():
+            team_by_matter.setdefault(matter_id, []).append(
+                {"name": person_name, "role": role, "title": title,
+                 "practice_group": group}
+            )
+
         result: list[dict] = []
-        for matter in visible[offset:]:
+        for matter in page_matters:
             area_payload = None
             if matter.practice_area:
                 area_payload = {
@@ -830,6 +891,22 @@ class RetrievalService:
                     # MENTION rather than what the matter is, so a term loan that
                     # merely repays a revolver counts as a revolver.
                     "lifecycle": matter.lifecycle,
+                    "practice_group": matter.practice_group,
+                    # Who at the firm works it. A caller asking "what has this
+                    # partner done" or "who ran this" gets it from the row instead
+                    # of reading the matter's intake memo.
+                    "firm_team": team_by_matter.get(matter.id, []),
+                    # Every group with someone on this matter, owner first. A
+                    # cross-practice financing belongs to more than one book, and a
+                    # single value hides the others.
+                    "practice_groups": sorted(
+                        {
+                            member["practice_group"]
+                            for member in team_by_matter.get(matter.id, [])
+                            if member.get("practice_group")
+                        }
+                        | ({matter.practice_group} if matter.practice_group else set())
+                    ),
                     "instrument": (matter.profile or {}).get("instrument"),
                     "principal_document": (matter.profile or {}).get(
                         "principal_document"
@@ -886,6 +963,8 @@ class RetrievalService:
         offset: int = 0,
         practice_area: str | None = None,
         lifecycle: str | None = None,
+        practice_group: str | None = None,
+        firm_person: str | None = None,
     ) -> Page:
         """``list_matters`` plus an exact ``has_more``, via one extra matter.
 
@@ -901,6 +980,8 @@ class RetrievalService:
                 offset=offset,
                 practice_area=practice_area,
                 lifecycle=lifecycle,
+                practice_group=practice_group,
+                firm_person=firm_person,
             ),
             offset=offset,
             limit=limit,
