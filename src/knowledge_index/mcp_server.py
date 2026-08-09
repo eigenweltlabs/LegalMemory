@@ -690,6 +690,62 @@ def create_mcp_server(
                 session.close()
 
     @mcp.tool(
+        title="This firm's own lawyers and their practice groups",
+        tags={"read"},
+        description=(
+            "The firm's internal directory: the lawyers who staff matters, each with "
+            "their title (Partner, Counsel, Associate), the practice group they sit in, "
+            "the roles they hold ('Responsible Partner', 'Billing Partner', 'Lead "
+            "Associate') and matter_count — the COUNT of matters visible to you that "
+            "they work. These are THIS FIRM'S people. Clients, counterparties and "
+            "opposing counsel are not here; resolve those with resolve_entity. "
+            "Use this to find out what a practice group is called and who is in it "
+            "before scoping with list_matters(practice_group=...), and to get a "
+            "lawyer's name right before list_matters(firm_person=...) — both filters "
+            "match on the name as the firm writes it. "
+            "practice_group=... narrows the directory to one group, name=... matches a "
+            "full name or a surname. Someone appears only if you can see a matter they "
+            "are on, and matter_count counts only those matters. "
+            "The matters themselves are not listed here: open them with "
+            "list_matters(firm_person=...), which pages and carries each matter's "
+            "lifecycle, instrument and summary. `total` is exact."
+            + _PAGINATION_CONTRACT
+        )
+    )
+    def list_firm_people(
+        limit: int = 100,
+        offset: int = 0,
+        practice_group: str | None = None,
+        name: str | None = None,
+        headers: dict[str, str] = CurrentHeaders(),
+    ) -> dict:
+        with audited_call(
+            session_factory,
+            "mcp.list_firm_people",
+            headers,
+            config_provider=config_provider,
+        ) as (principals, audit):
+            limit, offset = _page_bounds(limit, offset, max_limit=250)
+            session, retrieval = service()
+            try:
+                page = retrieval.list_firm_people(
+                    principals=principals,
+                    limit=limit,
+                    offset=offset,
+                    practice_group=practice_group,
+                    name=name,
+                )
+                audit.update(
+                    result_count=len(page.items),
+                    has_more=page.has_more,
+                    offset=offset,
+                    practice_group=practice_group,
+                )
+                return _paged(page)
+            finally:
+                session.close()
+
+    @mcp.tool(
         title="Invoiced total and fees per task code",
         tags={"read"},
         description=(

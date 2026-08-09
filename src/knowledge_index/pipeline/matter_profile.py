@@ -23,14 +23,18 @@ a document cannot answer:
     which document constitutes it, did it actually happen, and which of these
     files are versions of one another.
 
-It deliberately does NOT re-read the documents. Re-reading would repeat work the
-per-document stages already paid for and would make the pass too expensive to run
-whenever a matter changes — and running it on every change is the whole design.
-A 78-file matter costs a few thousand tokens here.
+It works from the metadata the per-document stages already extracted rather than
+re-reading the folder: repeating that work would make the pass too expensive to run
+whenever a matter changes, and running it on every change is the whole design. A
+78-file matter costs a few thousand tokens here. The one thing it does read is the
+matter's intake paperwork, which it opens itself with `read_document`, because the
+responsible partner and the practice group they sit in are written there and are
+recorded nowhere else.
 """
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 
 from pydantic import BaseModel, Field
@@ -38,6 +42,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from knowledge_index.config import AppConfig
+from knowledge_index.pipeline.providers import AgentTool
 from knowledge_index.entity_names import normalize_entity_name
 from knowledge_index.db.models import (
     Artifact,
@@ -181,13 +186,23 @@ PROFILE_SYSTEM = (
     "from the document that would record the outcome, and remember that a "
     "termination notice or UCC-3 release is usually the ordinary closing mechanics "
     "of a deal that DID happen.\n\n"
-    "The firm's PRACTICE GROUP is declared, not deduced. A new-matter memorandum, "
-    "engagement letter or conflict-check memo names the responsible partner and the "
-    "group beside them — 'Responsible Partner, Banking & Finance'. Copy that group "
-    "verbatim. It is the firm's org chart and it is not the same question as the area "
-    "of law: a matter whose subject is corporate entity formation can be filed in "
-    "Funds & Asset Management, and only the memo shows it. If no document names a "
-    "group, return null rather than inferring one from the subject.\n\n"
+    "The firm's PRACTICE GROUP and its people are declared, not deduced, and finding "
+    "them is your FIRST job. The matter's own intake paperwork names the responsible "
+    "partner and the group beside them — 'Claudia Merritt, Responsible Partner, "
+    "Banking & Finance' — along with the billing partner and the associates staffed "
+    "on it. Pick the likeliest file from the FOLDER listing and read it with "
+    "read_document: a new-matter memorandum, engagement letter, conflict-check memo, "
+    "deal summary or closing memo, whichever this matter has. Nothing in the listing "
+    "reliably marks which file it is, so judge from the names and titles and read "
+    "more than one when the first does not name anybody — this is worth several "
+    "calls, because it is the only place these facts exist. Copy names, roles, titles "
+    "and groups VERBATIM. The group is the firm's org chart and it is not the same "
+    "question as the area of law: a matter whose subject is corporate entity "
+    "formation can be filed in Funds & Asset Management, and only the memo shows it. "
+    "If you have read the plausible files and none names a group, return null rather "
+    "than inferring one from the subject. Only this firm's own people belong in "
+    "`team` — never the client's staff, opposing counsel or the other side's "
+    "advisers.\n\n"
     "Group versions from the listing as a whole. Drafts, redlines, near-finals and "
     "execution copies of one agreement belong together, ordered earliest to latest, "
     "with the governing one named.\n\n"
@@ -197,10 +212,10 @@ PROFILE_SYSTEM = (
     "Service') describes every matter of its family and so says nothing — open its "
     "children before settling for one. Any non-null id must have appeared in a "
     "service_* result; null is a fine answer and better than a wrong one.\n\n"
-    "Everything else you need is already in the prompt — do not go looking for it. "
-    "Spend at most a handful of tool calls on the service taxonomy, then submit "
-    "your result. An answer with matter_kind_node null is worth far more than no "
-    "answer at all."
+    "Apart from the intake paperwork, everything you need is already in the prompt — "
+    "do not go re-reading the folder. Browse the service taxonomy, read the intake "
+    "documents, then submit. An answer with matter_kind_node null is worth far more "
+    "than no answer at all."
 )
 
 
@@ -233,41 +248,89 @@ def _folder_view(session: Session, matter: Matter) -> str:
     return "\n".join(lines)
 
 
-def _intake_text(session: Session, matter: Matter, limit: int = 4000) -> str:
-    """The opening of the document a matter uses to describe itself.
+def read_document_tool(session: Session, matter: Matter) -> AgentTool:
+    """Lets the agent read any file in the folder it is profiling.
 
-    The pass otherwise reads no document text, deliberately. This is the one
-    exception, because the firm's practice group and responsible partner are
-    STATED in the intake paperwork and nowhere else — "Responsible Partner,
-    Banking & Finance" — and inferring a practice from subject matter is exactly
-    the mistake that filed a fund matter under Corporate. One document, its head
-    only.
+    The pass works from extracted metadata for everything else, but the firm's
+    practice group and its responsible partner are STATED in the intake
+    paperwork and nowhere else — "Claudia Merritt, Responsible Partner, Banking
+    & Finance" — so that text has to be reachable.
+
+    Which file that is, is a judgement: it is an engagement letter in one matter,
+    a conflict-check memo in the next, a closing memo in a third, and the file
+    names agree on nothing. This used to pick it by matching seven substrings
+    against the filename, which found it in a minority of matters and returned
+    empty for the rest — and an empty intake reads to the model exactly like a
+    matter whose paperwork names no one, so it invented nothing and the team
+    came back blank. The folder listing already names every file; the model
+    picks from it and reads, which is the same judgement the rest of this
+    pipeline makes with a model rather than a pattern.
     """
-    rows = session.execute(
-        select(SourceObject.path, DocumentVersion.content_hash)
-        .join(DocumentVersionSource, DocumentVersionSource.source_object_id == SourceObject.id)
-        .join(DocumentVersion, DocumentVersion.id == DocumentVersionSource.version_id)
-        .join(Document, Document.id == DocumentVersion.document_id)
-        .where(Document.matter_id == matter.id)
-    ).all()
-    wanted = ("new-matter", "matter-intake", "conflict-check", "engagement-letter",
-              "engagement-memo", "deal-summary", "closing-memo")
-    ranked = [
-        (order, path, chash)
-        for path, chash in rows
-        for order, key in enumerate(wanted)
-        if key in path.rsplit("/", 1)[-1].lower()
-    ]
-    if not ranked:
-        return ""
-    _, path, chash = min(ranked)
-    artifact = session.scalar(
-        select(Artifact).where(
-            Artifact.content_hash == chash, Artifact.kind == "structured_json"
+
+    def read(args: dict) -> str:
+        wanted = str(args.get("path", "")).strip()
+        rows = session.execute(
+            select(SourceObject.path, DocumentVersion.content_hash)
+            .join(
+                DocumentVersionSource,
+                DocumentVersionSource.source_object_id == SourceObject.id,
+            )
+            .join(
+                DocumentVersion,
+                DocumentVersion.id == DocumentVersionSource.version_id,
+            )
+            .join(Document, Document.id == DocumentVersion.document_id)
+            .where(Document.matter_id == matter.id)
+        ).all()
+        # The listing shows paths relative to the estate root, so accept either
+        # form rather than making the model reconstruct a prefix it never saw.
+        match = next(
+            (
+                (path, chash)
+                for path, chash in rows
+                if path == wanted or path.split("/", 1)[-1] == wanted
+                or path.endswith("/" + wanted)
+            ),
+            None,
         )
+        if match is None:
+            return json.dumps(
+                {
+                    "error": f"no file {wanted!r} in this matter",
+                    "files": sorted(
+                        path.split("/", 1)[-1] if "/" in path else path
+                        for path, _ in rows
+                    ),
+                }
+            )
+        path, chash = match
+        artifact = session.scalar(
+            select(Artifact).where(
+                Artifact.content_hash == chash, Artifact.kind == "structured_json"
+            )
+        )
+        text = ((artifact.payload or {}).get("text") if artifact else "") or ""
+        if not text:
+            return json.dumps({"path": path, "error": "no extracted text for this file"})
+        return json.dumps({"path": path, "text": text}, ensure_ascii=False)
+
+    return AgentTool(
+        name="read_document",
+        description=(
+            "Read the extracted text of one file in this matter, by the path shown "
+            "in the FOLDER listing. Use it on the matter's own intake paperwork — "
+            "the new-matter form, engagement letter, conflict-check memo, deal or "
+            "closing summary, whatever this matter has — because that is where the "
+            "firm writes down its responsible partner and the practice group they "
+            "sit in. Read more than one if the first does not name them."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "required": ["path"],
+        },
+        handler=read,
     )
-    text = ((artifact.payload or {}).get("text") if artifact else "") or ""
-    return f"\n\nINTAKE DOCUMENT — {path.rsplit('/', 1)[-1]}:\n{text[:limit]}"
 
 
 def _known_team(session: Session, matter: Matter) -> str:
@@ -313,7 +376,6 @@ def build_prompt(session: Session, matter: Matter, config: AppConfig) -> str:
         f"FOLDER ({len(_folder_view(session, matter).splitlines())} files) — "
         f"path [version status, document date] extracted title:\n"
         f"{_folder_view(session, matter)}"
-        f"{_intake_text(session, matter)}"
         f"{_known_team(session, matter)}{menu}"
     )
 
@@ -397,9 +459,12 @@ def profile_matter(session: Session, config: AppConfig, matter_id: str) -> Matte
             system=PROFILE_SYSTEM,
             user=build_prompt(session, matter, config),
             tools=(
-                service_navigation_tools(service_scope, visited)
-                if service_scope is not None
-                else []
+                [read_document_tool(session, matter)]
+                + (
+                    service_navigation_tools(service_scope, visited)
+                    if service_scope is not None
+                    else []
+                )
             ),
             final_schema=MatterProfile,
             trace_tags=["matter_profile"],

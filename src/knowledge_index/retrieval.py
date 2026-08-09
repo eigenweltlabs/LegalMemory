@@ -987,6 +987,84 @@ class RetrievalService:
             limit=limit,
         )
 
+    def list_firm_people(
+        self,
+        *,
+        principals: set[str],
+        limit: int = 100,
+        offset: int = 0,
+        practice_group: str | None = None,
+        name: str | None = None,
+    ) -> Page:
+        """The firm's own lawyers, with the group they sit in and how many
+        visible matters each works.
+
+        This is the directory behind the ``firm_person`` and ``practice_group``
+        filters on ``list_matters``. Without it a caller has to already know how
+        a name is spelled before it can filter by one, and a filter you can only
+        use when you know the answer is not a filter.
+
+        A person is listed only when the caller can see at least one matter they
+        are on, and ``matter_count`` counts only those — so the directory never
+        leaks the shape of an estate the caller has no access to.
+        """
+        if limit <= 0:
+            return Page(items=[], offset=max(0, offset), limit=0, has_more=False)
+        statement = select(FirmPerson).order_by(FirmPerson.name, FirmPerson.id)
+        if practice_group is not None:
+            wanted = practice_group.lower().replace(" and ", " & ").strip()
+            statement = statement.where(
+                func.lower(func.replace(FirmPerson.practice_group, " and ", " & "))
+                == wanted
+            )
+        if name is not None:
+            statement = statement.where(
+                FirmPerson.normalized_name.like(f"%{normalize_entity_name(name)}%")
+            )
+        people = self.session.scalars(statement).all()
+        if not people:
+            return Page(items=[], offset=max(0, offset), limit=limit, has_more=False)
+
+        assignments = self.session.execute(
+            select(MatterTeam.person_id, MatterTeam.matter_id, MatterTeam.role).where(
+                MatterTeam.person_id.in_([p.id for p in people])
+            )
+        ).all()
+        # One authorization pass over every matter in the directory, rather than
+        # per person: the same matter is staffed by several people, and asking
+        # once per person would re-check it once per seat.
+        visible = self._visible_version_counts(
+            sorted({matter_id for _, matter_id, _ in assignments}), principals
+        )
+        matters_by_person: dict[str, set[str]] = {}
+        roles_by_person: dict[str, set[str]] = {}
+        for person_id, matter_id, role in assignments:
+            if not visible.get(matter_id):
+                continue
+            matters_by_person.setdefault(person_id, set()).add(matter_id)
+            if role:
+                roles_by_person.setdefault(person_id, set()).add(role)
+
+        rows = [
+            {
+                "id": person.id,
+                "name": person.name,
+                "title": person.title,
+                "practice_group": person.practice_group,
+                "email": person.email,
+                "roles": sorted(roles_by_person.get(person.id, ())),
+                # Collection row: the count, not the matters. Open them with
+                # list_matters(firm_person=...), which pages and carries the
+                # metadata a caller needs to choose among them.
+                "matter_count": len(matters_by_person.get(person.id, ())),
+            }
+            for person in people
+            if matters_by_person.get(person.id)
+        ]
+        # The whole directory is materialized and authorized above, so `total`
+        # here is the real number of people the caller can see, not a bound.
+        return Page.slice(rows, offset=max(0, offset), limit=limit)
+
     def _practice_area_subtree(self, area_scope, practice_area: str) -> set[str]:
         """Every visible Area-of-Law node id at or below ``practice_area``."""
         if area_scope is None:

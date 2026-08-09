@@ -520,6 +520,7 @@ def test_mcp_exposes_granular_tools(
         "download_document",
         "find_related_documents",
         "get_document",
+        "list_firm_people",
         "list_invoices",
         "list_matters",
         "list_taxonomies",

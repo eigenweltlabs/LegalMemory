@@ -213,10 +213,17 @@ description — read them. The ones that carry most questions:
 - get_document — read one document's text, paginated.
 - find_related_documents / traverse — stored relations with the evidence that
   established them.
-- list_matters — the matter inventory; takes practice_area too.
+- list_matters — the matter inventory. Each row states what the matter IS
+  (instrument, principal_document, summary), whether it happened
+  (lifecycle: executed | closed | terminated | dormant | in_progress), and
+  who ran it (firm_team, practice_group, practice_groups). Filters:
+  practice_area, lifecycle, practice_group, firm_person.
+- list_firm_people — this firm's own lawyers: title, practice group, roles,
+  matter count. The directory behind the practice_group and firm_person
+  filters; use it to learn what a group is called and who is in it.
 - resolve_entity, search_decisions, billing_rollup, list_invoices,
-  preview_search_scope — entities, drafting rationale, matter billing, and
-  what this identity can see.
+  preview_search_scope — outside entities (clients, counterparties), drafting
+  rationale, matter billing, and what this identity can see.
 
 Every list-shaped tool returns `{results, page}`, not a bare list.
 `page.has_more: true` means more matched than you were shown; the next page
@@ -273,6 +280,18 @@ whole subtree, so a parent area covers its children. Never enumerate a
 practice by reading matters one at a time: it is slower by two orders of
 magnitude, it misses every matter you did not reach before you stopped, and
 the filter already knows the answer.
+
+**A practice GROUP is not a practice area.** The group is how the firm
+organises itself — "Banking & Finance", "Capital Markets", "Funds & Asset
+Management", "Healthcare & Life Sciences" — and it is the group of the
+partner who owns the matter. The area is which body of law applies. They
+differ: a corporate formation run by the funds partners is a Funds & Asset
+Management matter. When the question names a practice the way the firm
+would ("our Banking & Finance matters", "the funds team's"), scope with
+`list_matters(practice_group=...)`, not practice_area. The filter matches
+every group with someone on the matter, so a jointly staffed deal is
+returned to each of them. Check the group's name and who is in it with
+list_firm_people first.
 
 **Answer a question about a set by narrowing, not by walking — and then be
 complete.** "Which matters", "how many", "pull every" and "have we ever" are
