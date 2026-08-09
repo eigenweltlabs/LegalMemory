@@ -812,10 +812,9 @@ class PipelineRunner:
                 else []
             ),
             final_schema=MatterClassification,
-            max_iters=100,
-            # Service listings with definitions can exceed the default cap, and a
-            # truncated listing hides the right candidate. Effectively no truncation.
-            max_tool_result_chars=200_000,
+            # Nothing here is capped: a truncated service listing hides the right
+            # candidate, and an exhausted turn budget makes the agent give up
+            # mid-investigation — both produce confident wrong metadata.
             trace_tags=trace_tags,
             result_validator=validate_classification,
         )
@@ -1074,8 +1073,6 @@ class PipelineRunner:
                 ensure_ready=self.ensure_source_object_ready,
             ),
             final_schema=FileRelationResult,
-            max_iters=100,
-            max_tool_result_chars=24000,
             result_validator=validate_opened_refs,
             trace_tags=trace_tags,
         )
@@ -2054,13 +2051,11 @@ class PipelineRunner:
             ),
             tools=tools,
             final_schema=DocumentMetadata,
-            max_iters=40,
             # Reasoning models account internal reasoning against max_tokens. Keep enough
             # room for both reasoning and the dense, clause-heavy JSON response.
             # Ontology listings are bounded (~25KB for the largest sibling list) and
             # must NEVER be cut: a truncated list means the right candidate is
             # invisible and the walk fails silently. Effectively no truncation.
-            max_tool_result_chars=200_000,
             result_validator=validate_metadata,
             trace_tags=trace_tags,
         )

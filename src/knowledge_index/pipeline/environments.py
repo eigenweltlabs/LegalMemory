@@ -165,7 +165,6 @@ class EnvironmentBuilder:
                             ensure_ascii=False,
                         ),
                         schema=EvalGeneration,
-                        max_output_tokens=3000,
                     )
                 except Exception:
                     result.errors += 1

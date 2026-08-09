@@ -140,7 +140,17 @@ PROFILE_SYSTEM = (
     "of a deal that DID happen.\n\n"
     "Group versions from the listing as a whole. Drafts, redlines, near-finals and "
     "execution copies of one agreement belong together, ordered earliest to latest, "
-    "with the governing one named."
+    "with the governing one named.\n\n"
+    "For matter_kind_node use the service_* tools: browse from service_roots, then "
+    "VERIFY a candidate with service_node and judge by its DEFINITION, never by "
+    "label similarity. A root's direct child ('Transactional Practice', 'Advisory "
+    "Service') describes every matter of its family and so says nothing — open its "
+    "children before settling for one. Any non-null id must have appeared in a "
+    "service_* result; null is a fine answer and better than a wrong one.\n\n"
+    "Everything else you need is already in the prompt — do not go looking for it. "
+    "Spend at most a handful of tool calls on the service taxonomy, then submit "
+    "your result. An answer with matter_kind_node null is worth far more than no "
+    "answer at all."
 )
 
 
@@ -276,8 +286,6 @@ def profile_matter(session: Session, config: AppConfig, matter_id: str) -> Matte
                 else []
             ),
             final_schema=MatterProfile,
-            max_iters=20,
-            max_tool_result_chars=200_000,
             trace_tags=["matter_profile"],
         )
     except Exception as exc:  # noqa: BLE001 - a failed profile must not fail the run

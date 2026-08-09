@@ -236,9 +236,9 @@ def chat_agent(
     user: str,
     tools: list[AgentTool],
     final_schema: type[SchemaT],
-    max_iters: int = 6,
+    max_iters: int | None = None,
     max_output_tokens: int | None = None,
-    max_tool_result_chars: int = 6000,
+    max_tool_result_chars: int | None = None,
     result_validator: Callable[[SchemaT], str | None] | None = None,
     trace_tags: list[str] | None = None,
 ) -> SchemaT:
@@ -295,12 +295,20 @@ def chat_agent(
     repeat_signature: str | None = None
     repeat_count = 0
 
-    for iteration in range(max_iters):
-        # Give the agent freedom to inspect evidence, but make the bounded loop
-        # actually converge: on the final turn it must submit the typed result
-        # instead of spending its last chance on another read-only tool call.
+    # No turn limit by default. Every cap on this loop has cost us more than it
+    # saved: the agent stops mid-investigation and raises ModelOutputInvalid, the
+    # stage retries the whole interaction, and if it keeps failing the document's
+    # metadata is decided by whatever survived — which is how a $700M term loan
+    # came to be filed under Real Property Law. An agent that has not answered yet
+    # needs another turn, not a refusal.
+    iteration = -1
+    while max_iters is None or iteration + 1 < max_iters:
+        iteration += 1
+        # Give the agent freedom to inspect evidence, but make a BOUNDED loop
+        # actually converge: on its final permitted turn it must submit the typed
+        # result rather than spend its last chance on another read-only call.
         tool_choice: str | dict = "auto"
-        if iteration == max_iters - 1:
+        if max_iters is not None and iteration == max_iters - 1:
             tool_choice = {"type": "function", "function": {"name": submit}}
         response = _post_to_gateway(
             f"{base}/v1/chat/completions",
@@ -418,13 +426,20 @@ def chat_agent(
                 {
                     "role": "tool",
                     "tool_call_id": call.get("id"),
-                    "content": str(result)[:max_tool_result_chars],
+                    # Never truncated by default: a clipped tool result is
+                    # evidence cut mid-structure, and the agent then reasons from
+                    # a payload that looks complete and is not.
+                    "content": (
+                        str(result)[:max_tool_result_chars]
+                        if max_tool_result_chars
+                        else str(result)
+                    ),
                 }
             )
 
     raise ModelOutputInvalid(
         f"agent {model} did not submit a valid result within {max_iters} iterations"
-    )
+    )  # only reachable when a caller opted into a turn limit
 
 
 def _record_usage(response: httpx.Response, body: dict, model: str, *, call: str) -> None:
