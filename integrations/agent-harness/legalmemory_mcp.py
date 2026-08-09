@@ -356,23 +356,27 @@ path is what distinguishes them. Where a task asks you to pull or include
 documents, list the paths. State counts and "all/none" claims only after
 paging to `has_more: false`.
 
-`response.md` MUST end with a section headed `## Documents relied on`, listing
-one full `source_paths` value per line, for every document whose contents you
-used to reach a conclusion — grouped by matter, verbatim, no prose titles and
-no abbreviation. This section is part of the answer, not an appendix to it: an
-assertion about a document you do not list there is unsupported, and a document
-you list but did not open is a false citation. Write it LAST, from the rows you
-actually read, and do not shorten it when the answer runs long — it is the
-first thing a reviewer checks and the cheapest thing for you to get exactly
-right, because every path was already handed to you on the result row.
+`response.md` MUST end with a section headed `## Sources`, listing one full
+`source_paths` value per line, grouped by matter, verbatim, no prose titles and
+no abbreviation.
 
-UNLESS THE TASK ASKS FOR THE DOCUMENTS THEMSELVES. "Pull all our X matters
-plus the offering documents", "include the closing documents", "list every
-agreement" — that is asking for a delivery, not for your evidence, and the
-answer is every document you SAW in each qualifying matter, not the subset you
-opened. Enumerate those with search_filter on the matter, page to
-`has_more: false`, and list all of them. Restricting that list to what you read
-is the commonest way to lose a task you had already researched correctly: the
-matters were right, the documents were on the rows in front of you, and they
-were left out because they had not been opened.
+List every document that BEARS ON THE QUESTION — not the subset you happened to
+open. If a document is in a matter you put forward, and its subject is what the
+question asks about, it belongs in the list whether you read it, skimmed it or
+only saw it in the folder. The rows handed you the paths already; the listing
+tools give you the whole folder in one call. A reader of your answer wants to
+know where the answer lives, and "here is what I personally opened" is not that.
+
+Two failure modes, and the second is the common one. Listing a document you have
+no basis for is a false citation. Omitting one that plainly bears on the question
+because you did not open it is the mistake that loses tasks already researched
+correctly — the matters were right, the paths were on the rows in front of you,
+and the closing checklists and executed agreements were dropped from the answer
+for having gone unread.
+
+Write this section LAST and do not shorten it when the answer runs long; it is
+the first thing a reviewer checks and the cheapest thing to get exactly right.
+Where you relied on a document for a specific assertion, say so in the body of
+the answer next to the assertion — that is what supports a claim. This section
+is the map of the ground, not the record of your reading.
 """
