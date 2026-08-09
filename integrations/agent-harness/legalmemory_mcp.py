@@ -220,6 +220,8 @@ description — read them. The ones that carry most questions:
 - get_document — read one document's text, paginated.
 - find_related_documents / traverse — stored relations with the evidence that
   established them.
+- list_matter_documents — EVERY document in one matter, complete, not paged.
+  The folder view. Call it before deciding a matter lacks something.
 - list_matters — the matter inventory. Each row states what the matter IS
   (instrument, principal_document, summary), whether it happened
   (lifecycle: executed | closed | terminated | dormant | in_progress), and
@@ -249,15 +251,22 @@ bad search.
 2. **Narrow to the matter.** The hits carry matter_id. Once you know which
    matter the question is about, search again with that matter_id. Use
    search_filter with the matter_id and no query to see everything in it.
-3. **Read what you found.** Do not answer from search excerpts. An excerpt
+3. **Open the folder.** Once you know the matter, call
+   `list_matter_documents(matter_id)`. It returns EVERY document in it, in one
+   call, not a page — so you see the whole file before you judge it. A matter
+   routinely holds forty to seventy-five documents and a search page shows you
+   twenty; concluding from that page that a matter has no partnership
+   agreement, no closing set, no clawback, is the single commonest way to be
+   wrong here, and the document was always in the folder.
+4. **Read what you found.** Do not answer from search excerpts. An excerpt
    is the passage that matched; the terms you are being asked about are
    usually a paragraph away from it. get_document the candidates.
-4. **Traverse before you conclude.** Call find_related_documents on the
+5. **Traverse before you conclude.** Call find_related_documents on the
    documents you are relying on. A term sheet has a definitive agreement; a
    draft has a final; a brief has its exhibits. Those links are stored with
    evidence and a search will not recover them.
 
-Step 4 matters most when you are about to say something is *absent*. "There
+Steps 3 and 5 matter most when you are about to say something is *absent*. "There
 is no such document" is a strong claim, and traversing the relations of what
 you did find is how you check it rather than assume it.
 

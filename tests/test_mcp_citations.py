@@ -527,7 +527,14 @@ def test_mcp_document_reads_are_paginated_and_related_docs_are_discoverable(
             "get_document",
             {"document_id": "download-document", "offset": 5, "max_chars": 10},
         )
-        assert page["content"] == {"text": "56789abcde"}
+        # The requested window, then a marker IN THE TEXT saying the rest exists.
+        # content_page carries the same fact in a field, and a graded run showed a
+        # model reading one page of a 129,240-character agreement and reporting a
+        # clause absent from it — the field was there and was skimmed past.
+        assert page["content"]["text"].startswith("56789abcde")
+        assert "[DOCUMENT TRUNCATED" in page["content"]["text"]
+        assert "21 characters remain UNREAD" in page["content"]["text"]
+        assert "get_document(offset=15)" in page["content"]["text"]
         assert page["content_page"] == {
             "offset": 5,
             "returned_chars": 10,
@@ -535,6 +542,12 @@ def test_mcp_document_reads_are_paginated_and_related_docs_are_discoverable(
             "has_more": True,
             "next_offset": 15,
         }
+
+        # A window that reaches the end carries no marker: the marker means
+        # "unread text remains", never "this response was paginated".
+        whole = _call_mcp(client, "get_document", {"document_id": "download-document"})
+        assert "[DOCUMENT TRUNCATED" not in whole["content"]["text"]
+        assert whole["content_page"]["has_more"] is False
 
         related = _call_mcp(
             client,

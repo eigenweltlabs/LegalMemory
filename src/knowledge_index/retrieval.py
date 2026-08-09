@@ -1024,6 +1024,80 @@ class RetrievalService:
             limit=limit,
         )
 
+    def list_matter_documents(
+        self, matter_id: str, *, principals: set[str]
+    ) -> list[dict]:
+        """Every document in one matter, complete, in folder order.
+
+        A matter is a bounded set — tens of documents, occasionally a couple of
+        hundred — so this is the one listing that does not paginate. That is the
+        point of it. `search_filter(matter_id=...)` answers the same question a
+        page at a time, and an agent that asks once and reads twenty rows of a
+        seventy-five-document matter concludes the other fifty-five are not
+        there: on the last benchmark run one reported "no LPA exists in that
+        matter's file" while `Amended Governing Documents/lpa-amendment-no-1.docx`
+        sat in the folder, executed, titled "Amendment No. 1 to the Amended and
+        Restated Agreement of Limited Partnership". Seventeen graded criteria
+        were lost to that shape of mistake, every one of them a document the
+        caller could have reached.
+
+        It is deliberately the same view the matter-profile pass gets, which is
+        why that pass can judge a folder no single document reveals: path, title,
+        type, date, version standing. No excerpts and no citations — this says
+        what the matter CONTAINS, and get_document says what a document says.
+        """
+        rows = self.session.execute(
+            select(
+                SourceObject.path,
+                Document.id,
+                Document.title,
+                Document.doc_type,
+                Document.doc_date,
+                DocumentVersion.id,
+                DocumentVersion.status,
+            )
+            .join(
+                DocumentVersionSource,
+                DocumentVersionSource.source_object_id == SourceObject.id,
+            )
+            .join(
+                DocumentVersion,
+                DocumentVersion.id == DocumentVersionSource.version_id,
+            )
+            .join(Document, Document.id == DocumentVersion.document_id)
+            .where(Document.matter_id == matter_id)
+            .order_by(SourceObject.path)
+        ).all()
+        if not rows:
+            return []
+        authorized = self._bulk_authorized_sources(
+            [version_id for *_, version_id, _ in rows], principals
+        )
+        try:
+            type_scope = self.config.ontology_facet("document_type")
+        except ValueError:
+            type_scope = None
+        out: list[dict] = []
+        for path, doc_id, title, doc_type, doc_date, version_id, status in rows:
+            if not authorized.get(version_id):
+                continue
+            out.append(
+                {
+                    "source_path": path,
+                    "document_id": doc_id,
+                    "version_id": version_id,
+                    "title": title,
+                    "doc_type_label": (
+                        type_scope.label_of(doc_type)
+                        if type_scope and doc_type in type_scope.visible
+                        else None
+                    ),
+                    "doc_date": doc_date.isoformat() if doc_date else None,
+                    "version_status": status,
+                }
+            )
+        return out
+
     def list_firm_people(
         self,
         *,

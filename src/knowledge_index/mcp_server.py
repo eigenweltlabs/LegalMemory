@@ -367,17 +367,24 @@ def create_mcp_server(
             "binary. Structured Docling metadata is omitted unless "
             "include_structured_metadata is explicitly requested. PAGINATION: the text is "
             "paginated by CHARACTER, not by row, so the shape differs from the list tools. "
-            "content_page = {offset, returned_chars, total_chars, has_more, next_offset}; "
-            "while content_page.has_more is true you are holding a PREFIX of the document, "
-            "so call again with offset=content_page.next_offset until has_more is false "
-            "before concluding a term or clause is absent from the document."
+            "BY DEFAULT YOU GET THE WHOLE DOCUMENT — no cap, however long it runs, so a "
+            "plain get_document call is always safe to reason about and absence is a "
+            "claim you can make from it. max_chars is optional and only for a caller "
+            "that deliberately wants a window; pass it and you are holding a PREFIX. "
+            "content_page = {offset, returned_chars, total_chars, has_more, next_offset}, "
+            "and a cut-short page also ends with a bracketed TRUNCATED marker in the "
+            "text itself naming how much is unread. If you see that marker you have not "
+            "read the document: page on with offset=content_page.next_offset until "
+            "has_more is false before saying any term or clause is missing. For finding "
+            "one clause in a very long agreement, search_semantic with matter_id and "
+            "clause_type ranks the passage for you rather than making you read to it."
         )
     )
     def get_document(
         document_id: str,
         version_id: str | None = None,
         offset: int = 0,
-        max_chars: int = 30_000,
+        max_chars: int | None = None,
         include_structured_metadata: bool = False,
         headers: dict[str, str] = CurrentHeaders(),
     ) -> dict | None:
@@ -399,8 +406,8 @@ def create_mcp_server(
                     return None
                 if offset < 0:
                     raise ValueError("offset must be non-negative")
-                if not 1 <= max_chars <= 50_000:
-                    raise ValueError("max_chars must be between 1 and 50000")
+                if max_chars is not None and max_chars < 1:
+                    raise ValueError("max_chars must be at least 1")
                 payload = result.get("content")
                 if not isinstance(payload, dict):
                     result["content_page"] = {
@@ -412,8 +419,32 @@ def create_mcp_server(
                     }
                     return result
                 text = str(payload.get("text") or "")
-                end = min(len(text), offset + max_chars)
-                compact_content = {"text": text[offset:end]}
+                # No default cap. This tool's contract is "read one document", and a
+                # tool that promises a whole thing must not quietly hand back a
+                # prefix: a graded run had a model read one 30,000-character window
+                # of a 129,240-character partnership agreement and report that the
+                # agreement contained no clawback clause. The clause was there. A
+                # window is now something a caller asks for, never something the
+                # tool decides on its behalf.
+                end = len(text) if max_chars is None else min(len(text), offset + max_chars)
+                body = text[offset:end]
+                if end < len(text):
+                    # The marker goes in the TEXT, not only in content_page.
+                    # content_page already said has_more, and on a graded run the
+                    # agent passed no offset at all and then reported that a
+                    # 129,240-character partnership agreement "does not contain a
+                    # clawback section in its body" — the clause was in the four
+                    # fifths it never asked for. A field beside the text can be
+                    # skimmed past; a sentence where the text stops cannot.
+                    body += (
+                        f"\n\n[DOCUMENT TRUNCATED — you are holding characters "
+                        f"{offset:,}–{end:,} of {len(text):,}. "
+                        f"{len(text) - end:,} characters remain UNREAD. Call "
+                        f"get_document(offset={end}) to continue. Do not conclude "
+                        f"that anything is absent from this document until you "
+                        f"have read to the end.]"
+                    )
+                compact_content = {"text": body}
                 if include_structured_metadata:
                     compact_content.update(
                         {key: value for key, value in payload.items() if key != "text"}
@@ -764,6 +795,44 @@ def create_mcp_server(
                     practice_area=practice_area,
                 )
                 return _paged(page)
+            finally:
+                session.close()
+
+    @mcp.tool(
+        title="Everything in one matter",
+        tags={"read"},
+        description=(
+            "The COMPLETE file listing of one matter — every document you can see, in "
+            "folder order, with its source_path, title, document type, date and version "
+            "status. This is the matter's folder as a partner opening it would see it, "
+            "and it is the right first call once you know which matter a question is "
+            "about. NOT PAGINATED: what comes back is all of it, so absence here is "
+            "real absence and you may say 'this matter contains no X' on the strength "
+            "of it. That is exactly what you may NOT conclude from a page of "
+            "search_filter, which shows a window of a matter that may hold a hundred "
+            "documents — reading twenty rows and concluding the rest are not there is "
+            "how an answer comes to say a matter has no partnership agreement while its "
+            "executed partnership agreement sits in the folder. Rows carry no text: "
+            "this says what the matter CONTAINS, get_document says what a document SAYS."
+            + _COMPLETE_RESULT
+        ),
+    )
+    def list_matter_documents(
+        matter_id: str, headers: dict[str, str] = CurrentHeaders()
+    ) -> dict:
+        with audited_call(
+            session_factory,
+            "mcp.list_matter_documents",
+            headers,
+            config_provider=config_provider,
+        ) as (principals, audit):
+            session, retrieval = service()
+            try:
+                results = retrieval.list_matter_documents(
+                    matter_id, principals=principals
+                )
+                audit.update(result_count=len(results), matter_id=matter_id)
+                return {"results": results, "complete": True, "count": len(results)}
             finally:
                 session.close()
 
