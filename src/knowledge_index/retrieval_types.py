@@ -107,5 +107,14 @@ class SearchFilters:
     # matter_ids: restrict to this set of matters (ANDs with ``matter_id``). Carries the
     #   resolved practice_area matter set to the backend; an empty list is meaningful — it
     #   means the practice_area filter matched no matters, so the search returns nothing.
+    # practice_group / firm_person / lifecycle: the same story as practice_area — all
+    #   three are properties of the MATTER, not of a chunk, so RetrievalService resolves
+    #   them into ``matter_ids`` before the query reaches the backend, which never reads
+    #   these fields. practice_group matches any group staffed on the matter and
+    #   firm_person any of its lawyers, exactly as list_matters does, so a filtered
+    #   search and a filtered listing always describe the same set of matters.
     practice_area: str | None = None
+    practice_group: str | None = None
+    firm_person: str | None = None
+    lifecycle: str | None = None
     matter_ids: list[str] | None = None

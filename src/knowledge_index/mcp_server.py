@@ -141,6 +141,7 @@ def create_mcp_server(
             "match on a legal identifier (case number, Aktenzeichen, HRB, statute ref). "
             "party matches a resolved party_id or a party's exact canonical name. chunk_kind "
             "restricts to 'chunk' (document body), 'profile', or 'clause' chunks. "
+            "SCOPE A SEARCH TO A PRACTICE, A LAWYER OR A STATE: practice_group=... ('Banking & Finance', 'Funds & Asset Management') searches only matters that group works, firm_person=... only a given lawyer's, and lifecycle=... only matters in one state. These are the SAME filters list_matters takes and they resolve identically — spelling, ampersands and a surname all land where you mean — so 'the covenant language we use in Banking & Finance' is one scoped call rather than a search over the estate followed by a manual sift, and the matters you searched are exactly the matters that listing would show. They AND with practice_area, matter_id, doc_type and the rest. "
             "practice_area filters by an Area of Law ontology node id with SUBTREE semantics "
             "(a parent area matches its children) — it restricts to documents in matters of "
             "that practice area. Results are ordered by document date, newest first, so "
@@ -162,6 +163,9 @@ def create_mcp_server(
         chunk_kind: str | None = None,
         clause_type: str | None = None,
         practice_area: str | None = None,
+        practice_group: str | None = None,
+        firm_person: str | None = None,
+        lifecycle: str | None = None,
         limit: int = 20,
         offset: int = 0,
         headers: dict[str, str] = CurrentHeaders(),
@@ -186,6 +190,9 @@ def create_mcp_server(
                     clause_type=clause_type,
                     chunk_kind=chunk_kind or ("clause" if clause_type else None),
                     practice_area=practice_area,
+                    practice_group=practice_group,
+                    firm_person=firm_person,
+                    lifecycle=lifecycle,
                 )
                 found = retrieval.search_filter_page(
                     principals=principals, filters=filters, limit=limit, offset=offset
@@ -232,6 +239,17 @@ def create_mcp_server(
             "restricts to 'chunk' (body), 'profile', or 'clause' chunks. practice_area filters "
             "by an Area of Law ontology node id with SUBTREE semantics (a parent area matches "
             "its children), restricting to documents in matters of that practice area. "
+            "SCOPE A SEARCH TO A PRACTICE, A LAWYER OR A STATE: practice_group=... "
+            "('Banking & Finance', 'Funds & Asset Management') searches only the matters "
+            "that group works, firm_person=... only a given lawyer's, lifecycle=... only "
+            "matters in one state. These are the SAME filters list_matters takes and they "
+            "resolve identically — spelling, ampersands, a surname or an initial all land "
+            "where you mean — so the matters you just searched are exactly the matters that "
+            "listing would show. 'What covenant language do we use in Banking & Finance' is "
+            "one scoped call instead of a search across the whole estate followed by a "
+            "manual sift, and scoping first is also what stops a strong hit from another "
+            "practice being cited into an answer about this one. They AND with "
+            "practice_area, matter_id, doc_type and the rest. "
             "Results are ranked by relevance, so paging returns steadily weaker matches: "
             "when a page stops answering the question, narrow the filters instead of "
             "paging further. Each page re-ranks the whole window, so offset + limit must "
@@ -256,6 +274,9 @@ def create_mcp_server(
         chunk_kind: str | None = None,
         clause_type: str | None = None,
         practice_area: str | None = None,
+        practice_group: str | None = None,
+        firm_person: str | None = None,
+        lifecycle: str | None = None,
         limit: int = 8,
         offset: int = 0,
         headers: dict[str, str] = CurrentHeaders(),
@@ -284,6 +305,9 @@ def create_mcp_server(
                     clause_type=clause_type,
                     chunk_kind=chunk_kind or ("clause" if clause_type else None),
                     practice_area=practice_area,
+                    practice_group=practice_group,
+                    firm_person=firm_person,
+                    lifecycle=lifecycle,
                 )
                 found = retrieval.search_semantic_page(
                     query,

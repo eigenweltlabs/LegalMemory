@@ -257,7 +257,9 @@ class RetrievalService:
         """
         from knowledge_index.search_backend import OpenSearchIndex
 
-        filters = self._resolve_practice_area(filters or SearchFilters())
+        filters = self._resolve_practice_area(
+            self._resolve_matter_filters(filters or SearchFilters())
+        )
         if scope is None:
             scope = AccessService(self.session).compile_scope(
                 principals,
@@ -1573,6 +1575,62 @@ class RetrievalService:
             ],
         }
 
+    def _resolve_matter_filters(self, filters: SearchFilters) -> SearchFilters:
+        """Translate the matter-level filters into the matter-id set they cover.
+
+        A practice group, a lawyer and a lifecycle are properties of the MATTER, and
+        the index stores chunks. Rather than denormalising three mutable fields onto
+        every chunk of every document — where they would go stale the moment a
+        partner moves groups — they are resolved here against the same predicates
+        ``list_matters`` uses, and the backend is handed a matter-id set.
+
+        That shared predicate is the point: a caller who lists a group's matters and
+        then searches within that group must be looking at the same set, and would
+        have no way to notice if they were not.
+
+        An empty match is preserved rather than dropped, so a filter that covers no
+        matter returns nothing instead of silently widening to the whole estate.
+        """
+        wanted = (filters.practice_group, filters.firm_person, filters.lifecycle)
+        if not any(wanted):
+            return filters
+        statement = select(Matter.id)
+        if filters.lifecycle:
+            statement = statement.where(Matter.lifecycle == filters.lifecycle)
+        if filters.practice_group:
+            names = self._group_spellings(filters.practice_group)
+            if not names:
+                return replace(
+                    filters, practice_group=None, firm_person=None, lifecycle=None,
+                    matter_ids=[],
+                )
+            statement = statement.where(
+                or_(
+                    Matter.practice_group.in_(names),
+                    Matter.id.in_(
+                        select(MatterTeam.matter_id)
+                        .join(FirmPerson, FirmPerson.id == MatterTeam.person_id)
+                        .where(FirmPerson.practice_group.in_(names))
+                    ),
+                )
+            )
+        if filters.firm_person:
+            statement = statement.where(
+                Matter.id.in_(
+                    select(MatterTeam.matter_id)
+                    .join(FirmPerson, FirmPerson.id == MatterTeam.person_id)
+                    .where(self._person_name_matches(filters.firm_person))
+                )
+            )
+        matched = list(self.session.scalars(statement).all())
+        if filters.matter_ids is not None:
+            allowed = set(filters.matter_ids)
+            matched = [matter_id for matter_id in matched if matter_id in allowed]
+        return replace(
+            filters, practice_group=None, firm_person=None, lifecycle=None,
+            matter_ids=matched,
+        )
+
     def _resolve_practice_area(self, filters: SearchFilters) -> SearchFilters:
         """Translate a practice_area filter into the matter-id set it covers.
 
@@ -1628,6 +1686,7 @@ class RetrievalService:
 
         from knowledge_index.search_backend import OpenSearchIndex
 
+        filters = self._resolve_matter_filters(filters)
         # practice_area is a Matter attribute, not a chunk field; translate it into a
         # matter-id set the backend can filter on (SUBTREE semantics, same as list_matters).
         filters = self._resolve_practice_area(filters)
