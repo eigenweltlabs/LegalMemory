@@ -26,10 +26,11 @@ a document cannot answer:
 It works from the metadata the per-document stages already extracted rather than
 re-reading the folder: repeating that work would make the pass too expensive to run
 whenever a matter changes, and running it on every change is the whole design. A
-78-file matter costs a few thousand tokens here. The one thing it does read is the
-matter's intake paperwork, which it opens itself with `read_document`, because the
-responsible partner and the practice group they sit in are written there and are
-recorded nowhere else.
+78-file matter costs a few thousand tokens here. What it does read is whatever
+names the firm's own people on the matter — the responsible partner, the group they
+sit in, who else is staffed — because that is written inside the documents and
+recorded nowhere structured, and no rule can say which documents. The agent searches
+the folder's text and reads what it finds.
 """
 
 from __future__ import annotations
@@ -187,22 +188,28 @@ PROFILE_SYSTEM = (
     "termination notice or UCC-3 release is usually the ordinary closing mechanics "
     "of a deal that DID happen.\n\n"
     "The firm's PRACTICE GROUP and its people are declared, not deduced, and finding "
-    "them is your FIRST job. The matter's own intake paperwork names the responsible "
-    "partner and the group beside them — 'Claudia Merritt, Responsible Partner, "
+    "them is your FIRST job. Somewhere in this folder the firm has written who runs "
+    "this matter and which group they sit in — 'Claudia Merritt, Responsible Partner, "
     "Banking & Finance' — along with the billing partner and the associates staffed "
-    "on it. Pick the likeliest file from the FOLDER listing and read it with "
-    "read_document: a new-matter memorandum, engagement letter, conflict-check memo, "
-    "deal summary or closing memo, whichever this matter has. Nothing in the listing "
-    "reliably marks which file it is, so judge from the names and titles and read "
-    "more than one when the first does not name anybody — this is worth several "
-    "calls, because it is the only place these facts exist. Copy names, roles, titles "
+    "on it. WHERE it is written differs from firm to firm and from matter to matter, "
+    "and no filename tells you. It may be a new-matter memorandum or engagement "
+    "letter; it may equally be a signature block, the author line of a memo, the 'cc' "
+    "on a cover letter, a responsibilities column in a closing checklist, or the "
+    "timekeeper names on a bill. It is often SCATTERED: the partner in one file, the "
+    "associates in another, a specialist from a second group in a third. So work it "
+    "like a search, not a lookup. Use find_in_matter with the words a firm would "
+    "actually write, several different ways, and read whole documents with "
+    "read_document when a hit needs its context. Take as many calls as this needs — "
+    "it is the only place these facts exist, and a team of one when the matter is "
+    "staffed by five is a wrong answer, not a partial one. Assemble the complete "
+    "team from everything you found, wherever you found it. Copy names, roles, titles "
     "and groups VERBATIM. The group is the firm's org chart and it is not the same "
     "question as the area of law: a matter whose subject is corporate entity "
-    "formation can be filed in Funds & Asset Management, and only the memo shows it. "
-    "If you have read the plausible files and none names a group, return null rather "
-    "than inferring one from the subject. Only this firm's own people belong in "
-    "`team` — never the client's staff, opposing counsel or the other side's "
-    "advisers.\n\n"
+    "formation can be filed in Funds & Asset Management, and only the paperwork shows "
+    "it. Return null for a group only after searching for it and finding nothing — "
+    "never infer one from the subject. Only this firm's own people belong in `team`: "
+    "never the client's staff, opposing counsel or the other side's advisers, and "
+    "when a document names both sides, keep the ones this firm employs.\n\n"
     "Group versions from the listing as a whole. Drafts, redlines, near-finals and "
     "execution copies of one agreement belong together, ordered earliest to latest, "
     "with the governing one named.\n\n"
@@ -212,10 +219,11 @@ PROFILE_SYSTEM = (
     "Service') describes every matter of its family and so says nothing — open its "
     "children before settling for one. Any non-null id must have appeared in a "
     "service_* result; null is a fine answer and better than a wrong one.\n\n"
-    "Apart from the intake paperwork, everything you need is already in the prompt — "
-    "do not go re-reading the folder. Browse the service taxonomy, read the intake "
-    "documents, then submit. An answer with matter_kind_node null is worth far more "
-    "than no answer at all."
+    "The folder listing and the extracted fields answer everything else — read "
+    "documents to find the people and to settle what the matter IS, not to redo the "
+    "per-file extraction. Search out the team, browse the service taxonomy, then "
+    "submit. An answer with matter_kind_node null is worth far more than no answer "
+    "at all."
 )
 
 
@@ -248,29 +256,42 @@ def _folder_view(session: Session, matter: Matter) -> str:
     return "\n".join(lines)
 
 
-def read_document_tool(session: Session, matter: Matter) -> AgentTool:
-    """Lets the agent read any file in the folder it is profiling.
+def matter_reading_tools(session: Session, matter: Matter) -> list[AgentTool]:
+    """Let the agent read and search the folder it is profiling.
 
-    The pass works from extracted metadata for everything else, but the firm's
-    practice group and its responsible partner are STATED in the intake
-    paperwork and nowhere else — "Claudia Merritt, Responsible Partner, Banking
-    & Finance" — so that text has to be reachable.
+    Everything else in this pass comes from metadata the per-document stages
+    already extracted. The people do not: who works a matter, what they are
+    called, and which practice group they belong to are written inside the
+    documents and recorded nowhere structured.
 
-    Which file that is, is a judgement: it is an engagement letter in one matter,
-    a conflict-check memo in the next, a closing memo in a third, and the file
-    names agree on nothing. This used to pick it by matching seven substrings
-    against the filename, which found it in a minority of matters and returned
-    empty for the rest — and an empty intake reads to the model exactly like a
-    matter whose paperwork names no one, so it invented nothing and the team
-    came back blank. The folder listing already names every file; the model
-    picks from it and reads, which is the same judgement the rest of this
-    pipeline makes with a model rather than a pattern.
+    Where they are written varies by firm and by matter. A new-matter memo names
+    a responsible partner and a group beside them; a firm without that form has
+    them in the engagement letter's signature block, in the author line of a
+    memorandum, in the "cc" of a cover letter, in a closing-checklist column of
+    responsibilities, or in the timekeeper names on a bill. This must work for
+    all of it, so the agent gets both verbs — find text anywhere in the matter,
+    and read any file whole — and decides for itself which files carry the
+    answer. It is never told which filenames to look for.
+
+    That is a correction of what was here before: an "intake document" chosen by
+    matching seven substrings against the filename, truncated to its first 4,000
+    characters. Firms name their paperwork whatever they name it, so the match
+    failed on most matters; where it hit, a roster of who is staffed on the
+    matter sits well past a letter's fourth thousand character. Neither the
+    choice of file nor the amount read is a decision a rule can make.
     """
+    # One load per file per matter. `find_in_matter` needs every text and
+    # `read_document` usually asks for one it has already scanned, so caching
+    # here is the difference between one pass over the folder and one per call.
+    texts: dict[str, str] = {}
+    loaded = False
 
-    def read(args: dict) -> str:
-        wanted = str(args.get("path", "")).strip()
+    def _load() -> dict[str, str]:
+        nonlocal loaded
+        if loaded:
+            return texts
         rows = session.execute(
-            select(SourceObject.path, DocumentVersion.content_hash)
+            select(SourceObject.path, Artifact.payload)
             .join(
                 DocumentVersionSource,
                 DocumentVersionSource.source_object_id == SourceObject.id,
@@ -280,57 +301,119 @@ def read_document_tool(session: Session, matter: Matter) -> AgentTool:
                 DocumentVersion.id == DocumentVersionSource.version_id,
             )
             .join(Document, Document.id == DocumentVersion.document_id)
+            .join(
+                Artifact,
+                (Artifact.content_hash == DocumentVersion.content_hash)
+                & (Artifact.kind == "structured_json"),
+            )
             .where(Document.matter_id == matter.id)
         ).all()
-        # The listing shows paths relative to the estate root, so accept either
-        # form rather than making the model reconstruct a prefix it never saw.
-        match = next(
-            (
-                (path, chash)
-                for path, chash in rows
-                if path == wanted or path.split("/", 1)[-1] == wanted
-                or path.endswith("/" + wanted)
-            ),
-            None,
-        )
-        if match is None:
+        for path, payload in rows:
+            text = (payload or {}).get("text") or ""
+            if text:
+                texts[path] = text
+        loaded = True
+        return texts
+
+    def _resolve(wanted: str) -> str | None:
+        """Accept a path as the listing shows it, or as the estate stores it."""
+        wanted = wanted.strip()
+        for path in _load():
+            if path == wanted or path.split("/", 1)[-1] == wanted or path.endswith(
+                "/" + wanted
+            ):
+                return path
+        return None
+
+    def read(args: dict) -> str:
+        wanted = str(args.get("path", ""))
+        path = _resolve(wanted)
+        if path is None:
             return json.dumps(
                 {
-                    "error": f"no file {wanted!r} in this matter",
+                    "error": f"no readable file {wanted.strip()!r} in this matter",
                     "files": sorted(
-                        path.split("/", 1)[-1] if "/" in path else path
-                        for path, _ in rows
+                        p.split("/", 1)[-1] if "/" in p else p for p in _load()
                     ),
                 }
             )
-        path, chash = match
-        artifact = session.scalar(
-            select(Artifact).where(
-                Artifact.content_hash == chash, Artifact.kind == "structured_json"
-            )
-        )
-        text = ((artifact.payload or {}).get("text") if artifact else "") or ""
-        if not text:
-            return json.dumps({"path": path, "error": "no extracted text for this file"})
-        return json.dumps({"path": path, "text": text}, ensure_ascii=False)
+        # Whole text. A cap here is what hid the team roster before.
+        return json.dumps({"path": path, "text": _load()[path]}, ensure_ascii=False)
 
-    return AgentTool(
-        name="read_document",
-        description=(
-            "Read the extracted text of one file in this matter, by the path shown "
-            "in the FOLDER listing. Use it on the matter's own intake paperwork — "
-            "the new-matter form, engagement letter, conflict-check memo, deal or "
-            "closing summary, whatever this matter has — because that is where the "
-            "firm writes down its responsible partner and the practice group they "
-            "sit in. Read more than one if the first does not name them."
+    def find(args: dict) -> str:
+        query = str(args.get("query", "")).strip()
+        if not query:
+            return json.dumps({"error": "query is required"})
+        needle = query.casefold()
+        # Every matching line, whole, from every file — no per-file cap and no
+        # cut-off at some number of hits. A line is the unit because a name in a
+        # signature block, an author line or a cc list is one line, so the model
+        # can usually answer from the hits and read whole files only when it
+        # needs the surrounding paragraph.
+        hits = [
+            {
+                "path": path,
+                "lines": [
+                    line.strip()
+                    for line in text.splitlines()
+                    if needle in line.casefold()
+                ],
+            }
+            for path, text in sorted(_load().items())
+        ]
+        found = [hit for hit in hits if hit["lines"]]
+        return json.dumps(
+            {
+                "query": query,
+                "files_searched": len(hits),
+                "files_matched": len(found),
+                "matches": found,
+            },
+            ensure_ascii=False,
+        )
+
+    return [
+        AgentTool(
+            name="find_in_matter",
+            description=(
+                "Search the text of EVERY file in this matter for a phrase, "
+                "case-insensitively, and get back every matching line with the "
+                "file it came from. Nothing is capped or sampled: what comes back "
+                "is all of it, so a broad word returns a lot and a phrase returns "
+                "what you meant. This is how you find facts that are not in any "
+                "one predictable file — who the firm's people on this matter are, "
+                "what they are called, and which practice group they sit in. Try "
+                "the words a firm would actually write ('Responsible Partner', "
+                "'Billing Partner', 'Partner in Charge', 'Supervising', 'Attorney "
+                "of record', 'cc:', 'Prepared by', 'Group', 'Department', the "
+                "firm's email domain) and follow whatever the hits show you. "
+                "Search several ways before concluding that nobody is named."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {"query": {"type": "string"}},
+                "required": ["query"],
+            },
+            handler=find,
         ),
-        parameters={
-            "type": "object",
-            "properties": {"path": {"type": "string"}},
-            "required": ["path"],
-        },
-        handler=read,
-    )
+        AgentTool(
+            name="read_document",
+            description=(
+                "Read one file in this matter whole, by the path shown in the "
+                "FOLDER listing or returned by find_in_matter. Use it when a hit "
+                "needs its surrounding paragraph, or to read a document that looks "
+                "like it introduces the matter — a new-matter form, engagement "
+                "letter, conflict-check memo, closing summary, whatever this firm "
+                "happens to keep. Read as many as the matter needs."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"],
+            },
+            handler=read,
+        ),
+    ]
 
 
 def _known_team(session: Session, matter: Matter) -> str:
@@ -459,7 +542,7 @@ def profile_matter(session: Session, config: AppConfig, matter_id: str) -> Matte
             system=PROFILE_SYSTEM,
             user=build_prompt(session, matter, config),
             tools=(
-                [read_document_tool(session, matter)]
+                matter_reading_tools(session, matter)
                 + (
                     service_navigation_tools(service_scope, visited)
                     if service_scope is not None

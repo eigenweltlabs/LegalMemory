@@ -956,7 +956,7 @@ def test_external_console_reads_the_mcp_tool_list_from_the_server(
             return [tool.name for tool in await connected.list_tools()]
 
     assert [tool["name"] for tool in tools] == asyncio.run(registered())
-    assert len(tools) == 17  # 13 retrieval/scope tools + 4 ontology navigation tools
+    assert len(tools) == 18  # 14 retrieval/scope tools + 4 ontology navigation tools
     for tool in tools:
         # One line per tool: the model-facing description is a paragraph and must not
         # reach a console whose copy is deliberately terse.
