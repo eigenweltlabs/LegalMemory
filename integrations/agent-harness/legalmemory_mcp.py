@@ -207,6 +207,10 @@ description — read them. The ones that carry most questions:
   practice with subtree semantics. This is how a question about "every matter
   in the X practice" is answered — one filtered call, not a walk through the
   estate.
+- Both search tools also take **practice_group**, **firm_person** and
+  **lifecycle**, so a search can be scoped to one practice's matters, one
+  lawyer's, or one state, instead of searching the estate and sifting. They are
+  the same filters list_matters takes and they cover the same matters.
 - list_taxonomies — the facets and their ids. Practice-area ids live under
   `practice_areas` here; this is where a practice_area filter value comes from.
 - ontology_search / ontology_roots / ontology_children / ontology_node —
@@ -293,7 +297,12 @@ Management matter. When the question names a practice the way the firm
 would ("our Banking & Finance matters", "the funds team's"), scope with
 `list_matters(practice_group=...)`, not practice_area. The filter matches
 every group with someone on the matter, so a jointly staffed deal is
-returned to each of them. Check the group's name and who is in it with
+returned to each of them — and each row then says which it was: `group_match`
+is 'owner' when that group runs the matter and 'supporting' when it was merely
+staffed onto one another group runs. Mind the difference. "Which matters does
+the tax group have" means the ones it owns; a tax partner sitting on someone
+else's IPO is work the group has touched, and counting it inflates the answer.
+Say which set you are reporting. Check the group's name and who is in it with
 list_firm_people first.
 
 **Answer a question about a set by narrowing, not by walking — and then be
