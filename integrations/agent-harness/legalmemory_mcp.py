@@ -356,4 +356,14 @@ you list but did not open is a false citation. Write it LAST, from the rows you
 actually read, and do not shorten it when the answer runs long — it is the
 first thing a reviewer checks and the cheapest thing for you to get exactly
 right, because every path was already handed to you on the result row.
+
+UNLESS THE TASK ASKS FOR THE DOCUMENTS THEMSELVES. "Pull all our X matters
+plus the offering documents", "include the closing documents", "list every
+agreement" — that is asking for a delivery, not for your evidence, and the
+answer is every document you SAW in each qualifying matter, not the subset you
+opened. Enumerate those with search_filter on the matter, page to
+`has_more: false`, and list all of them. Restricting that list to what you read
+is the commonest way to lose a task you had already researched correctly: the
+matters were right, the documents were on the rows in front of you, and they
+were left out because they had not been opened.
 """
