@@ -157,12 +157,28 @@ class OntologyScope:
         ]
         return detail
 
+    def facet_of(self, node_id: str) -> str | None:
+        """Which facet a node belongs to — "doc_type", "area_of_law", "service",
+        "clause".
+
+        A scope can span several facets, and then a bare node id is ambiguous in
+        the way that matters most: each facet is taken by a DIFFERENT filter, so
+        an id from the wrong one silently matches nothing. Every node this scope
+        hands out carries its facet for that reason.
+        """
+        return self._facet_of.get(node_id)
+
     def describe(self, node_id: str) -> dict:
         node = self.artifact.nodes[node_id]
         child_count = sum(
             1 for c in self.artifact.children.get(node_id, ()) if c in self.visible
         )
         payload = {"id": node.id, "label": node.label, "children": child_count}
+        # Only when this scope actually spans more than one facet. A single-facet
+        # scope (every pipeline producer) has nothing to disambiguate, and the
+        # extra key would be noise in a prompt that is already long.
+        if len(self.active_facets) > 1:
+            payload["facet"] = self._facet_of.get(node_id)
         if node.definition:
             payload["definition"] = node.definition
         if node.synonyms:

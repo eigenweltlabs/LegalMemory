@@ -52,6 +52,24 @@ _COMPLETE_RESULT = (
 )
 
 
+# Which filter parameter takes an id from each facet. This is the whole reason a
+# node carries its facet: the ids look identical, they are taken by four
+# different parameters, and passing one to the wrong parameter matches nothing
+# and says nothing. Returned beside every node so the caller never has to guess.
+_FACET_FILTER = {
+    "doc_type": "doc_type",
+    "area_of_law": "practice_area",
+    "service": "matter_kind",
+    "clause": "clause_type",
+}
+
+
+def _with_filter(node: dict) -> dict:
+    """A node plus the name of the filter its id belongs in."""
+    facet = node.get("facet")
+    return {**node, "use_as_filter": _FACET_FILTER.get(facet)} if facet else node
+
+
 def _paged(page: Page, **extra) -> dict:
     """The response envelope every paginated tool returns."""
     return {"results": page.items, "page": page.as_dict(), **extra}
@@ -163,6 +181,7 @@ def create_mcp_server(
         chunk_kind: str | None = None,
         clause_type: str | None = None,
         practice_area: str | None = None,
+        matter_kind: str | None = None,
         practice_group: str | None = None,
         firm_person: str | None = None,
         lifecycle: str | None = None,
@@ -190,6 +209,7 @@ def create_mcp_server(
                     clause_type=clause_type,
                     chunk_kind=chunk_kind or ("clause" if clause_type else None),
                     practice_area=practice_area,
+                    matter_kind=matter_kind,
                     practice_group=practice_group,
                     firm_person=firm_person,
                     lifecycle=lifecycle,
@@ -274,6 +294,7 @@ def create_mcp_server(
         chunk_kind: str | None = None,
         clause_type: str | None = None,
         practice_area: str | None = None,
+        matter_kind: str | None = None,
         practice_group: str | None = None,
         firm_person: str | None = None,
         lifecycle: str | None = None,
@@ -305,6 +326,7 @@ def create_mcp_server(
                     clause_type=clause_type,
                     chunk_kind=chunk_kind or ("clause" if clause_type else None),
                     practice_area=practice_area,
+                    matter_kind=matter_kind,
                     practice_group=practice_group,
                     firm_person=firm_person,
                     lifecycle=lifecycle,
@@ -685,9 +707,10 @@ def create_mcp_server(
             "citations themselves are not in the listing: open the matter with search_filter "
             "(or a document with get_document) to get them. "
             "practice_area filters by an Area of Law ontology node id with SUBTREE semantics "
-            "(a parent area matches its children) — those ids come from list_taxonomies "
-            "under `practice_areas`, NOT from the ontology_* tools, which navigate "
-            "document types. "
+            "(a parent area matches its children); matter_kind does the same over the "
+            "Service facet — what the firm is DOING, which is a different question from "
+            "which law applies, and the two compose. Both ids come from ontology_search, "
+            "whose every result names the filter it belongs in. "
             "A matter's practice area is a property of the whole matter, so a matter can "
             "sit in one area while holding documents that read like another. "
             "Ordered by matter title; the limit counts matters you can actually see, so a "
@@ -703,6 +726,7 @@ def create_mcp_server(
         limit: int = 100,
         offset: int = 0,
         practice_area: str | None = None,
+        matter_kind: str | None = None,
         lifecycle: str | None = None,
         practice_group: str | None = None,
         firm_person: str | None = None,
@@ -719,6 +743,7 @@ def create_mcp_server(
                     limit=limit,
                     offset=offset,
                     practice_area=practice_area,
+                    matter_kind=matter_kind,
                     lifecycle=lifecycle,
                     practice_group=practice_group,
                     firm_person=firm_person,
@@ -1084,20 +1109,27 @@ def create_mcp_server(
             return result
 
     @mcp.tool(
-        title="Search the document-type ontology",
+        title="Search every ontology facet",
         tags={"read"},
         description=(
-            "Find document-type ontology nodes by name, synonym, or definition. Use the "
-            "returned node id as the doc_type filter in search_filter/search_semantic — "
-            "the filter matches the node AND everything below it (an interior node like "
-            "'Agreements' covers every agreement type). Ranked best-match first (exact "
-            "label, then prefix, then substring, then synonym, then definition), and "
-            "page.total is the exact number of nodes that matched."
+            "Find ontology nodes by name, synonym or definition across EVERY active "
+            "facet at once: document types, areas of law, services (what the firm is "
+            "DOING) and contractual clauses. This is where a filter value comes from. "
+            "Each result carries `facet` and `use_as_filter` — the name of the parameter "
+            "its id belongs in: doc_type, practice_area, matter_kind or clause_type. Pass "
+            "an id to the parameter the node names and no other; the ids look alike, and "
+            "one given to the wrong parameter matches nothing. facet='area_of_law' (or "
+            "doc_type / service / clause) narrows the search to one facet when you know "
+            "which you want. Every filter matches the node AND everything below it, so an "
+            "interior node like 'Agreements' covers every agreement type. Ranked "
+            "best-match first (exact label, then prefix, then substring, then synonym, "
+            "then definition), and page.total is the exact number of nodes that matched."
             + _PAGINATION_CONTRACT
         ),
     )
     def ontology_search(
         query: str,
+        facet: str | None = None,
         limit: int = 12,
         offset: int = 0,
         headers: dict[str, str] = CurrentHeaders(),
@@ -1109,7 +1141,10 @@ def create_mcp_server(
             # The ontology is an in-memory artifact, so asking for the whole
             # match set costs no more than asking for a page of it — which is
             # what makes an exact total free here.
-            results = config_provider().doc_ontology().search(query, limit=None)
+            scope = config_provider().browse_ontology()
+            results = [_with_filter(node) for node in scope.search(query, limit=None)]
+            if facet:
+                results = [node for node in results if node.get("facet") == facet]
             page = Page.slice(results, offset=offset, limit=limit)
             audit.update(
                 result_count=len(page.items),
@@ -1123,8 +1158,10 @@ def create_mcp_server(
         title="Ontology top-level branches",
         tags={"read"},
         description=(
-            "Top-level branches of the active document-type ontology — every root, in one "
-            "call. Descend from a root with ontology_children."
+            "Top-level branches of every active facet — document types, areas of law, "
+            "services, clauses — in one call. Each root carries `facet` and "
+            "`use_as_filter`, the parameter that takes ids from its subtree. Descend with "
+            "ontology_children."
             + _COMPLETE_RESULT
         ),
     )
@@ -1132,7 +1169,10 @@ def create_mcp_server(
         with audited_call(
             session_factory, "mcp.ontology_roots", headers, config_provider=config_provider
         ) as (_principals, audit):
-            results = config_provider().doc_ontology().roots()
+            results = [
+                _with_filter(node)
+                for node in config_provider().browse_ontology().roots()
+            ]
             audit["result_count"] = len(results)
             return {"results": results, "complete": True}
 
@@ -1140,8 +1180,9 @@ def create_mcp_server(
         title="Descend the ontology one level",
         tags={"read"},
         description=(
-            "Children of one ontology node, with definitions — descend the document-type "
-            "hierarchy one level at a time. A child count of 0 marks a leaf. page.total is "
+            "Children of one ontology node, with definitions — descend any facet's "
+            "hierarchy one level at a time. Each child carries `facet` and "
+            "`use_as_filter`. A child count of 0 marks a leaf. page.total is "
             "the node's exact number of visible children, so a node whose children you have "
             "not fully paged is a subtree you have not fully seen."
             + _PAGINATION_CONTRACT
@@ -1157,7 +1198,10 @@ def create_mcp_server(
             session_factory, "mcp.ontology_children", headers, config_provider=config_provider
         ) as (_principals, audit):
             limit, offset = _page_bounds(limit, offset, max_limit=250)
-            results = config_provider().doc_ontology().children(node_id)
+            results = [
+                _with_filter(node)
+                for node in config_provider().browse_ontology().children(node_id)
+            ]
             page = Page.slice(results, offset=offset, limit=limit)
             audit.update(
                 result_count=len(page.items),
@@ -1170,13 +1214,18 @@ def create_mcp_server(
     @mcp.tool(
         title="Read one ontology node",
         tags={"read"},
-        description="Full detail for one ontology node: definition, synonyms, path, parents.",
+        description=(
+            "Full detail for one node of any facet: definition, synonyms, path, parents, "
+            "plus `facet` and `use_as_filter` — the filter parameter its id belongs in."
+        ),
     )
     def ontology_node(node_id: str, headers: dict[str, str] = CurrentHeaders()) -> dict:
         with audited_call(
             session_factory, "mcp.ontology_node", headers, config_provider=config_provider
         ) as (_principals, audit):
-            detail = config_provider().doc_ontology().node(node_id)
+            detail = config_provider().browse_ontology().node(node_id)
+            if detail:
+                detail = _with_filter(detail)
             audit["node_id"] = node_id
             return detail or {"error": f"unknown or inactive node {node_id!r}"}
 
@@ -1466,10 +1515,11 @@ def _empty_result_help(
                     "filters_applied": ["practice_area"],
                     "message": (
                         f"{filters.practice_area!r} is not an Area of Law node, so "
-                        "nothing could match it. The ontology_* tools navigate "
-                        "DOCUMENT TYPES, which is a different facet. Practice-area "
-                        "ids come from list_taxonomies, under `practice_areas` — or "
-                        "scope by the firm's own book instead with "
+                        "nothing could match it — most likely it belongs to another "
+                        "facet. Call ontology_node on it: every node reports its "
+                        "`facet` and the `use_as_filter` parameter its id belongs "
+                        "in. ontology_search(facet='area_of_law') finds the right "
+                        "one, or scope by the firm's own book with "
                         "practice_group='Banking & Finance', which takes a name."
                     ),
                 }

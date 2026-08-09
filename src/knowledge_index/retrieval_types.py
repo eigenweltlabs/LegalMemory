@@ -114,6 +114,10 @@ class SearchFilters:
     #   firm_person any of its lawyers, exactly as list_matters does, so a filtered
     #   search and a filtered listing always describe the same set of matters.
     practice_area: str | None = None
+    # matter_kind: a Service node id, SUBTREE semantics, resolved to matter_ids the
+    #   same way practice_area is. What the firm is DOING, as against what body of
+    #   law applies.
+    matter_kind: str | None = None
     practice_group: str | None = None
     firm_person: str | None = None
     lifecycle: str | None = None

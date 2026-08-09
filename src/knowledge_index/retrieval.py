@@ -721,6 +721,7 @@ class RetrievalService:
         limit: int = 100,
         offset: int = 0,
         practice_area: str | None = None,
+        matter_kind: str | None = None,
         lifecycle: str | None = None,
         practice_group: str | None = None,
         firm_person: str | None = None,
@@ -790,10 +791,17 @@ class RetrievalService:
             # the ontology can enumerate once, instead of an ancestors() call per
             # scanned row. An unresolvable facet or an empty subtree matches
             # nothing, exactly as the per-row check did.
-            subtree = self._practice_area_subtree(area_scope, practice_area)
+            subtree = self._subtree(area_scope, practice_area)
             if not subtree:
                 return []
             statement = statement.where(Matter.practice_area.in_(sorted(subtree)))
+        if matter_kind is not None:
+            # The Service facet, same semantics: what the firm is DOING, which is
+            # a different question from which law applies, and composes with it.
+            subtree = self._subtree(service_scope, matter_kind)
+            if not subtree:
+                return []
+            statement = statement.where(Matter.matter_kind.in_(sorted(subtree)))
 
         offset = max(0, offset)
         wanted = offset + limit
@@ -989,6 +997,7 @@ class RetrievalService:
         limit: int = 100,
         offset: int = 0,
         practice_area: str | None = None,
+        matter_kind: str | None = None,
         lifecycle: str | None = None,
         practice_group: str | None = None,
         firm_person: str | None = None,
@@ -1006,6 +1015,7 @@ class RetrievalService:
                 limit=limit + 1,
                 offset=offset,
                 practice_area=practice_area,
+                matter_kind=matter_kind,
                 lifecycle=lifecycle,
                 practice_group=practice_group,
                 firm_person=firm_person,
@@ -1210,14 +1220,14 @@ class RetrievalService:
                 return FirmPerson.id.in_(ids)
         return false()
 
-    def _practice_area_subtree(self, area_scope, practice_area: str) -> set[str]:
-        """Every visible Area-of-Law node id at or below ``practice_area``."""
-        if area_scope is None:
+    def _subtree(self, scope, node_id: str) -> set[str]:
+        """Every visible node id in ``scope`` at or below ``node_id``."""
+        if scope is None:
             return set()
         return {
-            node_id
-            for node_id in area_scope.visible
-            if practice_area in area_scope.ancestors(node_id)
+            candidate
+            for candidate in scope.visible
+            if node_id in scope.ancestors(candidate)
         }
 
     def search_decisions(
@@ -1632,36 +1642,51 @@ class RetrievalService:
         )
 
     def _resolve_practice_area(self, filters: SearchFilters) -> SearchFilters:
-        """Translate a practice_area filter into the matter-id set it covers.
+        """Translate the ontology filters into the matter-id set they cover.
+
+        practice_area is an Area-of-Law node and matter_kind a Service node — what
+        body of law applies, versus what the firm is DOING. Both live on Matter
+        rather than on a chunk, both use SUBTREE semantics (a parent covers its
+        children), and both compose, so "fund formations in healthcare" is one
+        call. They intersect: each pass narrows the matter set the next one sees.
 
         practice_area lives on Matter, not on the chunk, so it cannot be a term on the
         index. We resolve it here with the same SUBTREE semantics as list_matters (a
         parent area matches its children) and hand the backend a matter-id filter. The
         backend's ACL scope still applies on top, so this set only narrows results — it is
         not an authorization boundary. An empty match is preserved, not dropped: a
-        practice_area that covers no matter yields no hits rather than silently widening to
-        every matter.
+        A filter that covers no matter yields no hits rather than silently widening
+        to every matter.
         """
-        if not filters.practice_area:
+        if not filters.practice_area and not filters.matter_kind:
+            # Untouched, and the SAME object: callers rely on a no-op resolver
+            # being free, and returning a copy would quietly break that.
             return filters
-        try:
-            area_scope = self.config.ontology_facet("area_of_law")
-        except ValueError:
-            area_scope = None
-        matched: list[str] = []
-        if area_scope is not None:
-            rows = self.session.execute(
-                select(Matter.id, Matter.practice_area).where(Matter.practice_area.isnot(None))
-            ).all()
-            matched = [
-                matter_id
-                for matter_id, area in rows
-                if filters.practice_area in area_scope.ancestors(area)
-            ]
-        if filters.matter_ids is not None:
-            allowed = set(filters.matter_ids)
-            matched = [matter_id for matter_id in matched if matter_id in allowed]
-        return replace(filters, practice_area=None, matter_ids=matched)
+        for wanted, facet, column in (
+            (filters.practice_area, "area_of_law", Matter.practice_area),
+            (filters.matter_kind, "service", Matter.matter_kind),
+        ):
+            if not wanted:
+                continue
+            try:
+                scope = self.config.ontology_facet(facet)
+            except ValueError:
+                scope = None
+            matched: list[str] = []
+            if scope is not None:
+                rows = self.session.execute(
+                    select(Matter.id, column).where(column.isnot(None))
+                ).all()
+                matched = [
+                    matter_id
+                    for matter_id, node in rows
+                    if wanted in scope.ancestors(node)
+                ]
+            if filters.matter_ids is not None:
+                allowed = set(filters.matter_ids)
+                matched = [matter_id for matter_id in matched if matter_id in allowed]
+            filters = replace(filters, matter_ids=matched)
+        return replace(filters, practice_area=None, matter_kind=None)
 
     def _search_opensearch(
         self,
