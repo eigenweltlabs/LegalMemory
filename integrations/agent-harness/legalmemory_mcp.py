@@ -207,9 +207,12 @@ description — read them. The ones that carry most questions:
   practice with subtree semantics. This is how a question about "every matter
   in the X practice" is answered — one filtered call, not a walk through the
   estate.
-- list_taxonomies / ontology_search / ontology_roots / ontology_children —
-  resolve a practice area, document type or service to the ontology node id
-  that the filters take. Do this before filtering by practice area.
+- list_taxonomies — the facets and their ids. Practice-area ids live under
+  `practice_areas` here; this is where a practice_area filter value comes from.
+- ontology_search / ontology_roots / ontology_children / ontology_node —
+  navigate the DOCUMENT-TYPE ontology. These are a different facet from the
+  practice areas: an id from here is not a practice_area, and passing one as
+  practice_area matches nothing.
 - get_document — read one document's text, paginated.
 - find_related_documents / traverse — stored relations with the evidence that
   established them.
@@ -274,7 +277,7 @@ considered-but-not-done) in a separate clearly-labelled section rather than
 in the qualifying set.
 
 **A question about a practice area is one filtered call.** Resolve the area
-with list_taxonomies (or ontology_search), then pass its node id as
+with list_taxonomies — its `practice_areas` list — then pass that node id as
 `practice_area` to search_filter or list_matters — the filter matches the
 whole subtree, so a parent area covers its children. Never enumerate a
 practice by reading matters one at a time: it is slower by two orders of

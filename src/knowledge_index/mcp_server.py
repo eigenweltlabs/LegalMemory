@@ -685,7 +685,9 @@ def create_mcp_server(
             "citations themselves are not in the listing: open the matter with search_filter "
             "(or a document with get_document) to get them. "
             "practice_area filters by an Area of Law ontology node id with SUBTREE semantics "
-            "(a parent area matches its children) — find node ids via list_taxonomies. "
+            "(a parent area matches its children) — those ids come from list_taxonomies "
+            "under `practice_areas`, NOT from the ontology_* tools, which navigate "
+            "document types. "
             "A matter's practice area is a property of the whole matter, so a matter can "
             "sit in one area while holding documents that read like another. "
             "Ordered by matter title; the limit counts matters you can actually see, so a "
@@ -1439,19 +1441,44 @@ def _empty_result_help(
     Only ever consulted for the first page: an empty page at a non-zero offset
     means the caller paged past the end, which the filters already explained.
     """
+    # The matter-level filters are here for the same reason as the rest: they are
+    # the ones a caller is most likely to get subtly wrong. A practice_area takes
+    # an Area-of-Law node id, and the ontology_* tools navigate DOCUMENT TYPES —
+    # so a caller can resolve a plausible-looking id there, pass it here, and get
+    # a clean empty page that means "that is not an area of law", not "this firm
+    # has no such matters".
+    _NAMES = (
+        "party", "identifier", "doc_type", "matter_id",
+        "practice_area", "practice_group", "firm_person", "lifecycle",
+    )
     if page.items or page.offset or not any(
-        getattr(filters, name, None) for name in ("party", "identifier", "doc_type", "matter_id")
+        getattr(filters, name, None) for name in _NAMES
     ):
         return {}
+    if filters.practice_area:
+        try:
+            area_scope = retrieval.config.ontology_facet("area_of_law")
+        except Exception:  # noqa: BLE001 - no facet, no advice to give
+            area_scope = None
+        if area_scope is not None and filters.practice_area not in area_scope.visible:
+            return {
+                "no_results": {
+                    "filters_applied": ["practice_area"],
+                    "message": (
+                        f"{filters.practice_area!r} is not an Area of Law node, so "
+                        "nothing could match it. The ontology_* tools navigate "
+                        "DOCUMENT TYPES, which is a different facet. Practice-area "
+                        "ids come from list_taxonomies, under `practice_areas` — or "
+                        "scope by the firm's own book instead with "
+                        "practice_group='Banking & Finance', which takes a name."
+                    ),
+                }
+            }
     try:
         suggestions = retrieval.suggest_for_empty(principals=principals, filters=filters)
     except Exception:  # never turn a clean empty result into an error
         return {}
-    applied = sorted(
-        name
-        for name in ("party", "identifier", "doc_type", "matter_id")
-        if getattr(filters, name, None)
-    )
+    applied = sorted(name for name in _NAMES if getattr(filters, name, None))
     advisory = {
         "filters_applied": applied,
         "message": (
