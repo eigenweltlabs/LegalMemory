@@ -431,6 +431,50 @@ class Matter(TimestampMixin, Base):
         Boolean, default=False
     )  # from practice-mgmt = authoritative
     provenance: Mapped[dict | None] = mapped_column(JSONVariant)
+    # Where the matter stands: executed | closed | terminated | dormant | in_progress.
+    # Distinct from `status` above, which is the triage flag for a fallback holding
+    # matter. A caller asking "which financings actually closed" needs this, and
+    # without it must read every document of every candidate — which agents did
+    # inconsistently, including terminated matters in answers about live deals.
+    lifecycle: Mapped[str | None] = mapped_column(String(20))
+    # The rest of the matter-level profile: what the deal IS, which document
+    # constitutes it, a one-line summary, and the evidence behind each. JSON rather
+    # than columns because the useful fields are still being learned and a rubric
+    # should not mint a migration; promote a field only once something filters on it.
+    profile: Mapped[dict | None] = mapped_column(JSONVariant)
+
+
+class MatterProfileQueue(Base):
+    """Matters whose profile is stale, and when they were last touched.
+
+    A matter's practice area, kind, lifecycle and version chains are properties of
+    the whole folder, but insertion is per-document and parallel, so no document
+    can decide them. They are instead re-derived by a matter-level pass, and this
+    table is how that pass knows what to look at.
+
+    Every classified document upserts its matter here — one row write inside a
+    transaction that is committing anyway, next to a document that just cost a
+    model call. The work therefore scales with MATTERS TOUCHED, not documents: a
+    million documents across thirty thousand matters run thirty thousand profiles,
+    and one document added later runs one.
+
+    ``last_marked_at`` is what makes bulk and incremental the same code path. A
+    worker takes matters untouched for longer than the debounce window, so a matter
+    receiving five hundred documents stays out of the queue until its flood stops
+    and then profiles once, while a lone document profiles as soon as the window
+    passes. Nothing has to know which mode it is in.
+    """
+
+    __tablename__ = "matter_profile_queue"
+    __table_args__ = (Index("ix_matter_profile_queue_marked", "last_marked_at"),)
+
+    matter_id: Mapped[str] = mapped_column(ForeignKey("matters.id"), primary_key=True)
+    last_marked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    profiled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Non-fatal: a matter whose profile call failed keeps its old profile and is
+    # retried, rather than blocking the run or silently losing its place.
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    last_error: Mapped[str | None] = mapped_column(Text)
 
 
 class MatterClient(Base):

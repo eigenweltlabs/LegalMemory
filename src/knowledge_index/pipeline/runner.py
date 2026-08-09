@@ -55,6 +55,7 @@ from knowledge_index.pipeline.distill import (
     context_header,
     contextualize,
 )
+from knowledge_index.pipeline.matter_profile import mark_matter_dirty
 from knowledge_index.pipeline.extraction import (
     AREA_OF_LAW_INSTRUCTION,
     MATTER_KIND_INSTRUCTION,
@@ -906,6 +907,13 @@ class PipelineRunner:
                 kind=matter_kind,
                 weight=float(classification.confidence or 0.0),
             )
+        # The matter's own facts — practice, service, lifecycle, what the deal is,
+        # which files are versions of one another — cannot be seen from here, and
+        # the vote above only makes this document's guess stable, not right. Record
+        # that the matter changed; a matter-level pass re-derives them from the
+        # folder once its documents settle. One upsert, no new task.
+        if not matter.imported:
+            mark_matter_dirty(session, matter.id)
         if matter.project_id is None and source.project_id:
             project = session.get(Project, source.project_id)
             if project is None:

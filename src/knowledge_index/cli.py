@@ -17,6 +17,7 @@ from knowledge_index.permissions import configure_access
 from knowledge_index.db import get_engine, init_db
 from knowledge_index.db.models import ProcessingState, Source
 from knowledge_index.pipeline import PipelineRunner
+from knowledge_index.pipeline.matter_profile import DEFAULT_DEBOUNCE_SECONDS
 from knowledge_index.pipeline.runner import connector_from_source
 from knowledge_index.sync import SyncEngine
 
@@ -143,6 +144,26 @@ def parser() -> argparse.ArgumentParser:
     run = commands.add_parser("run", help="process pending pipeline stages")
     run.add_argument("--limit", type=int)
     run.add_argument("--enable-evals", action="store_true")
+    profile = commands.add_parser(
+        "profile-matters",
+        help="re-derive matter-level facts (practice, kind, lifecycle, versions) "
+        "for matters whose documents have settled",
+    )
+    profile.add_argument(
+        "--debounce",
+        type=int,
+        default=DEFAULT_DEBOUNCE_SECONDS,
+        help="seconds a matter must be untouched before profiling; high during a "
+        "backfill so a matter profiles once its flood ends, low in steady state",
+    )
+    profile.add_argument(
+        "--sweep",
+        action="store_true",
+        help="profile everything queued regardless of the debounce window — the "
+        "end-of-run pass that makes the window a cost knob, not a correctness one",
+    )
+    profile.add_argument("--limit", type=int, default=500)
+    profile.add_argument("--matter", help="profile one matter by reference number")
     worker = commands.add_parser("hatchet-worker", help="run the Hatchet insertion worker")
     worker.add_argument(
         "--slots",
@@ -543,6 +564,50 @@ def main() -> None:
             config.pipeline.stages["gen_evals"].enabled = True
         result = PipelineRunner(factory, config).run_until_idle(limit=args.limit)
         print(json.dumps(result.__dict__, indent=2))
+    elif args.command == "profile-matters":
+        from sqlalchemy import select
+
+        from knowledge_index.db.models import Matter
+        from knowledge_index.pipeline.matter_profile import due_matters, profile_matter
+
+        config = store.get()
+        session = factory()
+        try:
+            if args.matter:
+                matter = session.scalar(
+                    select(Matter).where(
+                        Matter.reference_numbers.op("->>")(0) == args.matter
+                    )
+                )
+                ids = [matter.id] if matter else []
+            else:
+                ids = due_matters(
+                    session,
+                    debounce_seconds=args.debounce,
+                    limit=args.limit,
+                    ignore_debounce=args.sweep,
+                )
+            done = failed = 0
+            for matter_id in ids:
+                result = profile_matter(session, config, matter_id)
+                session.commit()
+                if result is None:
+                    failed += 1
+                    continue
+                done += 1
+                print(
+                    json.dumps(
+                        {
+                            "matter": matter_id,
+                            "lifecycle": result.lifecycle,
+                            "instrument": result.instrument,
+                            "families": len(result.version_families),
+                        }
+                    )
+                )
+            print(json.dumps({"profiled": done, "failed": failed, "queued": len(ids)}))
+        finally:
+            session.close()
     elif args.command == "hatchet-worker":
         from knowledge_index.orchestration import start_hatchet_worker
 
