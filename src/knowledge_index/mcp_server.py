@@ -610,10 +610,24 @@ def create_mcp_server(
             "List matters that contain at least one version visible to the caller. Each row "
             "carries the matter's identity (title, reference numbers, practice area, kind) "
             "and visible_versions — the COUNT of document versions you could cite. The "
+            "row also states what the matter IS and whether it happened: `instrument` "
+            "(revolving credit facility, term loan B, senior notes offering, chapter 11, "
+            "fund formation), `principal_document` (the file that constitutes the matter), "
+            "`summary`, and `lifecycle` — executed | closed | terminated | dormant | "
+            "in_progress. USE THESE BEFORE READING DOCUMENTS TO DECIDE WHETHER A MATTER "
+            "QUALIFIES. A matter qualifies on what it IS, not on what its documents "
+            "mention: a term loan that refinances or repays a revolving facility is a term "
+            "loan, and the revolver belongs to someone else's deal. When a question is "
+            "about live or completed work, exclude terminated and dormant matters, or name "
+            "them separately as near-misses. lifecycle=... filters to one state, so 'which "
+            "financings actually closed' is a single call rather than reading every "
+            "document of every candidate. "
             "citations themselves are not in the listing: open the matter with search_filter "
             "(or a document with get_document) to get them. "
             "practice_area filters by an Area of Law ontology node id with SUBTREE semantics "
             "(a parent area matches its children) — find node ids via list_taxonomies. "
+            "A matter's practice area is a property of the whole matter, so a matter can "
+            "sit in one area while holding documents that read like another. "
             "Ordered by matter title; the limit counts matters you can actually see, so a "
             "full page means a full page. A firm typically has hundreds to thousands of "
             "matters: this tool is for browsing them, and finding one specific matter is "
@@ -627,6 +641,7 @@ def create_mcp_server(
         limit: int = 100,
         offset: int = 0,
         practice_area: str | None = None,
+        lifecycle: str | None = None,
         headers: dict[str, str] = CurrentHeaders(),
     ) -> dict:
         with audited_call(
@@ -640,6 +655,7 @@ def create_mcp_server(
                     limit=limit,
                     offset=offset,
                     practice_area=practice_area,
+                    lifecycle=lifecycle,
                 )
                 audit.update(
                     result_count=len(page.items),

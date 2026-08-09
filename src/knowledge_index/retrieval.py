@@ -711,9 +711,12 @@ class RetrievalService:
         limit: int = 100,
         offset: int = 0,
         practice_area: str | None = None,
+        lifecycle: str | None = None,
     ) -> list[dict]:
         """Matters visible to the caller; ``practice_area`` filters by ontology
-        node with SUBTREE semantics (a parent area matches its children).
+        node with SUBTREE semantics (a parent area matches its children), and
+        ``lifecycle`` restricts to matters in a given state (executed, closed,
+        terminated, dormant, in_progress).
 
         Ordered by title, and the limit counts matters the caller can actually
         see. The limit used to be a SQL ``LIMIT`` on all matters, applied before
@@ -733,6 +736,8 @@ class RetrievalService:
             service_scope = None
 
         statement = select(Matter).order_by(Matter.title, Matter.id)
+        if lifecycle is not None:
+            statement = statement.where(Matter.lifecycle == lifecycle)
         if practice_area is not None:
             # SUBTREE semantics pushed into SQL: the node's descendants are a set
             # the ontology can enumerate once, instead of an ancestors() call per
@@ -813,6 +818,23 @@ class RetrievalService:
                     }
                     if matter.matter_kind
                     else None,
+                    # What the matter IS and whether it happened. Both are
+                    # properties of the whole folder that no single document
+                    # shows, so they are derived by the matter-level pass — and
+                    # both change which matters belong in an answer. Without
+                    # `lifecycle` a caller cannot tell a closed deal from an
+                    # abandoned one without reading every document of every
+                    # candidate, which agents did inconsistently and so included
+                    # terminated matters in answers about live ones. Without
+                    # `instrument` they qualify a matter by what its documents
+                    # MENTION rather than what the matter is, so a term loan that
+                    # merely repays a revolver counts as a revolver.
+                    "lifecycle": matter.lifecycle,
+                    "instrument": (matter.profile or {}).get("instrument"),
+                    "principal_document": (matter.profile or {}).get(
+                        "principal_document"
+                    ),
+                    "summary": (matter.profile or {}).get("summary"),
                     # A listing is a collection resource: each row carries what a
                     # caller needs to decide which matter to open, plus the COUNT
                     # of citable documents behind it — never the citations
@@ -863,6 +885,7 @@ class RetrievalService:
         limit: int = 100,
         offset: int = 0,
         practice_area: str | None = None,
+        lifecycle: str | None = None,
     ) -> Page:
         """``list_matters`` plus an exact ``has_more``, via one extra matter.
 
@@ -877,6 +900,7 @@ class RetrievalService:
                 limit=limit + 1,
                 offset=offset,
                 practice_area=practice_area,
+                lifecycle=lifecycle,
             ),
             offset=offset,
             limit=limit,
