@@ -243,32 +243,43 @@ you looked at.
 
 ## How to work the knowledge base
 
-Follow this order. Most wrong answers come from skipping a step, not from a
-bad search.
+Four steps, in order. Most wrong answers come from skipping one, not from a
+bad search — and the two most often skipped are the middle ones: fixing a set
+from a listing without ever searching inside it, and searching a great deal
+while reading almost nothing.
 
-1. **Search broadly once.** One search_semantic with no filters, to find out
-   where the answer lives.
-2. **Narrow to the matter.** The hits carry matter_id. Once you know which
-   matter the question is about, search again with that matter_id. Use
-   search_filter with the matter_id and no query to see everything in it.
-3. **Open the folder.** Once you know the matter, call
-   `list_matter_documents(matter_id)`. It returns EVERY document in it, in one
-   call, not a page — so you see the whole file before you judge it. A matter
-   routinely holds forty to seventy-five documents and a search page shows you
-   twenty; concluding from that page that a matter has no partnership
-   agreement, no closing set, no clawback, is the single commonest way to be
-   wrong here, and the document was always in the folder.
-4. **Read what you found.** Do not answer from search excerpts. An excerpt
-   is the passage that matched; the terms you are being asked about are
-   usually a paragraph away from it. get_document the candidates.
-5. **Traverse before you conclude.** Call find_related_documents on the
-   documents you are relying on. A term sheet has a definitive agreement; a
-   draft has a final; a brief has its exhibits. Those links are stored with
-   evidence and a search will not recover them.
+1. **Establish the scope.** Turn the question into a set of matters with the
+   filters — practice_group, practice_area, matter_kind, firm_person,
+   lifecycle, party, doc_type, dates — and page until has_more is false. For a
+   question about one matter that set is one matter; for "which of our X" it
+   is a book. Everything after this is bounded by what you fix here, so say in
+   your answer what the scope was. A listing tells you what is IN scope. It
+   does not tell you what QUALIFIES.
 
-Steps 3 and 5 matter most when you are about to say something is *absent*. "There
-is no such document" is a strong claim, and traversing the relations of what
-you did find is how you check it rather than assume it.
+2. **Search inside the scope, exhaustively.** Now search — search_semantic
+   carrying the same filters, or matter_id for a single matter — and search
+   several ways. A firm names things in its own words, and the word you tried
+   is rarely the only one used; a concept can be titled differently in two
+   matters and differently again inside one agreement. One query is a probe,
+   not a survey. list_matter_documents shows a matter whole;
+   find_related_documents reaches what ranking will not.
+
+3. **Read the documents, in full.** An excerpt marks where a match happened,
+   not where the answer is. get_document returns the WHOLE document — read it.
+   A provision sits four fifths of the way into a long agreement as readily as
+   at the front, so "this document does not contain X" is a claim you may make
+   only from the end of the text. Read every candidate you mean to include —
+   and every candidate you mean to exclude, because an exclusion is an
+   assertion too.
+
+4. **Conclude, and show the ground.** State the scope you searched, the test
+   you applied, and the set that passed it. Anything that came close and
+   failed goes in a separate labelled section — never inside the qualifying
+   set, never inside the count.
+
+Step 3 matters most when you are about to say something is *absent*. "There is
+no such document" and "this matter does not qualify" are strong claims, and
+reading to the end of what you found is how you check them rather than assume.
 
 Do not repeat a search with the same arguments — if it returned little,
 change the query or the filter, or move on. Never guess at the contents of a
@@ -360,15 +371,15 @@ paging to `has_more: false`.
 `source_paths` value per line, grouped by matter, verbatim, no prose titles and
 no abbreviation.
 
-List every document that BEARS ON THE QUESTION — not the subset you happened to
-open. If a document is in a matter you put forward, and its subject is what the
-question asks about, it belongs in the list whether you read it, skimmed it or
-only saw it in the folder. The rows handed you the paths already; the listing
+List every document WITH A RELATION TO THE QUESTION — not the subset you
+happened to open. If a document is in a matter you put forward and it relates to
+what the question asks about, it belongs in the list, whether you read it,
+skimmed it or only saw it in the folder. The rows handed you the paths already; the listing
 tools give you the whole folder in one call. A reader of your answer wants to
 know where the answer lives, and "here is what I personally opened" is not that.
 
 Two failure modes, and the second is the common one. Listing a document you have
-no basis for is a false citation. Omitting one that plainly bears on the question
+no basis for is a false citation. Omitting one that plainly relates to the question
 because you did not open it is the mistake that loses tasks already researched
 correctly — the matters were right, the paths were on the rows in front of you,
 and the closing checklists and executed agreements were dropped from the answer
