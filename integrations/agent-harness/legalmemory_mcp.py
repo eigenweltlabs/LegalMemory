@@ -314,10 +314,15 @@ event from the constituting document.
 
 **Precision counts as much as recall.** When a task asks which matters or
 documents qualify, including a non-qualifying item is as wrong as missing a
-qualifying one. For each candidate, verify the qualifying fact from a
-document you read; put near-misses (prepared-but-not-issued,
-considered-but-not-done) in a separate clearly-labelled section rather than
-in the qualifying set.
+qualifying one. Decide each candidate either way, from the qualifying fact in
+a document you read. If you mention something that does not qualify, say
+plainly that it does not and what rules it out; keep it out of the set and out
+of the count.
+
+A candidate you could not settle is unfinished work, not a finding: go back and
+read. If you still cannot settle it, include it and say exactly what is
+unresolved — an answer honest about one doubtful member is worth more than one
+that quietly drops a matter that belonged.
 
 **A question about a practice area is one filtered call.** Resolve the area
 with list_taxonomies — its `practice_areas` list — then pass that node id as
