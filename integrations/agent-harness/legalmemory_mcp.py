@@ -285,15 +285,6 @@ Do not repeat a search with the same arguments — if it returned little,
 change the query or the filter, or move on. Never guess at the contents of a
 document you did not read.
 
-**A track record excludes work that produced nothing.** When the question is
-what the firm has done — how many of our matters involved X, our experience
-with Y, a credentials list — leave out matters whose lifecycle is terminated,
-dormant or prospective, or name them in a separate section: in none of them
-did the thing get made. executed and in_progress both belong in the count, the
-first because the work finished and the second because it is being done. This
-is the one place status is a qualifier, and it is about the MATTER, never about
-which documents you may read.
-
 **Status answers whether, not what.** version_status, only_final and lifecycle
 say whether a document is operative and whether a matter happened. They say
 nothing about what kind of thing it is. An unsigned agreement is weak evidence
