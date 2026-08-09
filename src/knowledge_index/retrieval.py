@@ -9,11 +9,15 @@ from pathlib import Path
 
 from pydantic import BaseModel
 from pydantic import Field as PydanticField
-from sqlalchemy import func, or_, select
+from sqlalchemy import and_, false, func, or_, select
 from sqlalchemy.orm import Session, attributes
 
 from knowledge_index.config import AppConfig
-from knowledge_index.entity_names import normalize_entity_name
+from knowledge_index.entity_names import (
+    name_similarity,
+    normalize_entity_name,
+    normalize_group,
+)
 from knowledge_index.db.models import (
     Artifact,
     Blob,
@@ -23,6 +27,7 @@ from knowledge_index.db.models import (
     DocumentVersionSource,
     EvalRecord,
     FirmPerson,
+    FirmPracticeGroup,
     Matter,
     MatterClient,
     MatterParty,
@@ -754,20 +759,16 @@ class RetrievalService:
             #
             # Case- and ampersand-insensitive: the firm writes "Banking & Finance",
             # a caller may type "Banking and Finance", and neither should miss.
-            wanted = practice_group.lower().replace(" and ", " & ").strip()
-            folded = func.lower(func.replace(Matter.practice_group, " and ", " & "))
+            names = self._group_spellings(practice_group)
+            if not names:
+                return []
             statement = statement.where(
                 or_(
-                    folded == wanted,
+                    Matter.practice_group.in_(names),
                     Matter.id.in_(
                         select(MatterTeam.matter_id)
                         .join(FirmPerson, FirmPerson.id == MatterTeam.person_id)
-                        .where(
-                            func.lower(
-                                func.replace(FirmPerson.practice_group, " and ", " & ")
-                            )
-                            == wanted
-                        )
+                        .where(FirmPerson.practice_group.in_(names))
                     ),
                 )
             )
@@ -775,12 +776,11 @@ class RetrievalService:
             # "Which matters does Merritt run" — matched on the resolver's own
             # normalisation so a surname, a full name and a differently-punctuated
             # spelling all land on the same lawyer.
-            needle = normalize_entity_name(firm_person)
             statement = statement.where(
                 Matter.id.in_(
                     select(MatterTeam.matter_id)
                     .join(FirmPerson, FirmPerson.id == MatterTeam.person_id)
-                    .where(FirmPerson.normalized_name.like(f"%{needle}%"))
+                    .where(self._person_name_matches(firm_person))
                 )
             )
         if practice_area is not None:
@@ -1012,15 +1012,12 @@ class RetrievalService:
             return Page(items=[], offset=max(0, offset), limit=0, has_more=False)
         statement = select(FirmPerson).order_by(FirmPerson.name, FirmPerson.id)
         if practice_group is not None:
-            wanted = practice_group.lower().replace(" and ", " & ").strip()
-            statement = statement.where(
-                func.lower(func.replace(FirmPerson.practice_group, " and ", " & "))
-                == wanted
-            )
+            names = self._group_spellings(practice_group)
+            if not names:
+                return Page(items=[], offset=max(0, offset), limit=limit, has_more=False)
+            statement = statement.where(FirmPerson.practice_group.in_(names))
         if name is not None:
-            statement = statement.where(
-                FirmPerson.normalized_name.like(f"%{normalize_entity_name(name)}%")
-            )
+            statement = statement.where(self._person_name_matches(name))
         people = self.session.scalars(statement).all()
         if not people:
             return Page(items=[], offset=max(0, offset), limit=limit, has_more=False)
@@ -1064,6 +1061,127 @@ class RetrievalService:
         # The whole directory is materialized and authorized above, so `total`
         # here is the real number of people the caller can see, not a bound.
         return Page.slice(rows, offset=max(0, offset), limit=limit)
+
+    # How alike a typed name and a stored one must be before a fuzzy fallback
+    # accepts it. Both are trigram similarities on the normalized form, so they
+    # measure spelling, not meaning. 0.45 admits ordinary typos and a dropped
+    # letter; below that the near-misses start being different people.
+    _NAME_FUZZ = 0.45
+    _GROUP_FUZZ = 0.55
+
+    def _group_spellings(self, practice_group: str) -> list[str]:
+        """Every stored spelling of the group the caller means.
+
+        A caller types the group the way they say it — "Banking and Finance",
+        "the Banking & Finance Group", "Private Funds" — and the estate stores it
+        the way its documents wrote it. Matching those two strings directly is
+        what made the filter silently return nothing: a group that exists, a
+        caller who named it, and an empty page that reads exactly like "we have
+        no such matters".
+
+        So the typed name is resolved the same way an insertion resolves one:
+        normalize, then look for a group whose canonical name or recorded alias
+        matches. Aliases are the important half — they hold the equivalences a
+        model already judged at insertion time ("Private Funds" is Funds & Asset
+        Management), and re-deciding that at query time would be both slower and
+        free to disagree with the stored data.
+
+        Falls back to trigram similarity for a name close to a real group but not
+        equal to any spelling of it, and finally to the typed string itself, so a
+        group recorded before the registry existed is still reachable.
+        """
+        normalized = normalize_group(practice_group)
+        if not normalized:
+            return []
+        key = normalize_entity_name(normalized)
+        groups = self.session.scalars(select(FirmPracticeGroup)).all()
+        wanted = {
+            group.name
+            for group in groups
+            if group.normalized_name == key or key in (group.aliases or [])
+        }
+        if not wanted and groups:
+            best = max(
+                (
+                    (name_similarity(key, group.normalized_name)[0], group.name)
+                    for group in groups
+                ),
+                default=(0.0, ""),
+            )
+            if best[0] >= self._GROUP_FUZZ:
+                wanted = {best[1]}
+        # Whatever the registry knows, the raw spellings still count: a person or
+        # matter written before this table existed holds a string no group row
+        # claims, and dropping it here would hide them.
+        stored = self.session.scalars(
+            select(FirmPerson.practice_group)
+            .where(FirmPerson.practice_group.isnot(None))
+            .union(
+                select(Matter.practice_group).where(Matter.practice_group.isnot(None))
+            )
+        ).all()
+        wanted |= {
+            spelling
+            for spelling in stored
+            if normalize_entity_name(normalize_group(spelling) or "") == key
+        }
+        return sorted(wanted)
+
+    def _person_name_matches(self, query: str):
+        """Predicate for "this is the lawyer they meant".
+
+        Names arrive in every order a person writes one: "Sylvia Hartwell",
+        "Hartwell, Sylvia", "Hartwell", "S. Hartwell", "Sylvia J. Hartwell". A
+        substring test on the normalized name answered only the first, third and
+        an accidental fourth — reversing the tokens or adding a middle initial
+        returned nobody, and nobody is indistinguishable from "that lawyer has no
+        matters".
+
+        Resolved in three passes, each tried only when the one before it found
+        nothing, so a precise query never widens:
+
+        1. every token present, in any order, matching at a word start. An
+           initial finds the name it abbreviates, so "L. Cross" reaches Leonard
+           and not Pamela.
+        2. the same with single-letter tokens dropped. This is for the initial
+           the caller supplies and the estate does not store — "Sylvia J.
+           Hartwell" against a recorded "Sylvia Hartwell" — and it only runs when
+           insisting on the initial found no one at all.
+        3. trigram similarity, for a genuine misspelling where no token matches.
+
+        Two lawyers who share a surname stay two lawyers: "Cross" returns both
+        because it names both, and "Leonard Cross" returns one.
+        """
+        normalized = normalize_entity_name(query)
+        tokens = normalized.split()
+        if not tokens:
+            return false()
+
+        def all_of(wanted: list[str]):
+            return and_(
+                *(
+                    or_(
+                        FirmPerson.normalized_name.like(f"{token}%"),
+                        FirmPerson.normalized_name.like(f"% {token}%"),
+                    )
+                    for token in wanted
+                )
+            )
+
+        attempts = [all_of(tokens)]
+        longer = [token for token in tokens if len(token) > 1]
+        if longer and len(longer) != len(tokens):
+            attempts.append(all_of(longer))
+        attempts.append(
+            func.similarity(FirmPerson.normalized_name, normalized) >= self._NAME_FUZZ
+        )
+        for predicate in attempts:
+            ids = self.session.scalars(
+                select(FirmPerson.id).where(predicate)
+            ).all()
+            if ids:
+                return FirmPerson.id.in_(ids)
+        return false()
 
     def _practice_area_subtree(self, area_scope, practice_area: str) -> set[str]:
         """Every visible Area-of-Law node id at or below ``practice_area``."""

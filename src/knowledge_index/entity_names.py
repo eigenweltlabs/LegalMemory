@@ -155,3 +155,27 @@ def name_similarity(left: str, right: str) -> tuple[float, str]:
     if characters >= 0.85:
         return round(0.85 * characters, 4), "characters"
     return 0.0, ""
+
+
+def normalize_group(value: str | None) -> str | None:
+    """One spelling for a group a firm writes several ways.
+
+    "Healthcare & Life Sciences Practice Group", "Litigation Department" and
+    "Banking and Finance" all name a group whose members would otherwise not match
+    each other, or a caller's filter. The firm's own wording is kept, minus the
+    organisational suffix.
+    """
+    if not value:
+        return None
+    group = value.strip().strip(" ,.-")
+    # Case-insensitively: a document writes "the Energy Enforcement &
+    # Investigations practice group" mid-sentence as readily as it writes
+    # "Energy Enforcement & Investigations Practice Group" in a letterhead, and
+    # a case-sensitive match kept the first one's trailing noun — leaving a
+    # group that matched nothing and no one.
+    lowered = group.casefold()
+    for suffix in (" practice group", " practice", " group", " department", " team"):
+        if lowered.endswith(suffix):
+            group = group[: -len(suffix)].strip()
+            break
+    return group.replace(" and ", " & ").replace(" And ", " & ") or None
