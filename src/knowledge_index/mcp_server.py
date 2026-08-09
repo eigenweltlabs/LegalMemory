@@ -467,18 +467,22 @@ def create_mcp_server(
         description=(
             "Download/export/copy one document into the current client workspace as the exact "
             "original Word, Excel, PDF, email, or other binary—never a text reconstruction. "
-            "Call this whenever the user says download, save, copy, export, or put a document "
-            "in the workspace. By default it returns a short-lived ResourceLink plus a safe "
-            "curl command; immediately run that command from the workspace. Set inline_blob "
-            "only when the MCP client can directly materialize embedded BlobResourceContents. "
-            "The result includes SHA-256, size, MIME type, filename, and exact citations."
+            "Call this whenever a task says download, save, copy, export, provide, or put a "
+            "document in the workspace. THE FILE COMES BACK IN THE RESULT: the bytes ride "
+            "along as a base64 BlobResourceContents, so write them out from there — you "
+            "already have the file and need to fetch nothing. A short-lived link and a curl "
+            "command come too, but they only work from a client that can reach this "
+            "appliance over the network, which a sandboxed agent generally cannot; treat "
+            "them as a fallback, never as the instruction. Pass inline_blob=false to get the "
+            "link alone when you truly do not want the bytes. The result includes SHA-256, "
+            "size, MIME type, filename, and exact citations."
         )
     )
     def download_document(
         document_id: str,
         version_id: str | None = None,
         source_object_id: str | None = None,
-        inline_blob: bool = False,
+        inline_blob: bool = True,
         headers: dict[str, str] = CurrentHeaders(),
     ) -> ToolResult:
         with audited_call(
@@ -523,6 +527,12 @@ def create_mcp_server(
                 download_url = (
                     f"{base_url}/api/downloads/{capability.token}/{encoded_name}"
                 )
+                # The link is for a client that shares a network with the appliance.
+                # An agent in a sandbox does not: on a graded run one called this
+                # sixteen times, ran the curl below, got connection refused, and
+                # reported it could not deliver the files the task had asked for.
+                # So the bytes ride back in the response by default and the command
+                # is offered as a fallback rather than as an instruction.
                 save_command = (
                     "curl --fail --location --output "
                     f"{shlex.quote(downloadable.filename)} {shlex.quote(download_url)}"
@@ -538,10 +548,17 @@ def create_mcp_server(
                     TextContent(
                         type="text",
                         text=(
-                            f"Exact original ready: {downloadable.filename} "
+                            f"Exact original: {downloadable.filename} "
                             f"({downloadable.size_bytes} bytes, SHA-256 "
-                            f"{downloadable.content_hash}). Run this from the current "
-                            f"workspace now:\n{save_command}"
+                            f"{downloadable.content_hash}). "
+                            + (
+                                "The file itself is attached to this result as a "
+                                "base64 blob — write it out from there. "
+                                if inline_blob
+                                else ""
+                            )
+                            + "If your client can reach this appliance directly, "
+                            f"this also works:\n{save_command}"
                         ),
                     ),
                     ResourceLink(
@@ -744,6 +761,15 @@ def create_mcp_server(
             "question's own test by reading a document, then report the set that passes. "
             "Answering '17 of 17' from a complete-looking page is the characteristic way "
             "to be confidently wrong here. "
+            "include_documents=true adds `source_paths` to every row: the full path of "
+            "every file in that matter, complete, nothing else. It is how you see what a "
+            "whole practice actually holds in ONE call instead of opening each matter in "
+            "turn — and opening each matter in turn is where matters get dropped, because "
+            "a matter judged from search hits and never opened is a matter whose deciding "
+            "document you never saw. Use it when a question spans a practice — that is a "
+            "couple of hundred kilobytes and costs no measurable time — and leave it off "
+            "when you already know the matter or are browsing the whole estate, where the "
+            "paths of every matter at once are megabytes you will not read. "
             "citations themselves are not in the listing: open the matter with search_filter "
             "(or a document with get_document) to get them. "
             "practice_area filters by an Area of Law ontology node id with SUBTREE semantics "
@@ -770,6 +796,7 @@ def create_mcp_server(
         lifecycle: str | None = None,
         practice_group: str | None = None,
         firm_person: str | None = None,
+        include_documents: bool = False,
         headers: dict[str, str] = CurrentHeaders(),
     ) -> dict:
         with audited_call(
@@ -787,6 +814,7 @@ def create_mcp_server(
                     lifecycle=lifecycle,
                     practice_group=practice_group,
                     firm_person=firm_person,
+                    include_documents=include_documents,
                 )
                 audit.update(
                     result_count=len(page.items),

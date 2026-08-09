@@ -725,6 +725,7 @@ class RetrievalService:
         lifecycle: str | None = None,
         practice_group: str | None = None,
         firm_person: str | None = None,
+        include_documents: bool = False,
     ) -> list[dict]:
         """Matters visible to the caller; ``practice_area`` filters by ontology
         node with SUBTREE semantics (a parent area matches its children), and
@@ -837,6 +838,30 @@ class RetrievalService:
 
         page_matters = visible[offset:]
         matched_names = set(self._group_spellings(practice_group)) if practice_group else set()
+        # Paths only, and only when asked for. A caller enumerating a practice
+        # otherwise has to open each matter to find out what is in it, and a
+        # graded run showed that is where matters get dropped: the agent judged
+        # them from search hits and never opened the two whose files decided the
+        # answer. One extra query for the whole page, no per-matter round trip,
+        # and nothing but the path — a row that also carried titles, types and
+        # dates would put a 100-matter page back into megabytes.
+        paths_by_matter: dict[str, list[str]] = {}
+        if include_documents and page_matters:
+            for matter_id, path in self.session.execute(
+                select(Document.matter_id, SourceObject.path)
+                .join(DocumentVersion, DocumentVersion.document_id == Document.id)
+                .join(
+                    DocumentVersionSource,
+                    DocumentVersionSource.version_id == DocumentVersion.id,
+                )
+                .join(
+                    SourceObject,
+                    SourceObject.id == DocumentVersionSource.source_object_id,
+                )
+                .where(Document.matter_id.in_([m.id for m in page_matters]))
+                .order_by(SourceObject.path)
+            ).all():
+                paths_by_matter.setdefault(matter_id, []).append(path)
         team_by_matter: dict[str, list[dict]] = {}
         for matter_id, person_name, title, group, role in self.session.execute(
             select(
@@ -947,6 +972,8 @@ class RetrievalService:
                     "visible_versions": visible_counts[matter.id],
                 }
             )
+            if include_documents:
+                result[-1]["source_paths"] = paths_by_matter.get(matter.id, [])
             if practice_group is not None:
                 # Why THIS row is on a group-filtered page. The filter matches any
                 # group staffed on the matter, so a page mixes the group's own book
@@ -1001,6 +1028,7 @@ class RetrievalService:
         lifecycle: str | None = None,
         practice_group: str | None = None,
         firm_person: str | None = None,
+        include_documents: bool = False,
     ) -> Page:
         """``list_matters`` plus an exact ``has_more``, via one extra matter.
 
@@ -1019,6 +1047,7 @@ class RetrievalService:
                 lifecycle=lifecycle,
                 practice_group=practice_group,
                 firm_person=firm_person,
+                include_documents=include_documents,
             ),
             offset=offset,
             limit=limit,
