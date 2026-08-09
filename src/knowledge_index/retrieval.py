@@ -70,6 +70,15 @@ class SearchHit:
     matter_ref: str | None = None  # human matter reference, e.g. 1038-00001
     parties: list[dict] = field(default_factory=list)  # [{name, role}]
     identifiers: list[str] = field(default_factory=list)  # the document's own legal ids
+    # Version position within the document. A row is one VERSION of a document, and
+    # without these three a caller cannot tell "the draft" from "the signed one":
+    # it sees two independent-looking rows that differ only in filename, and cites
+    # whichever it read first. Measured on graded runs, that is a recurring wrong
+    # answer — a near-final draft cited while the final sat one ordinal later on
+    # the same document.
+    version_ordinal: int | None = None  # 1 = earliest known version
+    is_latest_final: bool = False  # this version IS the document's authoritative one
+    latest_final_version_id: str | None = None  # which version is, when this is not
     source_paths: list[str] = field(default_factory=list)
     matched_identifiers: list[str] = field(default_factory=list)
     citations: list[dict] = field(default_factory=list)
@@ -98,6 +107,9 @@ class SearchHit:
             "parties": self.parties,
             "identifiers": self.identifiers,
             "version_status": self.version_status,
+            "version_ordinal": self.version_ordinal,
+            "is_latest_final": self.is_latest_final,
+            "latest_final_version_id": self.latest_final_version_id,
             "source_paths": self.source_paths,
             # No embedded citation record: the row already carries the hit's
             # full identity (document_id, version_id, matter_id, source_paths)
@@ -1634,6 +1646,12 @@ class RetrievalService:
             ],
             identifiers=list(document.identifiers or []),
             version_status=version.status,
+            version_ordinal=version.ordinal,
+            is_latest_final=bool(
+                document.latest_final_version_id
+                and version.id == document.latest_final_version_id
+            ),
+            latest_final_version_id=document.latest_final_version_id,
             score=score,
             excerpt=_excerpt(str(source.get("text") or ""), query_terms),
             source_paths=[item.path for item in authorized_sources],

@@ -315,4 +315,14 @@ identification: two documents in one matter often share a title, and the
 path is what distinguishes them. Where a task asks you to pull or include
 documents, list the paths. State counts and "all/none" claims only after
 paging to `has_more: false`.
+
+`response.md` MUST end with a section headed `## Documents relied on`, listing
+one full `source_paths` value per line, for every document whose contents you
+used to reach a conclusion — grouped by matter, verbatim, no prose titles and
+no abbreviation. This section is part of the answer, not an appendix to it: an
+assertion about a document you do not list there is unsupported, and a document
+you list but did not open is a false citation. Write it LAST, from the rows you
+actually read, and do not shorten it when the answer runs long — it is the
+first thing a reviewer checks and the cheapest thing for you to get exactly
+right, because every path was already handed to you on the result row.
 """

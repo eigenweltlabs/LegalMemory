@@ -1146,10 +1146,13 @@ class PipelineRunner:
             # anchor honestly answering "I am not a version of anything I see" is NOT
             # a contradiction of their attachment, and splitting the anchor out would
             # undo the merge. Only the non-anchor case moves out.
+            previous_document = current_document
             current_document, current_version = self._create_file_entity(
                 session, source_object, matter, provenance
             )
             _relink_version_source(session, current_version.id, source_object.id)
+            # The chain it just left has a hole where this version used to sit.
+            _renumber_chain(session, previous_document)
         if (
             result.identity in {"duplicate", "new_version"}
             and identity_ref
@@ -1950,7 +1953,9 @@ class PipelineRunner:
                 kind=RelationKind.SUPERSEDES.value,
                 provenance=provenance,
             )
-
+        # Placement above is pairwise against ONE anchor; renumbering folds that
+        # decision into the chain as a whole so the ordinals stay dense and stable.
+        _renumber_chain(session, document)
 
     def _extract_metadata(self, session: Session, state: ProcessingState) -> StageResult:
         # Runs on EVERY version: this stage is the sole owner of document typing
@@ -2797,6 +2802,42 @@ def _version_is_chain_anchor(
         ),
     )
     return anchor.id == version_id
+
+
+def _renumber_chain(session: Session, document: Document) -> None:
+    """Re-derive the whole version chain's numbering after any join, split or move.
+
+    Files are inserted individually and in parallel, so a chain is assembled from
+    many independent pairwise decisions — and the numbering drifts out of shape as
+    they land. A version that moves to another document leaves its ordinal behind,
+    so chains are observed starting at 2 with no 1; ``before`` shifts every later
+    ordinal up, so repeated inserts leave holes. A caller reading "ordinal 2" then
+    cannot tell the second of five from the second of three with two gaps.
+
+    Every relate task therefore renumbers the chain it touched, which makes the
+    numbering a property of the chain's current members rather than of arrival
+    order — the same set of files converges on the same numbering however they
+    interleave. Only the SPACING changes: the relative order the model established
+    is preserved exactly, versions that shared an ordinal (``relative_order:
+    "same"``) still share one, and a NULL ordinal stays NULL because the model
+    said it did not know and inventing a position is worse than an honest gap.
+    """
+    versions = session.scalars(
+        select(DocumentVersion).where(DocumentVersion.document_id == document.id)
+    ).all()
+    placed = [version for version in versions if version.ordinal is not None]
+    if not placed:
+        _refresh_latest_final(session, document)
+        return
+    earliest = datetime.min.replace(tzinfo=UTC)
+    placed.sort(key=lambda v: (v.ordinal, v.created_at or earliest, v.id))
+    next_ordinal, previous = 0, object()
+    for version in placed:
+        if version.ordinal != previous:  # a new rung, not a tie on the same one
+            next_ordinal += 1
+            previous = version.ordinal
+        version.ordinal = next_ordinal
+    _refresh_latest_final(session, document)
 
 
 def _refresh_latest_final(session: Session, document: Document) -> None:
