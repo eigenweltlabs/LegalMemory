@@ -826,6 +826,7 @@ class RetrievalService:
                 break
 
         page_matters = visible[offset:]
+        matched_names = set(self._group_spellings(practice_group)) if practice_group else set()
         team_by_matter: dict[str, list[dict]] = {}
         for matter_id, person_name, title, group, role in self.session.execute(
             select(
@@ -843,6 +844,14 @@ class RetrievalService:
 
         result: list[dict] = []
         for matter in page_matters:
+            involved = sorted(
+                {
+                    member["practice_group"]
+                    for member in team_by_matter.get(matter.id, [])
+                    if member.get("practice_group")
+                }
+                | ({matter.practice_group} if matter.practice_group else set())
+            )
             area_payload = None
             if matter.practice_area:
                 area_payload = {
@@ -891,22 +900,27 @@ class RetrievalService:
                     # MENTION rather than what the matter is, so a term loan that
                     # merely repays a revolver counts as a revolver.
                     "lifecycle": matter.lifecycle,
+                    # The group that OWNS the matter — the book it is filed in,
+                    # which is the group of the partner responsible for it.
                     "practice_group": matter.practice_group,
                     # Who at the firm works it. A caller asking "what has this
                     # partner done" or "who ran this" gets it from the row instead
                     # of reading the matter's intake memo.
                     "firm_team": team_by_matter.get(matter.id, []),
-                    # Every group with someone on this matter, owner first. A
-                    # cross-practice financing belongs to more than one book, and a
-                    # single value hides the others.
-                    "practice_groups": sorted(
-                        {
-                            member["practice_group"]
-                            for member in team_by_matter.get(matter.id, [])
-                            if member.get("practice_group")
-                        }
-                        | ({matter.practice_group} if matter.practice_group else set())
-                    ),
+                    # Every group with someone on this matter, the owner included.
+                    # A cross-practice financing belongs to more than one book and
+                    # a single value hides the others.
+                    "practice_groups": involved,
+                    # The groups seconded in, owner excluded. A tax partner sitting
+                    # on a capital markets IPO makes it a matter the tax group has
+                    # WORKED, not one the tax group RUNS, and the difference decides
+                    # whether it belongs in an answer about "our tax matters". The
+                    # split is stated rather than left to be inferred by comparing
+                    # the two fields above: on a filtered page of twenty-six that
+                    # inference is where an answer over-includes.
+                    "supporting_groups": [
+                        group for group in involved if group != matter.practice_group
+                    ],
                     "instrument": (matter.profile or {}).get("instrument"),
                     "principal_document": (matter.profile or {}).get(
                         "principal_document"
@@ -923,6 +937,17 @@ class RetrievalService:
                     "visible_versions": visible_counts[matter.id],
                 }
             )
+            if practice_group is not None:
+                # Why THIS row is on a group-filtered page. The filter matches any
+                # group staffed on the matter, so a page mixes the group's own book
+                # with matters it was merely seconded onto, and a caller answering
+                # "which matters does this group have" needs to see which is which
+                # without re-deriving it per row.
+                result[-1]["group_match"] = (
+                    "owner"
+                    if matter.practice_group in matched_names
+                    else "supporting"
+                )
         return result
 
     def _visible_version_counts(
