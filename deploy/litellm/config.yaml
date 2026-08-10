@@ -63,9 +63,14 @@ router_settings:
   num_retries: 0
 
 litellm_settings:
-  # Qwen's reasoning responses for large documents can exceed four minutes.
-  # The pipeline still bounds retries and stage attempts.
-  request_timeout: 600
+  # Qwen's reasoning responses for large documents can exceed four minutes, and a
+  # matter-level agent reading a whole folder runs far longer than one response.
+  # At 600 this gateway cut those conversations off below the client's own timeout,
+  # answered 408, and the pipeline quarantined a document that was working: 43 of 52
+  # quarantines on the 9,288-file run, hitting a different set of files each time.
+  # Must stay BELOW KI_MODEL_REQUEST_TIMEOUT_SECONDS so the client is not the one
+  # that gives up first. The pipeline still bounds retries and stage attempts.
+  request_timeout: 1800
   json_logs: true
   # GPT-5 models reject legacy sampling parameters such as temperature=0.
   # Keep the appliance's model calls portable and let LiteLLM remove only
