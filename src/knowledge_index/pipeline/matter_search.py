@@ -649,6 +649,16 @@ def get_or_create_matter(
         )
         session.add(matter)
         session.flush()
+        # A matter created HERE is as new as one created by the classify stage,
+        # and its facts are just as unknown — practice, service, lifecycle, what
+        # the deal is, who staffs it. The stage marks the matters it creates
+        # itself; this path commits its own session and so was missed, which left
+        # two thirds of an estate's matters permanently outside the profile queue
+        # and therefore never profiled at all. Mark at the point of creation, so
+        # no future caller can create a matter that the profile pass never sees.
+        from knowledge_index.pipeline.matter_profile import mark_matter_dirty
+
+        mark_matter_dirty(session, matter.id)
         summary = _matter_summary(session, matter)
         summary["created"] = True
         session.commit()
