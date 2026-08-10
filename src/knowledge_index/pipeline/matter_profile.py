@@ -559,6 +559,14 @@ def profile_matter(session: Session, config: AppConfig, matter_id: str) -> Matte
             row.last_error = f"{type(exc).__name__}: {exc}"[:500]
         return None
 
+    # Settle the groups first, each committed as it is decided, so that the writes
+    # below never hold a lock across a model call. See resolve_team_groups.
+    groups = resolve_team_groups(session, config, profile)
+    matter = session.get(Matter, matter_id)
+    if matter is None:  # deleted while the agent was reading
+        return None
+    row = session.get(MatterProfileQueue, matter_id)
+
     area_scope = (
         config.ontology_facet("area_of_law")
         if "area_of_law" in config.ontology.active_facets
@@ -571,7 +579,7 @@ def profile_matter(session: Session, config: AppConfig, matter_id: str) -> Matte
         if resolved := service_scope.resolve(profile.matter_kind_node):
             matter.matter_kind = resolved
     matter.lifecycle = profile.lifecycle
-    apply_team(session, config, matter, profile)
+    apply_team(session, config, matter, profile, groups)
     matter.profile = {
         "instrument": profile.instrument,
         "group_evidence": profile.group_evidence,
@@ -741,8 +749,39 @@ ROLE_PRECEDENCE = (
 )
 
 
+def resolve_team_groups(
+    session: Session, config: AppConfig, profile: MatterProfile
+) -> dict[str, str | None]:
+    """Settle every practice group the profile names, before anything is written.
+
+    resolve_group can call the model, and it can INSERT a new group. Doing both from
+    inside apply_team meant a transaction that had already inserted `firm_people` or
+    `firm_practice_groups` rows then sat on those locks for the length of another
+    agent call. Two matters naming the same partner serialised on it, and at scale
+    that is a convoy: on the 9,288-file run, 300 concurrent profiles produced 324
+    transactions idle-in-transaction, the longest holding locks for 12 minutes, which
+    stalled extract_metadata as well because it writes the same tables.
+
+    Committing each group as it is settled keeps every INSERT..COMMIT window free of
+    model calls, so the locks are held for milliseconds instead of minutes.
+    """
+    groups: dict[str, str | None] = {}
+    evidence = profile.group_evidence
+    for member in profile.team:
+        raw = (member.practice_group or "").strip()
+        if not raw or raw in groups:
+            continue
+        groups[raw] = resolve_group(session, config, raw, evidence=evidence)
+        session.commit()
+    return groups
+
+
 def apply_team(
-    session: Session, config: AppConfig, matter: Matter, profile: MatterProfile
+    session: Session,
+    config: AppConfig,
+    matter: Matter,
+    profile: MatterProfile,
+    groups: dict[str, str | None] | None = None,
 ) -> None:
     """Record who works the matter, and take the matter's group from its owner.
 
@@ -759,7 +798,15 @@ def apply_team(
     """
     if not profile.team:
         return
-    evidence = profile.group_evidence
+    # Settled up front by resolve_team_groups so nothing below calls the model while
+    # holding a write lock. Falling back keeps the CLI and tests working unchanged.
+    if groups is None:
+        groups = resolve_team_groups(session, config, profile)
+
+    def group_for(member: TeamMember) -> str | None:
+        raw = (member.practice_group or "").strip()
+        return groups.get(raw) if raw else None
+
     wanted: dict[tuple[str, str], TeamMember] = {}
     for member in profile.team:
         key = (normalize_entity_name(member.name or ""), (member.role or "").strip())
@@ -777,9 +824,7 @@ def apply_team(
             person = FirmPerson(
                 name=member.name.strip(),
                 title=member.title,
-                practice_group=resolve_group(
-                    session, config, member.practice_group, evidence=evidence
-                ),
+                practice_group=group_for(member),
             )
             session.add(person)
             session.flush()
@@ -790,18 +835,13 @@ def apply_team(
             if person.title is None and member.title:
                 person.title = member.title
             if person.practice_group is None and member.practice_group:
-                person.practice_group = resolve_group(
-                    session, config, member.practice_group, evidence=evidence
-                )
+                person.practice_group = group_for(member)
         session.add(MatterTeam(matter_id=matter.id, person_id=person.id, role=role))
         rank = next(
             (i for i, r in enumerate(ROLE_PRECEDENCE) if r in role.lower()),
             len(ROLE_PRECEDENCE),
         )
-        group = (
-            resolve_group(session, config, member.practice_group, evidence=evidence)
-            or person.practice_group
-        )
+        group = group_for(member) or person.practice_group
         if group and rank < best_rank:
             owner_group, best_rank = group, rank
     if owner_group:
