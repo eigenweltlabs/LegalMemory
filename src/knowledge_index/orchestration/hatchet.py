@@ -102,10 +102,6 @@ class RestoreInput(BaseModel):
     run_id: str
 
 
-class MatterProfileInput(BaseModel):
-    matter_id: str
-
-
 @dataclass(frozen=True)
 class HatchetRuntime:
     client: Hatchet
@@ -114,7 +110,6 @@ class HatchetRuntime:
     sync_workflow: Any
     backup_workflow: Any
     restore_workflow: Any
-    matter_profile_workflow: Any
 
 
 def build_hatchet_runtime(
