@@ -104,3 +104,67 @@ def test_the_sweep_takes_everything_queued_regardless_of_the_window(
         assert due_matters(
             session, debounce_seconds=DEFAULT_DEBOUNCE_SECONDS, ignore_debounce=True
         ) == ["busy"]
+
+
+def test_the_client_is_replaced_not_accumulated(factory: sessionmaker[Session]) -> None:
+    """One matter, one client — whatever the documents happened to call "the client".
+
+    The per-document extractor linked any party a document called the client, so a
+    target, a fund under review and a counterparty each became one: 222 clients and
+    150 multi-client matters on a corpus whose firm has 46.
+    """
+    from knowledge_index.db.models import Client, MatterClient
+    from knowledge_index.pipeline.matter_profile import MatterProfile, apply_client
+
+    with factory() as session:
+        _add_matter(session, "client-test")
+        matter = session.get(Matter, "client-test")
+        # what the documents accrued: the target and a fund, neither of them the client
+        for name in ("Cascadia Renewables Holdings, Inc.", "Meridian Peak Fund IV, L.P."):
+            c = Client(name=name)
+            session.add(c)
+            session.flush()
+            session.add(MatterClient(matter_id=matter.id, client_id=c.id))
+        session.commit()
+        assert session.query(MatterClient).filter_by(matter_id=matter.id).count() == 2
+
+        profile = MatterProfile(
+            lifecycle="executed",
+            summary="x",
+            evidence="y",
+            client_name="Ironside Capital Management LP",
+            client_evidence="engagement-letter.docx: 'we act for Ironside'",
+        )
+        assert apply_client(session, matter, profile) == "Ironside Capital Management LP"
+        session.commit()
+
+        rows = session.query(MatterClient).filter_by(matter_id=matter.id).all()
+        assert len(rows) == 1
+        assert session.get(Client, rows[0].client_id).name == "Ironside Capital Management LP"
+
+
+def test_a_client_already_known_is_reused_not_duplicated(
+    factory: sessionmaker[Session],
+) -> None:
+    """The same client across forty matters is one row, keyed on the normalised name."""
+    from knowledge_index.db.models import Client, MatterClient
+    from knowledge_index.pipeline.matter_profile import MatterProfile, apply_client
+
+    with factory() as session:
+        existing = Client(name="Ironside Capital Management LP")
+        session.add(existing)
+        _add_matter(session, "reuse-test")
+        session.commit()
+
+        matter = session.get(Matter, "reuse-test")
+        apply_client(
+            session,
+            matter,
+            MatterProfile(lifecycle="executed", summary="x", evidence="y",
+                          client_name="Ironside Capital Management, L.P."),
+        )
+        session.commit()
+
+        assert session.query(Client).count() == 1
+        row = session.query(MatterClient).filter_by(matter_id=matter.id).one()
+        assert row.client_id == existing.id

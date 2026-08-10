@@ -39,7 +39,7 @@ import json
 from datetime import UTC, datetime
 
 from pydantic import BaseModel, Field
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, text
 from sqlalchemy.orm import Session
 
 from knowledge_index.config import AppConfig
@@ -47,12 +47,14 @@ from knowledge_index.pipeline.providers import AgentTool, chat_agent
 from knowledge_index.entity_names import normalize_entity_name, normalize_group
 from knowledge_index.db.models import (
     Artifact,
+    Client,
     Document,
     DocumentVersion,
     DocumentVersionSource,
     FirmPerson,
     FirmPracticeGroup,
     Matter,
+    MatterClient,
     MatterProfileQueue,
     MatterTeam,
     SourceObject,
@@ -152,6 +154,21 @@ class MatterProfile(BaseModel):
         "name that the known list is missing. Never include client contacts, "
         "opposing counsel or other side's advisers: only this firm's own people.",
     )
+    client_name: str | None = Field(
+        default=None,
+        description="The party THIS FIRM acts for on THIS matter, as the engagement "
+        "letter, the intake form or the invoices name it. Exactly one, and never the "
+        "other side: not the counterparty, not the target being acquired, not a fund "
+        "the client is only reviewing or investing into, not the issuer on a deal the "
+        "client underwrites. On an investor-side or co-invest matter the client is the "
+        "investor we act for, even though almost every document in the folder is about "
+        "the fund or target instead. null when the folder does not show it.",
+    )
+    client_evidence: str | None = Field(
+        default=None,
+        description="The filename and the phrase that names the client, so the claim "
+        "can be checked.",
+    )
     group_evidence: str | None = Field(
         default=None,
         description="The filename and the phrase that named the responsible partner "
@@ -188,6 +205,14 @@ PROFILE_SYSTEM = (
     "from the document that would record the outcome, and remember that a "
     "termination notice or UCC-3 release is usually the ordinary closing mechanics "
     "of a deal that DID happen.\n\n"
+    "Say WHO THE FIRM ACTS FOR, and say it once. The client is not whoever the "
+    "documents are about — on an acquisition the papers are full of the target, on a "
+    "co-investment they are full of the fund, on an investor-side review they are the "
+    "other manager's LPA — and every one of those is the OTHER side. The client is "
+    "the party that engaged this firm: the counterparty to the engagement letter, the "
+    "entity on the intake form, the addressee of the invoices. Where the folder shows "
+    "no engagement paperwork, the client is still whoever the firm's own memoranda "
+    "write for, not the party they write about.\n\n"
     "The firm's PRACTICE GROUP and its people are declared, not deduced, and finding "
     "them is your FIRST job. Somewhere in this folder the firm has written who runs "
     "this matter and which group they sit in — 'Claudia Merritt, Responsible Partner, "
@@ -579,6 +604,7 @@ def profile_matter(session: Session, config: AppConfig, matter_id: str) -> Matte
         if resolved := service_scope.resolve(profile.matter_kind_node):
             matter.matter_kind = resolved
     matter.lifecycle = profile.lifecycle
+    apply_client(session, matter, profile)
     apply_team(session, config, matter, profile, groups)
     matter.profile = {
         "instrument": profile.instrument,
@@ -747,6 +773,52 @@ ROLE_PRECEDENCE = (
     "lead partner",
     "partner",
 )
+
+
+def apply_client(session: Session, matter: Matter, profile: MatterProfile) -> str | None:
+    """Record the one party the firm acts for, replacing whatever the documents accrued.
+
+    Who the client is, is a property of the MATTER, and only the folder shows it: the
+    engagement letter, the intake form, the invoices. The per-document extractor was
+    asked it once per document instead, and any party a document called "the client"
+    became a client of the matter -- so an LPA whose own client is someone else, a
+    third-party fund under review, or a target in a purchase agreement each added one.
+    Across this corpus that produced 222 clients and 150 matters with more than one,
+    for a firm that has 46.
+
+    Entity resolution already collapses spellings (1,212 names to 222 entities); it
+    cannot fix which of them is the client, because that is a role, not a name. So the
+    profile decides it once and this writes exactly that -- the same replace-don't-add
+    contract apply_team uses for the team.
+    """
+    raw = (profile.client_name or "").strip()
+    if not raw:
+        return None
+    key = normalize_entity_name(raw)
+    if not key:
+        return None
+
+    client = session.scalar(select(Client).where(Client.normalized_name == key))
+    if client is None and session.bind is not None and session.bind.dialect.name == "postgresql":
+        # The resolver's own alias list, so a client first seen here under a variant
+        # still resolves to one row the next time a document spells it differently.
+        # Raw containment, as in matter_search: the ORM's .contains() on a JSON column
+        # compiles to a string LIKE, which matches nothing and errors on JSON input.
+        client = session.scalar(
+            select(Client)
+            .where(text("clients.normalized_aliases @> cast(:alias as jsonb)"))
+            .params(alias=json.dumps([key]))
+        )
+    if client is None:
+        client = Client(name=raw, provenance={"decided_by": "matter_profile",
+                                              "evidence": profile.client_evidence})
+        session.add(client)
+        session.flush()
+
+    session.execute(delete(MatterClient).where(MatterClient.matter_id == matter.id))
+    session.add(MatterClient(matter_id=matter.id, client_id=client.id))
+    session.flush()
+    return client.name
 
 
 def resolve_team_groups(
