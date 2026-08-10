@@ -4,10 +4,20 @@ its existing entities.
 
 A firm has hundreds to thousands of matters, so the old "dump the first 80 matters
 into the prompt" approach silently drops most of them. Instead the agent SEARCHES:
-semantically over already-indexed chunks, lexically over matter titles, and by exact
-reference number, then reads the folder neighbourhood the way a paralegal would. All
-of this is unscoped by design — classification legitimately needs corpus-wide
-visibility to find the right matter — and never runs on the user query path.
+semantically over already-indexed chunks, fuzzily over the matter's own metadata —
+who we act for, who is across the table, the instrument, the practice group — and by
+exact reference number, then reads the folder neighbourhood the way a paralegal
+would. All of this is unscoped by design — classification legitimately needs
+corpus-wide visibility to find the right matter — and never runs on the user query
+path.
+
+The metadata leg replaced a substring test against a title this pipeline had itself
+derived from the matter's documents. That was circular: a folder's early documents
+produced its title, and the title then helped decide what else attached to the
+folder. It was also wrong exactly where it mattered — on investor-side and
+co-investment work every document is about the other party, so the matter was titled
+after the entity it was acting against, and searching for the client did not find
+it.
 
 Entity resolution lives here too, and deliberately does NOT share the semantic leg:
 see the block comment above ``EntityCandidate`` for what that cost.
@@ -21,7 +31,7 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from sqlalchemy import func, select, text
+from sqlalchemy import func, or_, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -458,6 +468,7 @@ def _ranked_matters(
     if not query:
         return []
     scored: dict[str, float] = {}
+    postgres = session.bind is not None and session.bind.dialect.name == "postgresql"
 
     # Semantic: nearest already-indexed chunks -> their matters (skips cleanly when the
     # index is cold, i.e. nothing indexed yet on a fresh estate).
@@ -475,14 +486,51 @@ def _ranked_matters(
         except Exception:
             pass
 
-    # Lexical: matter title contains the query.
+    # The matter's own metadata, fuzzily. This used to be a substring test against
+    # Matter.title -- a string this pipeline derived from the matter's own documents,
+    # weighted five times the semantic leg. That closes a loop: the folder's early
+    # documents produce a title, and the title then decides what else attaches to the
+    # folder. It also mislabels exactly the matters whose documents are about the other
+    # side, so a search for the client misses the matter we titled after its target.
+    #
+    # Search what the matter verifiably IS instead: who we act for, who is across the
+    # table, what the instrument is, which book runs it. Trigram rather than substring,
+    # so an abbreviated legal form still finds the fully spelled one -- the same index
+    # and operator the entity resolver uses.
+    normalized = normalize_entity_name(query)
+    if postgres and normalized:
+        for table, join, weight in (
+            ("clients", "JOIN matter_clients l ON l.client_id = e.id", 0.8),
+            ("parties", "JOIN matter_parties l ON l.party_id = e.id", 0.5),
+        ):
+            # `%%`: the driver's paramstyle is `format`, so a lone % reads as a
+            # placeholder. Rides the GIN index on normalized_name.
+            rows = session.execute(
+                text(
+                    f"SELECT l.matter_id, similarity(e.normalized_name, :n) AS s "
+                    f"FROM {table} e {join} "
+                    f"WHERE e.normalized_name %% :n "
+                    f"ORDER BY s DESC LIMIT 60"
+                ),
+                {"n": normalized},
+            )
+            for matter_id, sim in rows:
+                scored[matter_id] = scored.get(matter_id, 0.0) + weight * float(sim)
+
+    # What the deal is, and which book runs it: short free-text fields where a
+    # substring is the right test -- "revolving" should find a revolving facility.
     for matter in session.scalars(
         select(Matter)
-        .where(Matter.title.ilike(f"%{query}%"))
-        .order_by(Matter.title, Matter.id)
-        .limit(30)
+        .where(
+            or_(
+                Matter.profile["instrument"].as_string().ilike(f"%{query}%"),
+                Matter.practice_group.ilike(f"%{query}%"),
+            )
+        )
+        .order_by(Matter.id)
+        .limit(60)
     ):
-        scored[matter.id] = scored.get(matter.id, 0.0) + 0.5
+        scored[matter.id] = scored.get(matter.id, 0.0) + 0.4
 
     # Exact-ish: reference number substring.
     for matter_id in _matters_by_reference_substring(session, query):
@@ -642,10 +690,19 @@ def get_or_create_matter(
         matter = Matter(
             project_id=project_id,
             reference_numbers=[reference],
-            title=title.strip(),
+            # The matter's identity is its reference, which comes from the filing
+            # system and cannot be wrong. A title read off the documents can be, and
+            # is wrong in a specific direction: on investor-side, co-investment and
+            # acquisition work every document is about the OTHER party, so the matter
+            # gets named after whoever we are acting against. That name then travels
+            # -- into search, into citations, and into the prompts the per-document
+            # stages run with -- so one bad title becomes context for a whole folder.
+            # The agent's proposed title is kept in provenance, where it is a claim
+            # rather than the matter's name.
+            title=reference,
             status=status,
             imported=False,
-            provenance=provenance,
+            provenance={**(provenance or {}), "proposed_title": (title or "").strip()},
         )
         session.add(matter)
         session.flush()

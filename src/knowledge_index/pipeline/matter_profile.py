@@ -668,8 +668,8 @@ GROUP_SYSTEM = (
     "Documents say 'Government Contracts / Banking & Finance' to record that two "
     "groups share a matter, put an aside in brackets, name the outside firm on the "
     "other side, or print the firm's own name on the letterhead. None of those is a "
-    "book of business. A firm runs on the order of fifteen practice groups, so a "
-    "corpus that produces forty has been reading its notes as an org chart."
+    "book of business. A firm has far fewer groups than its documents have ways of "
+    "referring to work, so treat a new group as the exception it is."
 )
 
 
@@ -734,8 +734,9 @@ def resolve_group(
             judgement = None
         if judgement is not None and not judgement.is_practice_group:
             # A cross-staffing note, a bracketed aside, an outside firm, or our own
-            # letterhead. Creating a group for each is how a 15-group firm came to
-            # have 42, and every one of them then competes as a filter value.
+            # letterhead. Creating a group for each multiplies the firm's org chart
+            # several times over, and every invented group then competes as a filter
+            # value on the retrieval path.
             return None
         if judgement is not None and judgement.same_as:
             wanted = normalize_entity_name(normalize_group(judgement.same_as) or "")
@@ -783,11 +784,11 @@ def apply_client(session: Session, matter: Matter, profile: MatterProfile) -> st
     asked it once per document instead, and any party a document called "the client"
     became a client of the matter -- so an LPA whose own client is someone else, a
     third-party fund under review, or a target in a purchase agreement each added one.
-    Across this corpus that produced 222 clients and 150 matters with more than one,
-    for a firm that has 46.
+    Left per-document, a firm ends up with several times as many clients as it has,
+    and most matters carrying more than one.
 
-    Entity resolution already collapses spellings (1,212 names to 222 entities); it
-    cannot fix which of them is the client, because that is a role, not a name. So the
+    Entity resolution already collapses spellings of a name; it cannot fix which of
+    them is the client, because that is a role, not a name. So the
     profile decides it once and this writes exactly that -- the same replace-don't-add
     contract apply_team uses for the team.
     """
@@ -829,10 +830,10 @@ def resolve_team_groups(
     resolve_group can call the model, and it can INSERT a new group. Doing both from
     inside apply_team meant a transaction that had already inserted `firm_people` or
     `firm_practice_groups` rows then sat on those locks for the length of another
-    agent call. Two matters naming the same partner serialised on it, and at scale
-    that is a convoy: on the 9,288-file run, 300 concurrent profiles produced 324
-    transactions idle-in-transaction, the longest holding locks for 12 minutes, which
-    stalled extract_metadata as well because it writes the same tables.
+    agent call. Two matters naming the same partner serialise on it, and at any real
+    fan-out that becomes a convoy -- hundreds of transactions idle in transaction,
+    holding entity locks for minutes, which stalls the per-document stages too because
+    they write the same tables.
 
     Committing each group as it is settled keeps every INSERT..COMMIT window free of
     model calls, so the locks are held for milliseconds instead of minutes.

@@ -37,9 +37,9 @@ log = logging.getLogger(__name__)
 # A matter-level agent reading a large folder legitimately runs for many turns, and
 # the previous 660s cut those off mid-conversation. The failure surfaced as a gateway
 # 408, burned a stage attempt, and quarantined a document that was doing nothing
-# wrong -- 43 of 52 quarantines on the 9,288-file run, a different set every time,
-# because it depends on what is in flight rather than on the file. Must stay above
-# the gateway's own request timeout or the gateway cuts first and this never applies.
+# wrong. Which documents it hits depends on what is in flight rather than on the
+# file, so the casualties differ every run. Must stay above the gateway's own request
+# timeout, or the gateway cuts first and this never applies.
 MODEL_REQUEST_TIMEOUT_SECONDS = float(os.getenv("KI_MODEL_REQUEST_TIMEOUT_SECONDS", "1980"))
 
 # Degenerate-agent-loop trip (see chat_agent): warn on the Nth identical
@@ -49,12 +49,12 @@ MODEL_REQUEST_TIMEOUT_SECONDS = float(os.getenv("KI_MODEL_REQUEST_TIMEOUT_SECOND
 # There is deliberately NO prompt-size budget. One used to abort the conversation at
 # 160k tokens "well below the serving context", and it did not prevent runaway loops
 # -- the repeated-call trip above does that -- it only killed the agents doing the
-# most work. On a 9,288-file corpus it quarantined documents whose folders were
-# large or whose text was sprawling (tracked-changes markup, spreadsheet trackers,
-# long email threads), and it did so deterministically: those files failed every
-# attempt, on every retry, at any concurrency, so they were the only documents the
-# pipeline could never index. A conversation that genuinely exceeds the model's
-# serving context gets a real error from the gateway saying so.
+# most work. It aborted documents whose folders were large or whose text was
+# sprawling -- tracked-changes markup, spreadsheet trackers, long email threads --
+# and did so deterministically: those files failed every attempt, on every retry, at
+# any concurrency, so they were the only ones the pipeline could never index. A
+# conversation that genuinely exceeds the model's serving context gets a real error
+# from the gateway saying so.
 REPEATED_CALL_WARN = int(os.getenv("KI_AGENT_REPEATED_CALL_WARN", "3"))
 REPEATED_CALL_ABORT = int(os.getenv("KI_AGENT_REPEATED_CALL_ABORT", "6"))
 
