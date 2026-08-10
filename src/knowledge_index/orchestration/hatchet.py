@@ -102,6 +102,10 @@ class RestoreInput(BaseModel):
     run_id: str
 
 
+class MatterProfileInput(BaseModel):
+    matter_id: str
+
+
 @dataclass(frozen=True)
 class HatchetRuntime:
     client: Hatchet
@@ -110,6 +114,7 @@ class HatchetRuntime:
     sync_workflow: Any
     backup_workflow: Any
     restore_workflow: Any
+    matter_profile_workflow: Any
 
 
 def build_hatchet_runtime(
@@ -132,7 +137,9 @@ def build_hatchet_runtime(
         # tighter gate just parks in-flight documents behind it (2026-08-03
         # smoke: 4,096-doc concurrency produced only ~1,500 GPU-visible
         # requests with relate gated at 1,024)
-        "KI_RELATE_MODEL_CONCURRENCY", default=16, maximum=4096
+        "KI_RELATE_MODEL_CONCURRENCY",
+        default=16,
+        maximum=4096,
     )
     # The index stage embeds every chunk with one synchronous call per chunk to
     # the external embedding provider (OpenAI text-embedding-3-small). Left
@@ -140,9 +147,7 @@ def build_hatchet_runtime(
     # the provider's RPM limit, drawing a 429 storm that quarantines documents.
     # Give it its own throttle, like RELATE, so steady-state request rate stays
     # under the provider ceiling (LiteLLM rpm/tpm is the hard backstop).
-    index_concurrency = _positive_int_env(
-        "KI_INDEX_MODEL_CONCURRENCY", default=16, maximum=1024
-    )
+    index_concurrency = _positive_int_env("KI_INDEX_MODEL_CONCURRENCY", default=16, maximum=1024)
     workflow = client.workflow(
         name="knowledge-index-document-insertion",
         description="One resumable insertion workflow per source document",
@@ -170,9 +175,7 @@ def build_hatchet_runtime(
                 raise RuntimeError(
                     f"{input.source_path}: stage {stage} remains {status}; retrying task"
                 )
-            _refresh_batch_progress(
-                session_factory, input.run_id, "complete" if final else stage
-            )
+            _refresh_batch_progress(session_factory, input.run_id, "complete" if final else stage)
             return {
                 "source_object_id": input.source_object_id,
                 "source_path": input.source_path,
@@ -489,9 +492,7 @@ def trigger_insertion(
         return f"empty-batch:{run_id}"
 
     runtime = build_hatchet_runtime(session_factory, get_config)
-    workflow = (
-        runtime.access_workflow if batch_workflow == "access-refresh" else runtime.workflow
-    )
+    workflow = runtime.access_workflow if batch_workflow == "access-refresh" else runtime.workflow
     items = [
         workflow.create_bulk_run_item(
             InsertionInput(
@@ -519,6 +520,7 @@ def start_hatchet_worker(
     runtime = build_hatchet_runtime(session_factory, config)
     _start_run_sweeper(session_factory, _as_getter(config))
     _start_claim_recovery(session_factory, _as_getter(config))
+    _start_matter_profiler(session_factory, _as_getter(config))
     # One worker process serves one resource lane, named by KI_WORKER_LANE and
     # advertised as a worker label. Insertion stages carry a required lane label
     # (see STAGE_LANES), so this process only ever runs the stages that spend the
@@ -539,9 +541,7 @@ def start_hatchet_worker(
     ).start()
 
 
-def _start_claim_recovery(
-    session_factory: sessionmaker[Session], get_config: ConfigGetter
-) -> None:
+def _start_claim_recovery(session_factory: sessionmaker[Session], get_config: ConfigGetter) -> None:
     """Expire abandoned stage claims for as long as this worker lives.
 
     recover_stale_claims used to run only at worker startup. Every claim orphaned
@@ -602,6 +602,118 @@ def _start_run_sweeper(session_factory: sessionmaker[Session], get_config: Confi
                 )
 
     threading.Thread(target=loop, name="ki-run-sweeper", daemon=True).start()
+
+
+# How often the driver re-reads the queue inside one tick, not a ceiling on what a
+# tick may profile: each pass keeps going until nothing is due.
+_MATTER_PROFILE_BATCH = 50
+
+
+def _start_matter_profiler(
+    session_factory: sessionmaker[Session], get_config: ConfigGetter
+) -> None:
+    """Profile matters whose documents have settled, for as long as this worker lives.
+
+    ``profile_matter`` is written to be driven by change -- "a live DMS connector has no
+    'insertion finished' event to hang a one-shot pass on" -- but nothing drove it.
+    ``mark_matter_dirty`` filled ``matter_profile_queue`` and only an operator typing
+    ``ki profile-matters`` ever emptied it, so a firm that never ran the CLI indexed every
+    document and left every matter-level fact -- practice group, kind, lifecycle, version
+    chains -- empty forever. Set ``KI_MATTER_PROFILE_SECONDS=0`` to leave the timer out.
+
+    Every worker starts this loop and a session advisory lock keeps exactly one of them
+    profiling, so a matter costs one model call across the fleet rather than one per
+    replica.
+    """
+    if os.environ.get("KI_MATTER_PROFILE_SECONDS", "").strip() == "0":
+        return
+    interval = _positive_int_env("KI_MATTER_PROFILE_SECONDS", default=300, maximum=86400)
+
+    def loop() -> None:
+        while True:
+            time.sleep(interval)
+            try:
+                profiled = drain_matter_profile_queue(session_factory, get_config)
+                if profiled:
+                    print(
+                        f"[ki matters] profiled {profiled} matters",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+            except Exception as exc:  # noqa: BLE001 - must never kill the worker
+                print(
+                    f"[ki matters] profiling failed: {type(exc).__name__}: {exc}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+
+    threading.Thread(target=loop, name="ki-matter-profiler", daemon=True).start()
+
+
+_MATTER_PROFILE_LOCK_ID = int.from_bytes(
+    hashlib.blake2b(b"matter-profile-driver", digest_size=8).digest(),
+    byteorder="big",
+    signed=True,
+)
+
+
+def drain_matter_profile_queue(
+    session_factory: sessionmaker[Session], get_config: ConfigGetter
+) -> int:
+    """Profile every matter that is currently due, and report how many were written.
+
+    Holds a session advisory lock so that when every worker in the fleet ticks at once,
+    exactly one of them does the work -- a matter costs one model call, not one per
+    replica. A worker that cannot take the lock reports 0 and waits for its next tick.
+    """
+    from knowledge_index.pipeline.matter_profile import (
+        DEFAULT_DEBOUNCE_SECONDS,
+        due_matters,
+        profile_matter,
+    )
+
+    debounce = _positive_int_env(
+        "KI_MATTER_PROFILE_DEBOUNCE",
+        default=DEFAULT_DEBOUNCE_SECONDS,
+        maximum=86400,
+    )
+    profiled = 0
+    with session_factory() as session:
+        postgres = session.bind is not None and session.bind.dialect.name == "postgresql"
+        if postgres and not session.scalar(
+            select(func.pg_try_advisory_lock(_MATTER_PROFILE_LOCK_ID))
+        ):
+            return 0
+        try:
+            config = get_config()
+            attempted: set[str] = set()
+            while True:
+                batch = [
+                    matter_id
+                    for matter_id in due_matters(
+                        session,
+                        debounce_seconds=debounce,
+                        limit=_MATTER_PROFILE_BATCH,
+                    )
+                    if matter_id not in attempted
+                ]
+                # A matter that fails to profile keeps its queue row, carrying the
+                # attempt count, so the next tick retries it. Within *this* pass it
+                # would come back from due_matters forever, so a matter is attempted
+                # once per pass and the pass ends when nothing new is due.
+                if not batch:
+                    return profiled
+                for matter_id in batch:
+                    attempted.add(matter_id)
+                    if profile_matter(session, config, matter_id) is not None:
+                        profiled += 1
+                    session.commit()
+        finally:
+            if postgres:
+                # Session-scoped, so closing the Session would hand the connection back
+                # to the pool still holding it.
+                session.execute(select(func.pg_advisory_unlock(_MATTER_PROFILE_LOCK_ID)))
+                session.commit()
 
 
 def _stage_status(
@@ -759,9 +871,7 @@ def _refresh_batch_progress(
             )
         if session.bind is not None and session.bind.dialect.name == "postgresql":
             lock_id = int.from_bytes(
-                hashlib.blake2b(
-                    f"pipeline-progress:{run_id}".encode(), digest_size=8
-                ).digest(),
+                hashlib.blake2b(f"pipeline-progress:{run_id}".encode(), digest_size=8).digest(),
                 byteorder="big",
                 signed=True,
             )

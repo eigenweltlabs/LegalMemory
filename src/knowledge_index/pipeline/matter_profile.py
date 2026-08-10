@@ -39,7 +39,7 @@ import json
 from datetime import UTC, datetime
 
 from pydantic import BaseModel, Field
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from knowledge_index.config import AppConfig
@@ -593,10 +593,24 @@ def profile_matter(session: Session, config: AppConfig, matter_id: str) -> Matte
 class GroupJudgement(BaseModel):
     """Whether a newly-seen group name is one the firm already has."""
 
+    is_practice_group: bool = Field(
+        default=True,
+        description="False when the text does not name a practice group of THIS firm "
+        "at all: a cross-staffing note ('Government Contracts / Banking & Finance'), "
+        "a parenthetical aside ('IP (cross-staffed for pricing)'), an outside firm or "
+        "expert, or the firm's own name. Those are facts about the work, not books of "
+        "business, and must not become groups.",
+    )
     same_as: str | None = Field(
         default=None,
         description="The EXACT name of the existing group this one also names, "
         "copied from the list you were given. null when it is a different group.",
+    )
+    canonical_name: str | None = Field(
+        default=None,
+        description="When this is a new group, the firm's own name for it as it "
+        "would be written on a letterhead — 'Mergers & Acquisitions', not 'mergers & "
+        "acquisitions' and not a sentence fragment. null to keep it as written.",
     )
     reason: str = Field(
         description="One sentence: what in the two names or the evidence settles it."
@@ -615,7 +629,13 @@ GROUP_SYSTEM = (
     "same group described more fully. Two names that share no head noun are "
     "usually different groups. When the evidence does not settle it, answer null: "
     "a firm with one group too many is repairable, a firm that has silently "
-    "merged two of its practices is not."
+    "merged two of its practices is not.\n\n"
+    "Before any of that, decide whether the text names a practice group at all. "
+    "Documents say 'Government Contracts / Banking & Finance' to record that two "
+    "groups share a matter, put an aside in brackets, name the outside firm on the "
+    "other side, or print the firm's own name on the letterhead. None of those is a "
+    "book of business. A firm runs on the order of fifteen practice groups, so a "
+    "corpus that produces forty has been reading its notes as an org chart."
 )
 
 
@@ -656,6 +676,9 @@ def resolve_group(
         if group.normalized_name == key or key in (group.aliases or []):
             return group.name
 
+    # Bound before the branch: the first group of a fresh corpus is never judged,
+    # because there is nothing to compare it against.
+    judgement: GroupJudgement | None = None
     if existing:
         try:
             judgement = chat_agent(
@@ -663,7 +686,7 @@ def resolve_group(
                 config,
                 system=GROUP_SYSTEM,
                 user=(
-                    f"THIS FIRM'S PRACTICE GROUPS AS ALREADY RECORDED:\n"
+                    "THIS FIRM'S PRACTICE GROUPS AS ALREADY RECORDED:\n"
                     + "\n".join(f"  {group.name}" for group in existing)
                     + f"\n\nA DOCUMENT NAMES THIS GROUP: {normalized}"
                     + (f"\nWHERE IT SAYS SO: {evidence}" if evidence else "")
@@ -675,6 +698,11 @@ def resolve_group(
             )
         except Exception:  # noqa: BLE001 - an unjudged group is still a group
             judgement = None
+        if judgement is not None and not judgement.is_practice_group:
+            # A cross-staffing note, a bracketed aside, an outside firm, or our own
+            # letterhead. Creating a group for each is how a 15-group firm came to
+            # have 42, and every one of them then competes as a filter value.
+            return None
         if judgement is not None and judgement.same_as:
             wanted = normalize_entity_name(normalize_group(judgement.same_as) or "")
             for group in existing:
@@ -684,8 +712,16 @@ def resolve_group(
                     session.flush()
                     return group.name
 
+    # The first spelling seen becomes the firm's name for the book, so prefer the
+    # model's canonical form: otherwise whichever document happened to classify
+    # first decides whether it is "Mergers & Acquisitions" or "mergers &
+    # acquisitions" for the life of the corpus.
+    display = normalized
+    if judgement is not None and judgement.canonical_name:
+        display = normalize_group(judgement.canonical_name) or normalized
+
     group = FirmPracticeGroup(
-        name=normalized,
+        name=display,
         normalized_name=key,
         aliases=[],
         provenance={"first_seen_as": raw, "evidence": evidence},
