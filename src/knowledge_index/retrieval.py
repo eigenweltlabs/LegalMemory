@@ -29,6 +29,7 @@ from knowledge_index.db.models import (
     FirmPerson,
     FirmPracticeGroup,
     Matter,
+    Client,
     MatterClient,
     MatterParty,
     MatterTeam,
@@ -862,6 +863,20 @@ class RetrievalService:
                 .order_by(SourceObject.path)
             ).all():
                 paths_by_matter.setdefault(matter_id, []).append(path)
+        # Who the firm acts for. A matter is named to a lawyer by its client, and
+        # until now the only place a row carried that name was the title -- a string
+        # derived from the matter's own documents, which on investor-side and
+        # acquisition work names the other party instead. The title is the reference
+        # now, so the client has to be its own field: it is the one identity on the
+        # row that is both a name and true. Batched with the team below, not per row.
+        client_by_matter: dict[str, str] = {}
+        for matter_id, client_name in self.session.execute(
+            select(MatterClient.matter_id, Client.name)
+            .join(Client, Client.id == MatterClient.client_id)
+            .where(MatterClient.matter_id.in_([m.id for m in page_matters] or [""]))
+        ).all():
+            client_by_matter.setdefault(matter_id, client_name)
+
         team_by_matter: dict[str, list[dict]] = {}
         for matter_id, person_name, title, group, role in self.session.execute(
             select(
@@ -905,6 +920,7 @@ class RetrievalService:
                     "project": self.project_reference(matter.project_id),
                     "title": matter.title,
                     "reference_numbers": matter.reference_numbers,
+                    "client": client_by_matter.get(matter.id),
                     "practice_area": area_payload,
                     "matter_kind": {
                         "id": matter.matter_kind,
@@ -1106,15 +1122,41 @@ class RetrievalService:
             type_scope = self.config.ontology_facet("document_type")
         except ValueError:
             type_scope = None
+        # The chain each row belongs to. One row is one VERSION, so a document that
+        # exists as a draft, a redline and an execution copy is three rows that only
+        # a shared document_id relates -- and an operative instrument is routinely a
+        # base agreement plus an amendment. An agent holding the amendment and no way
+        # to see the chain concludes the base "is not on file" and drops the matter.
+        # Slim by design: enough to know a chain exists and to ask get_document for a
+        # specific member, without repeating the row's own content once per sibling.
+        chain: dict[str, list[dict]] = {}
+        for path, doc_id, _t, _dt, _dd, version_id, status in rows:
+            if authorized.get(version_id):
+                chain.setdefault(doc_id, []).append(
+                    {
+                        "version_id": version_id,
+                        "status": status,
+                        "filename": path.rsplit("/", 1)[-1],
+                    }
+                )
+        for members in chain.values():
+            for position, member in enumerate(members, start=1):
+                member["position"] = f"{position} of {len(members)}"
+
         out: list[dict] = []
         for path, doc_id, title, doc_type, doc_date, version_id, status in rows:
             if not authorized.get(version_id):
                 continue
+            siblings = chain.get(doc_id, [])
             out.append(
                 {
                     "source_path": path,
                     "document_id": doc_id,
                     "version_id": version_id,
+                    # Omitted when the document has a single version, which is most
+                    # of them: a one-entry list on every row is noise that makes the
+                    # rows that DO have a chain harder to notice.
+                    **({"versions": siblings} if len(siblings) > 1 else {}),
                     "title": title,
                     "doc_type_label": (
                         type_scope.label_of(doc_type)

@@ -21,6 +21,7 @@ production, present a bearer token instead.
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import urllib.request
@@ -91,6 +92,9 @@ class McpBridge:
         )
         self.call_counts: dict[str, int] = {}
         self._id = 0
+        # Where a returned file is written. The agent reads and writes files here,
+        # so a document it asks for has to land in the same place.
+        self.workspace_dir = os.environ.get("LEGALMEMORY_WORKSPACE") or os.getcwd()
 
     def _post(self, method: str, params: dict) -> dict:
         self._id += 1
@@ -133,14 +137,47 @@ class McpBridge:
             for t in listed
         ]
 
+    def _save_resources(self, blocks: list) -> list[str]:
+        """Write any binary `resource` blocks into the workspace; return their names."""
+        saved: list[str] = []
+        for block in blocks:
+            if block.get("type") != "resource":
+                continue
+            resource = block.get("resource") or block
+            data = resource.get("blob") or resource.get("data")
+            if not data:
+                continue
+            name = (
+                resource.get("name")
+                or (resource.get("uri") or "").rsplit("/", 1)[-1]
+                or "document.bin"
+            )
+            # basename only: a resource must never be able to name a path outside
+            # the workspace it is being written into.
+            name = os.path.basename(name) or "document.bin"
+            try:
+                target = os.path.join(self.workspace_dir, name)
+                with open(target, "wb") as handle:
+                    handle.write(base64.b64decode(data))
+                saved.append(name)
+            except Exception:  # noqa: BLE001 - a failed save must not kill the call
+                continue
+        return saved
+
     def call(self, name: str, arguments: dict) -> str:
         self.call_counts[name] = self.call_counts.get(name, 0) + 1
         result = self._post("tools/call", {"name": name, "arguments": arguments})
-        texts = [
-            block.get("text", "")
-            for block in result.get("content", [])
-            if block.get("type") == "text"
-        ]
+        blocks = result.get("content", [])
+        texts = [b.get("text", "") for b in blocks if b.get("type") == "text"]
+
+        # A tool that returns a FILE returns it as an MCP `resource` block, not as
+        # text. Keeping only the text blocks threw the bytes away and left the agent
+        # holding the accompanying download URL -- which points at the appliance on
+        # localhost and is unreachable from the sandbox the agent runs in. It would
+        # then report, correctly from where it stood, that the document could not be
+        # retrieved. Write the bytes into the workspace and say where they landed.
+        saved = self._save_resources(blocks)
+
         payload = result.get("structuredContent")
         out = (
             json.dumps(payload, ensure_ascii=False)
@@ -149,6 +186,13 @@ class McpBridge:
         )
         if result.get("isError"):
             return f"Tool error: {out or 'unspecified'}"
+        # Appended after the branch, not inside it: a tool that returns a file also
+        # returns structuredContent, so a note added to `texts` alone is discarded on
+        # exactly the calls that need it -- the file lands in the workspace and the
+        # agent is never told it is there.
+        if saved:
+            out = f"{out}\n\nSaved to the workspace: {', '.join(saved)}. Read these "
+            out += "from disk; the download URL is not reachable from here."
         return out
 
 
