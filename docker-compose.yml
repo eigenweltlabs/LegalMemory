@@ -52,6 +52,10 @@ x-ki-env: &ki-env
   HATCHET_CLIENT_TLS_STRATEGY: none
   KI_HATCHET_DOCUMENT_CONCURRENCY: ${KI_HATCHET_DOCUMENT_CONCURRENCY:-16}
   KI_RELATE_MODEL_CONCURRENCY: ${KI_RELATE_MODEL_CONCURRENCY:-16}
+  # Was documented and set in .env for weeks while being absent from THIS
+  # anchor, so no container ever received it and the index lane silently ran
+  # at the code default of 16 however many slots or replicas it was given.
+  KI_INDEX_MODEL_CONCURRENCY: ${KI_INDEX_MODEL_CONCURRENCY:-16}
   # ---------------------------------------------------------------------- backup
   # Where each store is reached from inside the app and worker containers. This is
   # deployment layout rather than policy, so it lives here and not in config.json —
