@@ -26,6 +26,13 @@ model_list:
       api_key: os.environ/KI_EMBEDDING_API_KEY
       input_cost_per_token: os.environ/KI_EMBEDDING_INPUT_COST_PER_TOKEN
       output_cost_per_token: 0.0
+      # The index asserts the width it was built for and quarantines anything else
+      # ("embedding model returned 3072 dimensions; index expects 1536"), and the
+      # appliance's embed call sends only {model, input} -- so the width has to be
+      # pinned HERE or it is whatever the upstream defaults to. Belongs in the repo
+      # rather than in a hand-edit on the box: patched live once, it was silently
+      # undone by the next deploy and every index task quarantined again.
+      dimensions: 1536
       # Hard ceiling on the upstream embedding key so the index stage cannot
       # outrun the provider's account limits. The router gates on these before
       # dispatch; excess is refused here rather than sent upstream, which
