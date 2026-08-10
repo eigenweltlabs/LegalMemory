@@ -427,6 +427,15 @@ def _build_matter_profile_workflow(
         from knowledge_index.pipeline.matter_profile import profile_matter
 
         with session_factory() as session:
+            # A matter is re-dirtied by every document that lands in it, and each
+            # dirty episode triggers its own run, so several runs for one matter can
+            # be in flight while its documents finish. profile_matter does not
+            # consult the queue before working -- it profiles whenever the matter
+            # exists -- so without this the later runs each pay for a full agent pass
+            # to recompute what the first already wrote. The row is gone precisely
+            # because someone else finished the job.
+            if session.get(MatterProfileQueue, input.matter_id) is None:
+                return {"matter_id": input.matter_id, "status": "already_profiled"}
             profile_matter(session, get_config(), input.matter_id)
             session.commit()
             # profile_matter reports its own failures by leaving the queue row in place
