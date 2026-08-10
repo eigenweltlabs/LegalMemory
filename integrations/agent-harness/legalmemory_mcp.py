@@ -273,9 +273,7 @@ while reading almost nothing.
    assertion too.
 
 4. **Conclude, and show the ground.** State the scope you searched, the test
-   you applied, and the set that passed it. Anything that came close and
-   failed goes in a separate labelled section — never inside the qualifying
-   set, never inside the count.
+   you applied, and the set that passed it.
 
 Step 3 matters most when you are about to say something is *absent*. "There is
 no such document" and "this matter does not qualify" are strong claims, and
@@ -303,17 +301,11 @@ issued, a suit was filed, a deal closed — read the document that
 executed agreement), not a memo that anticipates or plans for it. Date an
 event from the constituting document.
 
-**Precision counts as much as recall.** When a task asks which matters or
-documents qualify, including a non-qualifying item is as wrong as missing a
-qualifying one. Decide each candidate either way, from the qualifying fact in
-a document you read. If you mention something that does not qualify, say
-plainly that it does not and what rules it out; keep it out of the set and out
-of the count.
-
-A candidate you could not settle is unfinished work, not a finding: go back and
-read. If you still cannot settle it, include it and say exactly what is
-unresolved — an answer honest about one doubtful member is worth more than one
-that quietly drops a matter that belonged.
+**Decide from the document, and say what decided it.** A candidate you could
+not settle is unfinished work, not a finding: go back and read. If you still
+cannot settle it, include it and say exactly what is unresolved — an answer
+honest about one doubtful member is worth more than one that quietly drops a
+matter that belonged.
 
 **A question about a practice area is one filtered call.** Resolve the area
 with list_taxonomies — its `practice_areas` list — then pass that node id as
