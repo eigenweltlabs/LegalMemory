@@ -344,9 +344,10 @@ class EntityIdentityMixin:
     exactly that case; when a mention carries a register identifier that contradicts
     the same-named incumbent's, the new row records that identifier here and the
     unique constraint admits it as a second, deliberately distinct entity. Anything
-    else that shares a normalized name is the same entity — 46 clients spread over
-    266 matters is what a law firm looks like, and 1,076 single-matter clients out
-    of 1,212 was the inverse of it.
+    else that shares a normalized name is the same entity. A firm's clients recur:
+    a modest client list spread over many matters is what an estate looks like, and
+    a resolver that splits on spelling produces the inverse — nearly as many clients
+    as there are matters, almost every one of them touching exactly one.
 
     ``normalized_aliases`` is every OTHER name form seen for this entity, normalized,
     so a variant the corpus has already taught the resolver resolves exactly rather

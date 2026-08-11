@@ -970,15 +970,15 @@ def classification_tools(
 
 # ---------------------------------------------------------------- entity resolution
 #
-# What the insertion agent used to be given, and why it created 1,212 clients for a
-# corpus whose ground truth is 46. The lexical leg was `Party.name ILIKE '%query%'`,
-# which cannot match "Nexford" against a stored "Nexford Industrial Holdings Inc." in
+# What the insertion agent used to be given, and why it created a fresh client for
+# nearly every matter it saw. The lexical leg was `Party.name ILIKE '%query%'`, which
+# cannot match "Nexford" against a stored "Nexford Industrial Holdings Inc." in
 # either direction; the primary leg was semantic over already-INDEXED chunks, and
-# `index` is the last pipeline stage, so during a bulk run it is empty exactly when
-# extraction needs it (measured: extraction at 9,122 documents while index stood at
-# 7,033, and near-empty for the first several thousand). The agent searched, was told
-# nothing existed, and created — 973 times for a normalized name the estate already
-# held, 293 of them within 60 seconds of the previous one.
+# `index` is the last pipeline stage, so during a bulk run it lags extraction by
+# thousands of documents and is near-empty for the first several thousand — empty
+# exactly when extraction needs it. The agent searched, was told nothing existed,
+# and created: hundreds of times for a normalized name the estate already held,
+# many within a minute of the previous one.
 #
 # So: no leg here depends on the index stage. Identity comes from typed identifiers
 # and from names, matched as token sets over a normalized column with a trigram index
@@ -1461,8 +1461,8 @@ def link_decision(
     2. the normalized names are identical, or the mention's name is already on the
        entity's alias ledger, and no register identifier contradicts it. This is the
        default path across matters, not a judgement the agent may decline: a firm
-       client has many matters, and 1,076 of 1,212 clients touching exactly one
-       matter is the inverse of what a firm looks like;
+       client has many matters, and an estate with nearly as many clients as it has
+       matters is the inverse of what a firm looks like;
     3. one name contains the other token-for-token AND something beyond the name
        agrees (see ``_corroboration``).
 

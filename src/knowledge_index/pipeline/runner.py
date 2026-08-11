@@ -2588,9 +2588,8 @@ def _resolve_document_parties(
     id; but whether two names are one entity is a rule (see
     ``matter_search.link_decision``), applied here to every mention regardless of what
     the agent submitted. That is the difference between a client with five matters and
-    five clients with one matter each, and the corpus this was measured on had 1,076 of
-    1,212 clients touching exactly one matter where the ground truth is 46 clients
-    across 266 matters.
+    five clients with one matter each — and left to per-document judgement it lands on
+    the second, giving an estate almost as many clients as it has matters.
 
     Each entity is resolved-or-created in its OWN committed transaction, so a sibling
     document extracting the same party in parallel sees it immediately instead of
