@@ -188,41 +188,62 @@ const ThreadScrollToBottom: FC = () => {
 const ThreadWelcome: FC = () => <WelcomeHeading />;
 
 /**
- * Openers, phrased as the questions this appliance is actually good at.
+ * Openers, in two groups, because the two kinds cost very different amounts of
+ * time and a visitor who cannot tell them apart reads "thorough" as "hung".
  *
- * These are partner questions, not lookups, and each one is a whole-estate
- * question with a different shape: scoping a practice group and enumerating a
- * term of art inside it; a trend that has to be assembled year by year; a sweep
- * that has to reach every matter before it can say "every"; a comparison across
- * two buckets that must be defined before they can be counted; and a
- * distinction between what was signed and what was only ever drafted.
- *
- * What makes them the argument for the product is that none can be answered
- * from one search. Each needs a scope fixed with filters, the scope searched
- * from several angles, documents actually read, and the answer stated with the
- * matters behind it — which is the work, and the part a keyword search over a
+ * The split is measured, not guessed: each question sits in the group its own
+ * tool-call count puts it in. The fast pair resolved in seven and ten calls —
+ * the estate is indexed, so a question with one answer is a lookup. The deep
+ * three took fifty-three to sixty-one, because "which offerings had a comfort
+ * letter actually delivered" is not a search: it is a set that has to be fixed,
+ * swept from several angles, and verified document by document before any count
+ * can be stated. That is the work, and it is the part a keyword search over a
  * document store cannot do.
  */
-const STARTERS = [
-  "Across our Bankruptcy & Restructuring matters, how often has DIP financing featured — whether we acted for the debtor, the DIP lender, or a creditor responding to one — and which matters were they?",
-  "How has representation and warranty insurance uptake on our M&A deals shifted year over year, and which deals sit behind each year's number?",
-  "I'm running a sanctions-exposure sweep: find every matter where OFAC comes up, and point me to the documents that reference it.",
-  "I'm advising a client negotiating a reverse termination fee. How often have these appeared in our sponsor-backed deals versus our strategic-buyer deals, and what did the triggers look like?",
-  "Give me a by-year breakdown of the Labor & Employment matters carrying an executed clawback provision — and flag separately any that were drafted but never signed.",
+const STARTER_GROUPS: { label: string; hint: string; prompts: string[] }[] = [
+  {
+    label: "Fast queries",
+    hint: "answered in a handful of lookups",
+    prompts: [
+      "I'm prepping for a relationship review and want to know where our weight is — who are our top five clients by number of matters, with the counts?",
+      "A colleague needs to know whether Aurelius Media's lease gives them a right of first refusal. Can you pull the ROFR clause from that lease?",
+    ],
+  },
+  {
+    label: "Deep research",
+    hint: "dozens of lookups — these take a while, and read every candidate",
+    prompts: [
+      "I'm assembling a comfort-letter precedent set for the capital markets group — which offerings had a comfort letter actually delivered, and what in the file shows it?",
+      "We're heading into escrow negotiations on a new acquisition and I want a market check against our own deal history: find the M&A matters where we agreed to a 10% escrow, with the executed purchase agreements showing the term.",
+      "I'm pulling together due-diligence precedent from our healthcare-services deals — hospital systems, provider groups, that kind of M&A. Can you pull the due-diligence memos from those deals?",
+    ],
+  },
 ];
 
 const ThreadSuggestions: FC = () => {
   return (
-    <div className="aui-thread-welcome-suggestions flex w-full flex-col items-stretch gap-1.5 px-4">
-      {STARTERS.map((prompt) => (
-        <ThreadPrimitive.Suggestion key={prompt} prompt={prompt} send asChild>
-          <button
-            type="button"
-            className="fade-in slide-in-from-bottom-2 animate-in fill-mode-both rounded-xl border px-3.5 py-2.5 text-left text-[13px] leading-snug text-[var(--lm-fg2)] transition-colors duration-[var(--lm-dur-fast)] hover:border-[rgba(233,87,0,0.35)] hover:bg-[rgba(233,87,0,0.04)] hover:text-foreground"
-          >
-            {prompt}
-          </button>
-        </ThreadPrimitive.Suggestion>
+    <div className="aui-thread-welcome-suggestions flex w-full flex-col items-stretch gap-4 px-4">
+      {STARTER_GROUPS.map((group) => (
+        <div key={group.label} className="flex flex-col items-stretch gap-1.5">
+          <div className="flex items-baseline gap-2 px-0.5">
+            <span className="lm-label text-[11px] font-semibold tracking-wide text-[var(--lm-fg2)]">
+              {group.label}
+            </span>
+            <span className="text-[11px] text-[var(--lm-fg3,var(--lm-fg2))] opacity-70">
+              {group.hint}
+            </span>
+          </div>
+          {group.prompts.map((prompt) => (
+            <ThreadPrimitive.Suggestion key={prompt} prompt={prompt} send asChild>
+              <button
+                type="button"
+                className="fade-in slide-in-from-bottom-2 animate-in fill-mode-both rounded-xl border px-3.5 py-2.5 text-left text-[13px] leading-snug text-[var(--lm-fg2)] transition-colors duration-[var(--lm-dur-fast)] hover:border-[rgba(233,87,0,0.35)] hover:bg-[rgba(233,87,0,0.04)] hover:text-foreground"
+              >
+                {prompt}
+              </button>
+            </ThreadPrimitive.Suggestion>
+          ))}
+        </div>
       ))}
     </div>
   );
