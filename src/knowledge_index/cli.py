@@ -919,8 +919,6 @@ def _rotate_connector_key(factory, new_key: str, *, dry_run: bool) -> int:
     The operator swaps KI_CONNECTOR_CREDENTIAL_KEY to the new value *after* this reports
     success, so the old key must still be in the environment while it runs.
     """
-    from sqlalchemy import select
-
     from knowledge_index.connectors.runtime.secrets import (
         CredentialCryptoError,
         decrypt_credentials,
