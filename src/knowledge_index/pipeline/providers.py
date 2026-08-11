@@ -118,6 +118,49 @@ class ProviderPermanentError(ValueError):
     """
 
 
+# The opposite end of the taxonomy from ProviderPermanentError: faults that belong to
+# the infrastructure rather than to the document. A gateway that is saturated,
+# restarting or briefly unreachable says nothing about whether this file can be
+# processed, so these must never spend the document's attempt budget and must never
+# reach the terminal QUARANTINED state.
+#
+# Evidence (2026-08-03, 51k run): LiteLLM was running 8 workers and saturated at 98
+# req/s, logging 1,500 timeouts and ~1,200 5xx in five minutes. The pipeline retried
+# three times per document and then quarantined — **250 documents permanently dropped
+# by a gateway capacity problem that lasted minutes**. Raising the worker count fixed
+# the saturation, but the classification defect would drop documents again on the next
+# transport blip. See vllm-fleet docs/scaling-to-50k.md §2.4 and §7.
+_TRANSIENT_GATEWAY_STATUSES = frozenset({408, 425, 429, 500, 502, 503, 504})
+
+
+def transient_gateway_fault(error: BaseException) -> str | None:
+    """A short reason if this failure is the gateway's or the network's, else None.
+
+    Walks the ``__cause__``/``__context__`` chain: a stage handler may re-raise a
+    transport failure wrapped in an error of its own, and the wrapper must not hide
+    that the underlying cause was infrastructure.
+
+    A 429 that survived ``_post_to_gateway``'s in-place retries counts as transient
+    here. The quota-dead 429 does not reach this function — it is raised as
+    ProviderPermanentError, which the runner classifies as deterministic before it
+    ever asks about transience.
+    """
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, httpx.HTTPStatusError):
+            status = getattr(current.response, "status_code", None)
+            if status in _TRANSIENT_GATEWAY_STATUSES:
+                return f"gateway answered HTTP {status}"
+        elif isinstance(current, httpx.TransportError):
+            # ConnectError, ReadError, WriteError, RemoteProtocolError, PoolTimeout,
+            # ConnectTimeout, ReadTimeout — the EMFILE/httpx storm of the 51k run.
+            return f"gateway transport failure ({type(current).__name__})"
+        current = current.__cause__ or current.__context__
+    return None
+
+
 # Statuses that are permanent whatever the body says. Evidence: LiteLLM gives these
 # no distinct wire shape — it maps the upstream status through and folds the provider's
 # own payload into the message string. Observed against this appliance's own gateway
@@ -150,19 +193,33 @@ _DEAD_ACCOUNT_MARKERS = (
 def embed_text(text: str, config: AppConfig) -> list[float]:
     model = config.retrieval.embedding_model
     base = gateway_url(config)
+    expected = config.retrieval.embedding_dimensions
     response = _post_to_gateway(
         f"{base}/v1/embeddings",
         model=model,
         base=base,
         headers=_headers(),
-        json={"model": model, "input": [text]},
+        # The width is stated, not hoped for. The check below used to be the only
+        # place the index's width appeared, so the width a model happened to return
+        # was the width the index got. That held only while the upstream's native
+        # size matched: OpenAI text-embedding-3-small returns 1536 natively, so
+        # nothing had to ask for it. Repointing the same alias at
+        # gemini/gemini-embedding-2 — same alias, same 1536-wide index, 417k chunks
+        # already written — started returning that model's native 3072 and
+        # quarantined every document that reached the last stage of the pipeline.
+        #
+        # Matryoshka models (Gemini Embedding, text-embedding-3-*) truncate to a
+        # requested width, so asking for the width we validate makes the two agree by
+        # construction. LiteLLM's drop_params removes the field for a provider with no
+        # equivalent, which fails the check below as it should: a model that cannot
+        # produce the index's width must not silently write into it.
+        json={"model": model, "input": [text], "dimensions": expected},
         timeout=120,
     )
     response.raise_for_status()
     body = response.json()
     _record_usage(response, body, model, call="embedding")
     vector = list(body["data"][0]["embedding"])
-    expected = config.retrieval.embedding_dimensions
     if len(vector) != expected:
         raise ModelOutputInvalid(
             f"embedding model returned {len(vector)} dimensions; index expects {expected}"

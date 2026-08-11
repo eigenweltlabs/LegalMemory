@@ -170,6 +170,8 @@ double-claim.
   defaults (base 5 s, `max_attempts` 3) that is 5 s, then 10 s, then quarantine.
 - **Attempt limit**: `pipeline.stages.<stage>.max_attempts` (default 3, range 1–20),
   per stage, editable per stage card in the console ("Attempts before quarantine").
+  The limit applies to failures the document could be responsible for; infrastructure
+  faults are exempt from it (see the classification table below).
 
 Error classification in `_execute_claim`:
 
@@ -177,7 +179,23 @@ Error classification in `_execute_claim`:
 | --- | --- |
 | `UnsupportedDocument`, `ArtifactTooLarge`, `FileNotFoundError`, `ValueError` (includes `ProviderPermanentError`) | **Deterministic**: quarantined on the first attempt; retrying cannot change the outcome. |
 | `ModelOutputInvalid` (schema-invalid or non-converging model output) | Retried with backoff up to `max_attempts`, since truncated or malformed model responses are commonly transient. |
-| Any other exception (network faults, 5xx, `RetryableStageError`, `StaleClaim`) | Retried with backoff up to `max_attempts`, then quarantined. |
+| **Infrastructure faults**: gateway transport errors (`ConnectError`, `ReadError`, `RemoteProtocolError`, timeouts) and gateway status 408/425/429/500/502/503/504 | **Never quarantined.** Retried with backoff indefinitely; `attempts` still increments for visibility but does not reach a terminal verdict. Backoff is capped at `KI_INFRASTRUCTURE_RETRY_MAX_SECONDS` (default 300 s). |
+| Any other exception (`RetryableStageError`, `StaleClaim`, unexpected bugs) | Retried with backoff up to `max_attempts`, then quarantined. |
+
+**Why infrastructure faults are exempt.** Quarantine is terminal — only a deliberate
+requeue brings a document back. A saturated or restarting gateway says nothing about
+whether a given file can be processed, so spending a document's attempt budget on it
+throws away work for a reason unrelated to the work. In a 51,683-document run the
+gateway saturated at 98 req/s and logged 1,500 timeouts and ~1,200 5xx in five minutes;
+three strikes per document **permanently dropped 250 documents** to an outage that
+lasted minutes. The rule now is that only the document's own content, or a genuinely
+repeatable failure, can quarantine it.
+
+The distinction is recorded on the row: `last_error.infrastructure` holds the reason
+(e.g. `gateway answered HTTP 503`) when the failure was the gateway's, and `null`
+otherwise — so a requeue can target outage casualties without resurrecting genuine
+poison. An explicit deterministic verdict still wins: a `ValueError` quarantines on its
+first attempt even if it wraps a transport error.
 
 `ProviderPermanentError` deserves a note: a rejected API key (401), a forbidden model
 (403), a model the gateway does not serve (404), or an exhausted account quota

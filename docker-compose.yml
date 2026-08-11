@@ -52,9 +52,16 @@ x-ki-env: &ki-env
   HATCHET_CLIENT_TLS_STRATEGY: none
   KI_HATCHET_DOCUMENT_CONCURRENCY: ${KI_HATCHET_DOCUMENT_CONCURRENCY:-16}
   KI_RELATE_MODEL_CONCURRENCY: ${KI_RELATE_MODEL_CONCURRENCY:-16}
-  # Was documented and set in .env for weeks while being absent from THIS
-  # anchor, so no container ever received it and the index lane silently ran
-  # at the code default of 16 however many slots or replicas it was given.
+  # The index stage's own throttle, and the one that was missing here. It was
+  # documented and set in .env for weeks while absent from THIS anchor, so no
+  # container ever received it. All three per-stage caps are read by
+  # build_hatchet_runtime and baked into the workflow version, so a cap absent
+  # from this anchor is not "unset" — it silently becomes the code default of 16.
+  # Measured on the 51k run: v1_step_concurrency held max_concurrency=16 for the
+  # index stage with 7,257 tasks queued behind it, while .env said 384, the index
+  # lane offered 384 slots, and the run notes reasoned about 384 as a harmless
+  # backstop. A 24x throttle on the terminal stage, invisible from .env, from the
+  # lane's slot count, and from the docs.
   KI_INDEX_MODEL_CONCURRENCY: ${KI_INDEX_MODEL_CONCURRENCY:-16}
   # ---------------------------------------------------------------------- backup
   # Where each store is reached from inside the app and worker containers. This is

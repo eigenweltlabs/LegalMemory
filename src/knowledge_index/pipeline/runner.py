@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import threading
 import time
 import traceback
@@ -86,6 +87,7 @@ from knowledge_index.pipeline.providers import (
     chat_agent,
     chat_json,
     embed_text,
+    transient_gateway_fault,
     usage_stage,
 )
 from knowledge_index.sync import (
@@ -150,6 +152,13 @@ class StageResult:
 
 class RetryableStageError(RuntimeError):
     pass
+
+
+# Infrastructure faults retry without a terminal limit (see _record_failure), so their
+# backoff needs a ceiling that a bounded attempt budget would otherwise have provided:
+# without one, 2**attempts reaches days. Five minutes keeps a document responsive to a
+# gateway that comes back while costing ~12 claims an hour per stuck document.
+INFRASTRUCTURE_RETRY_MAX_SECONDS = float(os.getenv("KI_INFRASTRUCTURE_RETRY_MAX_SECONDS", "300"))
 
 
 def _typed_clauses(clause_scope, clauses) -> list[dict]:
@@ -592,7 +601,16 @@ class PipelineRunner:
         if current_status == ProcessingStatus.DONE.value:
             return "superseded"
         stage_config = self.config.pipeline.stage(state.stage)
-        quarantine = deterministic or state.attempts >= stage_config.max_attempts
+        # A saturated or restarting gateway is not a verdict on the document. Three
+        # strikes against an unreachable LiteLLM dropped 250 documents on 2026-08-03,
+        # and quarantine is terminal — only hand-written SQL brings those back. So an
+        # infrastructure fault stays FAILED (which _claim_next re-dispatches on its
+        # own) no matter how often it recurs, and the run self-heals when the gateway
+        # does. Deterministic failures are unaffected: they still quarantine at once.
+        infrastructure_reason = None if deterministic else transient_gateway_fault(error)
+        quarantine = deterministic or (
+            infrastructure_reason is None and state.attempts >= stage_config.max_attempts
+        )
         state.status = (
             ProcessingStatus.QUARANTINED.value if quarantine else ProcessingStatus.FAILED.value
         )
@@ -602,9 +620,23 @@ class PipelineRunner:
             "message": str(error)[:2000],
             "trace": "".join(traceback.format_exception(error))[-6000:],
             "deterministic": deterministic,
+            # Lets an operator separate "the gateway was down" from genuine poison when
+            # deciding what to requeue, instead of filtering on message text.
+            "infrastructure": infrastructure_reason,
         }
         if not quarantine:
             delay = self.config.pipeline.retry_base_seconds * (2 ** (state.attempts - 1))
+            if infrastructure_reason is not None:
+                # Unbounded attempts need a bounded delay, or 2**attempts reaches days.
+                delay = min(delay, INFRASTRUCTURE_RETRY_MAX_SECONDS)
+                log.warning(
+                    "stage %s on %s deferred: %s (attempt %s, not counted toward "
+                    "quarantine)",
+                    state.stage,
+                    state.source_object_id,
+                    infrastructure_reason,
+                    state.attempts,
+                )
             state.next_retry_at = datetime.now(UTC) + timedelta(seconds=delay)
         session.commit()
         return "quarantined" if quarantine else "retried"
