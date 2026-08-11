@@ -54,6 +54,25 @@ const searchFilters = {
         "area covers its children. Resolve the id with list_taxonomies first. This is " +
         "how a question about a practice is answered in one call.",
     ),
+  // A practice GROUP is how the firm organises itself — the group of the partner
+  // who owns the matter — and it is what a question phrased the way a lawyer
+  // phrases it ("our Banking & Finance matters") is actually about. The practice
+  // AREA above is which body of law applies. Without this filter that question
+  // has no filtered form, and the model falls back to reading matters one at a
+  // time and stopping when it runs out of room.
+  practice_group: z
+    .string()
+    .optional()
+    .describe(
+      "The firm's own group, by name — 'Banking & Finance', 'Litigation (General)'. " +
+        "Matches every group with someone on the matter; each row then says whether " +
+        "that group owns it or was only staffed onto it. Names come from list_firm_people.",
+    ),
+  firm_person: z.string().optional().describe("One of the firm's own lawyers, by name or id."),
+  lifecycle: z
+    .string()
+    .optional()
+    .describe("Whether the matter happened: executed | closed | terminated | dormant | in_progress."),
   only_final: z
     .boolean()
     .optional()
@@ -124,6 +143,35 @@ export const CHAT_TOOL_SCHEMAS = {
         .string()
         .optional()
         .describe("Ontology node id; matches the whole subtree. From list_taxonomies."),
+      practice_group: z
+        .string()
+        .optional()
+        .describe("The firm's own group by name, e.g. 'Mergers & Acquisitions'."),
+      firm_person: z.string().optional().describe("One of the firm's own lawyers."),
+      lifecycle: z
+        .string()
+        .optional()
+        .describe("executed | closed | terminated | dormant | in_progress."),
+      limit: z.number().int().min(1).max(50).optional(),
+      offset: z.number().int().min(0).optional().describe("Continue from page.next_offset."),
+    }),
+  },
+  // The folder view, complete and unpaged. A question about what a matter does
+  // or does not contain cannot be answered from a page of search hits: a full
+  // page is a sample, and an agreement filed under a title the query did not use
+  // is invisible to ranking. This is how "the matter has no such document"
+  // becomes a claim somebody can stand behind.
+  list_matter_documents: {
+    inputSchema: z.object({
+      matter_id: z.string().describe("From matter_id on any result row."),
+    }),
+  },
+  // The directory behind practice_group and firm_person. A model that has to
+  // guess what a group is called guesses wrong, and a filter that matches
+  // nothing is indistinguishable from a firm that has no such matters.
+  list_firm_people: {
+    inputSchema: z.object({
+      practice_group: z.string().optional().describe("Restrict to one group."),
       limit: z.number().int().min(1).max(50).optional(),
       offset: z.number().int().min(0).optional().describe("Continue from page.next_offset."),
     }),
