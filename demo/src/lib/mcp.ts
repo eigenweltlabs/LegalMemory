@@ -84,11 +84,30 @@ export const CHAT_TOOL_SCHEMAS = {
       party: z.string().optional().describe("A party's exact canonical name, or a party id."),
     }),
   },
+  // Two scopes, and the order between them is the point. search_in_document
+  // reaches a clause without the pages in front of it and names the page it sits
+  // on; get_document reads the document through, and is what an enumeration or a
+  // claim of absence needs. A document runs to many pages and most questions turn
+  // on one of them, so reading first is a habit that costs the whole prefix.
+  search_in_document: {
+    inputSchema: z.object({
+      document_id: z.string().describe("From document_id on a search result row."),
+      query: z.string().describe("What you are looking for inside this one document."),
+      version_id: z.string().optional(),
+      limit: z.number().int().min(1).max(10).optional().describe("Passages to return; default 5."),
+      offset: z.number().int().min(0).optional().describe("Continue from page.next_offset."),
+    }),
+  },
   get_document: {
     inputSchema: z.object({
       document_id: z.string().describe("From document_id on a search result row."),
       version_id: z.string().optional(),
-      offset: z.number().int().min(0).optional().describe("Continue from content_page.next_offset."),
+      page: z
+        .number()
+        .int()
+        .min(1)
+        .optional()
+        .describe("Page of chunks, 1-based. Continue with page.next_page while has_more."),
     }),
   },
   find_related_documents: {
@@ -110,7 +129,7 @@ export const CHAT_TOOL_SCHEMAS = {
     }),
   },
   // The filters above take ontology node ids, and nothing else in this surface
-  // produces one. Without this tool "every matter in the antitrust practice"
+  // produces one. Without this tool "every matter in a given practice area"
   // has no filtered form and degrades into reading the estate matter by matter.
   list_taxonomies: {
     inputSchema: z.object({}),
