@@ -4,26 +4,38 @@ from __future__ import annotations
 
 import mimetypes
 from collections.abc import Iterable
+from math import ceil
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from pydantic import BaseModel
 from pydantic import Field as PydanticField
-from sqlalchemy import select
+from sqlalchemy import and_, false, func, or_, select
 from sqlalchemy.orm import Session, attributes
 
 from knowledge_index.config import AppConfig
+from knowledge_index.entity_names import (
+    name_similarity,
+    normalize_entity_name,
+    normalize_group,
+)
 from knowledge_index.db.models import (
     Artifact,
     Blob,
+    Chunk,
     DecisionRecord,
     Document,
     DocumentVersion,
     DocumentVersionSource,
     EvalRecord,
+    FirmPerson,
+    FirmPracticeGroup,
+    Matter,
+    Client,
     MatterClient,
     MatterParty,
-    Matter,
+    MatterTeam,
+    Party,
     Project,
     Relation,
     Source,
@@ -64,12 +76,34 @@ class SearchHit:
     score: float
     excerpt: str
     doc_type_label: str | None = None  # human label resolved from the ontology
+    doc_date: str | None = None  # extracted document date, ISO, drives recency choices
+    language: str | None = None
+    matter_ref: str | None = None  # human matter reference, as the firm writes it
+    parties: list[dict] = field(default_factory=list)  # [{name, role}]
+    identifiers: list[str] = field(default_factory=list)  # the document's own legal ids
+    # Version position within the document. A row is one VERSION of a document, and
+    # without these three a caller cannot tell "the draft" from "the signed one":
+    # it sees two independent-looking rows that differ only in filename, and cites
+    # whichever it read first. That is a recurring wrong answer — a near-final
+    # draft cited while the final sat one ordinal later on the same document.
+    version_ordinal: int | None = None  # 1 = earliest known version
+    is_latest_final: bool = False  # this version IS the document's authoritative one
+    latest_final_version_id: str | None = None  # which version is, when this is not
     source_paths: list[str] = field(default_factory=list)
     matched_identifiers: list[str] = field(default_factory=list)
     citations: list[dict] = field(default_factory=list)
 
-    def as_dict(self) -> dict:
-        return {
+    def as_dict(self, *, include_match: bool = True) -> dict:
+        """The row a list-shaped tool returns.
+
+        ``include_match`` is False for the metadata filter, which has no query:
+        there ``score`` is always 0.0, ``matched_identifiers`` always empty, and
+        ``excerpt`` is the first 320 characters of whichever chunk happened to
+        come back — a spreadsheet's column headers as often as anything
+        responsive. Shipping those three invites the caller to read meaning into
+        noise, and charges it tokens per row for the privilege.
+        """
+        row = {
             "document_id": self.document_id,
             "project_id": self.project_id,
             "version_id": self.version_id,
@@ -77,13 +111,26 @@ class SearchHit:
             "title": self.title,
             "doc_type": self.doc_type,
             "doc_type_label": self.doc_type_label,
+            "doc_date": self.doc_date,
+            "language": self.language,
+            "matter_ref": self.matter_ref,
+            "parties": self.parties,
+            "identifiers": self.identifiers,
             "version_status": self.version_status,
-            "score": round(self.score, 6),
-            "excerpt": self.excerpt,
+            "version_ordinal": self.version_ordinal,
+            "is_latest_final": self.is_latest_final,
+            "latest_final_version_id": self.latest_final_version_id,
             "source_paths": self.source_paths,
-            "matched_identifiers": self.matched_identifiers,
-            "citations": self.citations,
+            # No embedded citation record: the row already carries the hit's
+            # full identity (document_id, version_id, matter_id, source_paths)
+            # — which is what a caller needs to open or cite it. The citation
+            # record itself comes from get_document.
         }
+        if include_match:
+            row["score"] = round(self.score, 6)
+            row["excerpt"] = self.excerpt
+            row["matched_identifiers"] = self.matched_identifiers
+        return row
 
 
 @dataclass(frozen=True)
@@ -141,6 +188,10 @@ class RetrievalService:
     def __init__(self, session: Session, config: AppConfig) -> None:
         self.session = session
         self.config = config
+        # Filled by _warm_identity_map per materialized page; held on self so
+        # the bulk-loaded rows stay strongly referenced while hits are built.
+        self._warm_matters: dict[str, Matter] = {}
+        self._warm_parties: dict[str, Party] = {}
 
     def search_filter(
         self,
@@ -169,8 +220,14 @@ class RetrievalService:
         offset: int = 0,
         scope: CompiledAccessScope | None = None,
     ) -> Page:
-        """``search_filter`` plus an exact ``has_more``, via one extra hit."""
-        return Page.probe(
+        """``search_filter`` plus an exact ``has_more``, via one extra hit.
+
+        Now that the index collapses per version, running out of rows means the
+        result set ended rather than that the chunk window did — so a page that
+        is not full also fixes ``total`` exactly, which is what a caller asking
+        "what is in this matter" actually wants to know.
+        """
+        page = Page.probe(
             self.search_filter(
                 principals=principals,
                 filters=filters,
@@ -181,6 +238,9 @@ class RetrievalService:
             offset=offset,
             limit=limit,
         )
+        if not page.has_more:
+            page.total = offset + len(page.items)
+        return page
 
     def suggest_for_empty(
         self,
@@ -199,7 +259,9 @@ class RetrievalService:
         """
         from knowledge_index.search_backend import OpenSearchIndex
 
-        filters = self._resolve_practice_area(filters or SearchFilters())
+        filters = self._resolve_practice_area(
+            self._resolve_matter_filters(filters or SearchFilters())
+        )
         if scope is None:
             scope = AccessService(self.session).compile_scope(
                 principals,
@@ -295,6 +357,258 @@ class RetrievalService:
             "project": citation["project"],
             "sources": citation["source_objects"],
             "citations": [citation],
+        }
+
+    def _converted_text(self, version: DocumentVersion) -> str:
+        """The converter's text for a version, for documents with no chunk rows yet."""
+        artifact = self.session.scalar(
+            select(Artifact)
+            .where(
+                Artifact.content_hash == version.content_hash,
+                Artifact.kind == "structured_json",
+            )
+            .order_by(Artifact.created_at.desc())
+        )
+        payload = artifact.payload if artifact else None
+        return str(payload.get("text") or "") if isinstance(payload, dict) else ""
+
+    def document_chunks(
+        self,
+        document_id: str,
+        *,
+        principals: set[str],
+        version_id: str | None = None,
+        page: int = 1,
+        chunks_per_page: int = 12,
+    ) -> dict | None:
+        """One page of a document, measured in the chunks it was indexed as.
+
+        Character offsets were the wrong unit for a reader. They cut mid-sentence,
+        they made the caller compute the next offset from a length it had to
+        measure itself, and — because a page was whatever fitted a character
+        budget — they gave no stable landmark to come back to. Chunks already
+        exist, they are what search returns, and they are numbered: a hit at
+        chunk 41 and page 4 of this tool name the same place in the same
+        document, so a caller can search inside a file and then read exactly
+        where the hit was.
+        """
+
+        if page < 1:
+            raise ValueError("page must be at least 1")
+        if chunks_per_page < 1:
+            raise ValueError("chunks_per_page must be at least 1")
+        selected = self._select_document_version(document_id, version_id)
+        if selected is None:
+            return None
+        document, version = selected
+        if not self._authorized_sources(version.id, principals):
+            return None
+
+        total = (
+            self.session.scalar(
+                select(func.count())
+                .select_from(Chunk)
+                .where(Chunk.document_version_id == version.id)
+            )
+            or 0
+        )
+        if not total:
+            # No chunk rows: the version exists but the index stage has not chunked
+            # it (a fresh insertion, a quarantined document, a re-index in flight).
+            # The tool's contract is "read this document", so fall back to the
+            # converted text as a single page rather than reporting an empty
+            # document — an empty read reads as "there is nothing here", which is
+            # the one answer that must never be produced by a missing side table.
+            return {
+                "document_id": document.id,
+                "version_id": version.id,
+                "title": document.title,
+                "chunks": [{"ordinal": 0, "text": self._converted_text(version), "locus": None}],
+                "page": {
+                    "page": 1,
+                    "pages": 1,
+                    "chunks_per_page": chunks_per_page,
+                    "first_chunk": 0,
+                    "last_chunk": 0,
+                    "total_chunks": 1,
+                    "has_more": False,
+                    "next_page": None,
+                    "unchunked": True,
+                },
+            }
+        pages = max(1, ceil(total / chunks_per_page))
+        start = (page - 1) * chunks_per_page
+        rows = list(
+            self.session.scalars(
+                select(Chunk)
+                .where(Chunk.document_version_id == version.id)
+                .order_by(Chunk.ordinal)
+                .offset(start)
+                .limit(chunks_per_page)
+            )
+        )
+        return {
+            "document_id": document.id,
+            "version_id": version.id,
+            "title": document.title,
+            "chunks": [
+                {
+                    "ordinal": chunk.ordinal,
+                    "text": chunk.text,
+                    # Section path / page / locus, when the converter knew them —
+                    # this is what lets a citation say where in the file it came from.
+                    "locus": {
+                        key: value
+                        for key, value in (chunk.meta or {}).items()
+                        if key in ("section", "section_path", "page", "heading", "locus")
+                    }
+                    or None,
+                }
+                for chunk in rows
+            ],
+            "page": {
+                "page": page,
+                "pages": pages,
+                "chunks_per_page": chunks_per_page,
+                "first_chunk": start if rows else None,
+                "last_chunk": start + len(rows) - 1 if rows else None,
+                "total_chunks": total,
+                "has_more": start + len(rows) < total,
+                "next_page": page + 1 if start + len(rows) < total else None,
+            },
+        }
+
+    def search_in_document(
+        self,
+        document_id: str,
+        query: str,
+        *,
+        principals: set[str],
+        version_id: str | None = None,
+        limit: int = 5,
+        offset: int = 0,
+        chunks_per_page: int = 12,
+    ) -> dict | None:
+        """Rank this one document's own chunks against a query.
+
+        The ordinary search collapses to one excerpt per document, which is right
+        when the question is "which document", and useless when the question is
+        "where in THIS document". Here every chunk of one version competes, so a
+        provision four fifths of the way into a long agreement is reachable
+        without reading the four fifths in front of it.
+        """
+
+        if not query.strip():
+            raise ValueError("query must not be empty")
+        if limit < 1:
+            raise ValueError("limit must be at least 1")
+        if offset < 0:
+            raise ValueError("offset must be non-negative")
+        selected = self._select_document_version(document_id, version_id)
+        if selected is None:
+            return None
+        document, version = selected
+        if not self._authorized_sources(version.id, principals):
+            return None
+
+        from knowledge_index.search_backend import OpenSearchIndex
+
+        scope = AccessService(self.session).compile_scope(principals)
+        filters = SearchFilters(document_version_id=version.id)
+        retrieval = self.config.retrieval
+        index = OpenSearchIndex(self.config)
+        want_semantic = retrieval.weight_semantic > 0
+        # Ask for one past the window so has_more is a fact, not a guess.
+        window = offset + limit + 1
+        with usage_stage("search"):
+            leg_hits = index.multi_search(
+                query_text=query,
+                query_vector=embed_text(query, self.config) if want_semantic else None,
+                scope=scope,
+                filters=filters,
+                limit=max(window * retrieval.candidate_pool_factor, window),
+            )
+
+        fused: dict[str, float] = {}
+        for weight, rows in (
+            (retrieval.weight_lexical, leg_hits["lexical"]),
+            (retrieval.weight_semantic, leg_hits["semantic"]),
+            (retrieval.weight_identifier, leg_hits["identifier"]),
+        ):
+            if weight <= 0:
+                continue
+            for rank, row in enumerate(rows):
+                chunk_id = row.get("_id")
+                if chunk_id:
+                    fused[chunk_id] = fused.get(chunk_id, 0.0) + weight / (
+                        retrieval.fusion_rrf_k + rank
+                    )
+
+        ranked = sorted(fused.items(), key=lambda item: item[1], reverse=True)
+        window_ids = [chunk_id for chunk_id, _ in ranked[offset : offset + limit + 1]]
+        has_more = len(window_ids) > limit
+        window_ids = window_ids[:limit]
+        # Read the text from the database, not from the index: the index is a
+        # ranking structure and may lag a re-index, and the answer a reader acts
+        # on has to be the stored text.
+        by_id = {
+            chunk.id: chunk
+            for chunk in self.session.scalars(select(Chunk).where(Chunk.id.in_(window_ids)))
+        }
+        total = (
+            self.session.scalar(
+                select(func.count())
+                .select_from(Chunk)
+                .where(Chunk.document_version_id == version.id)
+            )
+            or 0
+        )
+        pages = max(1, ceil(total / chunks_per_page)) if total else 1
+        results = []
+        for chunk_id in window_ids:
+            chunk = by_id.get(chunk_id)
+            if chunk is None:
+                continue
+            # Where to read around this hit. The page number is only meaningful
+            # against a page SIZE, so it is computed from the size the caller
+            # passed and echoed back with it: a hit that said "page 9" while the
+            # reader was paging 20 at a time would point at the wrong text and
+            # look authoritative doing it.
+            page_of_hit = chunk.ordinal // chunks_per_page + 1
+            results.append(
+                {
+                    "ordinal": chunk.ordinal,
+                    "score": round(fused[chunk_id], 6),
+                    "text": chunk.text,
+                    "get_document_page": page_of_hit,
+                    # The neighbours, so "read around this" needs no arithmetic
+                    # and cannot run off either end of the document.
+                    "context_pages": {
+                        "previous": page_of_hit - 1 if page_of_hit > 1 else None,
+                        "this": page_of_hit,
+                        "next": page_of_hit + 1 if page_of_hit < pages else None,
+                    },
+                }
+            )
+        return {
+            "document_id": document.id,
+            "version_id": version.id,
+            "title": document.title,
+            "query": query,
+            "results": results,
+            "page": {
+                "offset": offset,
+                "limit": limit,
+                "returned": len(results),
+                "has_more": has_more,
+                "next_offset": offset + len(results) if has_more else None,
+                "total_chunks_in_document": total,
+                # The page geometry these hits were numbered against. Pass the
+                # same chunks_per_page to get_document and the page numbers above
+                # address exactly the text the passage came from.
+                "chunks_per_page": chunks_per_page,
+                "document_pages": pages,
+            },
         }
 
     def get_downloadable_document(
@@ -490,13 +804,10 @@ class RetrievalService:
         page = Page.slice(related, offset=max(0, offset), limit=max(0, limit))
         related = page.items
         visible_ids = {item["document_id"] for item in related} | {root.id}
-        citations_by_document = {
-            root.id: root_summary["citations"],
-            **{
-                item["document_id"]: item["citations"]
-                for item in related
-            },
-        }
+        # Edges carry the relation and its provenance (the evidence that
+        # established it) — not the endpoints' citation records. Both endpoints
+        # are visible by construction; a caller wanting a citation opens the
+        # endpoint with get_document.
         visible_explicit_edges: list[dict] = []
         for edge in explicit_edges:
             if (
@@ -507,23 +818,7 @@ class RetrievalService:
                 and edge["to"]["id"] not in visible_ids
             ):
                 continue
-            edge_citations = _dedupe_citations(
-                [
-                    *(
-                        citations_by_document.get(edge["from"]["id"], [])
-                        if edge["from"]["type"] == "document"
-                        else []
-                    ),
-                    *(
-                        citations_by_document.get(edge["to"]["id"], [])
-                        if edge["to"]["type"] == "document"
-                        else []
-                    ),
-                ]
-            )
-            visible_explicit_edges.append(
-                {**edge, "basis": "stored_relation", "citations": edge_citations}
-            )
+            visible_explicit_edges.append({**edge, "basis": "stored_relation"})
         context_edges = [
             {
                 "kind": reason["kind"],
@@ -535,9 +830,6 @@ class RetrievalService:
                     for key, value in reason.items()
                     if key not in {"kind", "basis"}
                 },
-                "citations": _dedupe_citations(
-                    [*root_summary["citations"], *item["citations"]]
-                ),
             }
             for item in related
             for reason in item["relationships"]
@@ -580,22 +872,16 @@ class RetrievalService:
         )
         visible: list[dict] = []
         for relation in relations:
+            # Edge rows are collection rows: relation, endpoints, provenance.
+            # Both endpoints passed the visibility filter above; their citation
+            # records belong to the item-level tools, not to every edge that
+            # mentions them.
             visible.append(
                 {
                     "kind": relation.kind,
                     "from": {"type": relation.from_type, "id": relation.from_id},
                     "to": {"type": relation.to_type, "id": relation.to_id},
                     "provenance": relation.provenance,
-                    "citations": _dedupe_citations(
-                        [
-                            *self.citations_for_reference(
-                                relation.from_type, relation.from_id, principals
-                            ),
-                            *self.citations_for_reference(
-                                relation.to_type, relation.to_id, principals
-                            ),
-                        ]
-                    ),
                 }
             )
         return visible
@@ -689,9 +975,16 @@ class RetrievalService:
         limit: int = 100,
         offset: int = 0,
         practice_area: str | None = None,
+        matter_kind: str | None = None,
+        lifecycle: str | None = None,
+        practice_group: str | None = None,
+        firm_person: str | None = None,
+        include_documents: bool = False,
     ) -> list[dict]:
         """Matters visible to the caller; ``practice_area`` filters by ontology
-        node with SUBTREE semantics (a parent area matches its children).
+        node with SUBTREE semantics (a parent area matches its children), and
+        ``lifecycle`` restricts to matters in a given state (executed, closed,
+        terminated, dormant, in_progress).
 
         Ordered by title, and the limit counts matters the caller can actually
         see. The limit used to be a SQL ``LIMIT`` on all matters, applied before
@@ -711,22 +1004,66 @@ class RetrievalService:
             service_scope = None
 
         statement = select(Matter).order_by(Matter.title, Matter.id)
+        if lifecycle is not None:
+            statement = statement.where(Matter.lifecycle == lifecycle)
+        if practice_group is not None:
+            # Matches ANY group working the matter, not only the owning partner's.
+            # A financing staffed by Banking & Finance with Tax and Real Estate
+            # alongside is a Tax matter to the tax partner asking what their group
+            # has touched, and answering "no" because the responsible partner sits
+            # elsewhere is how a practice loses sight of its own work. The matter's
+            # own group still counts, so the owner is never missed when the team is
+            # unrecorded.
+            #
+            # Case- and ampersand-insensitive: the firm writes "Banking & Finance",
+            # a caller may type "Banking and Finance", and neither should miss.
+            names = self._group_spellings(practice_group)
+            if not names:
+                return []
+            statement = statement.where(
+                or_(
+                    Matter.practice_group.in_(names),
+                    Matter.id.in_(
+                        select(MatterTeam.matter_id)
+                        .join(FirmPerson, FirmPerson.id == MatterTeam.person_id)
+                        .where(FirmPerson.practice_group.in_(names))
+                    ),
+                )
+            )
+        if firm_person is not None:
+            # "Which matters does Merritt run" — matched on the resolver's own
+            # normalisation so a surname, a full name and a differently-punctuated
+            # spelling all land on the same lawyer.
+            statement = statement.where(
+                Matter.id.in_(
+                    select(MatterTeam.matter_id)
+                    .join(FirmPerson, FirmPerson.id == MatterTeam.person_id)
+                    .where(self._person_name_matches(firm_person))
+                )
+            )
         if practice_area is not None:
             # SUBTREE semantics pushed into SQL: the node's descendants are a set
             # the ontology can enumerate once, instead of an ancestors() call per
             # scanned row. An unresolvable facet or an empty subtree matches
             # nothing, exactly as the per-row check did.
-            subtree = self._practice_area_subtree(area_scope, practice_area)
+            subtree = self._subtree(area_scope, practice_area)
             if not subtree:
                 return []
             statement = statement.where(Matter.practice_area.in_(sorted(subtree)))
+        if matter_kind is not None:
+            # The Service facet, same semantics: what the firm is DOING, which is
+            # a different question from which law applies, and composes with it.
+            subtree = self._subtree(service_scope, matter_kind)
+            if not subtree:
+                return []
+            statement = statement.where(Matter.matter_kind.in_(sorted(subtree)))
 
         offset = max(0, offset)
         wanted = offset + limit
         visible: list[Matter] = []
         scanned = 0
         batch_size = max(wanted, _VERIFY_BATCH_MIN)
-        citations_by_matter: dict[str, list[dict]] = {}
+        visible_counts: dict[str, int] = {}
         while len(visible) < wanted:
             batch = self.session.scalars(
                 statement.offset(scanned).limit(batch_size)
@@ -734,20 +1071,90 @@ class RetrievalService:
             if not batch:
                 break
             scanned += len(batch)
+            # One authorization pass for the whole batch. This used to call
+            # citations_for_matter per matter, which built a full citation
+            # record for every version of every matter — hundreds of queries and
+            # thousands of dicts — only to ask whether any survived. Measured on
+            # a 266-matter estate: 36 seconds to return twenty rows of ~190
+            # bytes. The counts below answer the same two questions (is anything
+            # visible, and how much) at a fixed cost per page.
+            counts = self._visible_version_counts([m.id for m in batch], principals)
             for matter in batch:
-                citations = self.citations_for_matter(matter.id, principals)
-                if not citations:
+                count = counts.get(matter.id, 0)
+                if not count:
                     continue
-                citations_by_matter[matter.id] = citations
+                visible_counts[matter.id] = count
                 visible.append(matter)
                 if len(visible) >= wanted:
                     break
             if len(batch) < batch_size:
                 break
 
+        page_matters = visible[offset:]
+        matched_names = set(self._group_spellings(practice_group)) if practice_group else set()
+        # Paths only, and only when asked for. A caller enumerating a practice
+        # otherwise has to open each matter to find out what is in it, and a
+        # that is where matters get dropped: a caller judges them from search
+        # hits and never opens the ones whose files decide the answer. One extra
+        # query for the whole page, no per-matter round trip,
+        # and nothing but the path — a row that also carried titles, types and
+        # dates would put a 100-matter page back into megabytes.
+        paths_by_matter: dict[str, list[str]] = {}
+        if include_documents and page_matters:
+            for matter_id, path in self.session.execute(
+                select(Document.matter_id, SourceObject.path)
+                .join(DocumentVersion, DocumentVersion.document_id == Document.id)
+                .join(
+                    DocumentVersionSource,
+                    DocumentVersionSource.version_id == DocumentVersion.id,
+                )
+                .join(
+                    SourceObject,
+                    SourceObject.id == DocumentVersionSource.source_object_id,
+                )
+                .where(Document.matter_id.in_([m.id for m in page_matters]))
+                .order_by(SourceObject.path)
+            ).all():
+                paths_by_matter.setdefault(matter_id, []).append(path)
+        # Who the firm acts for. A matter is named to a lawyer by its client, and
+        # until now the only place a row carried that name was the title -- a string
+        # derived from the matter's own documents, which on investor-side and
+        # acquisition work names the other party instead. The title is the reference
+        # now, so the client has to be its own field: it is the one identity on the
+        # row that is both a name and true. Batched with the team below, not per row.
+        client_by_matter: dict[str, str] = {}
+        for matter_id, client_name in self.session.execute(
+            select(MatterClient.matter_id, Client.name)
+            .join(Client, Client.id == MatterClient.client_id)
+            .where(MatterClient.matter_id.in_([m.id for m in page_matters] or [""]))
+        ).all():
+            client_by_matter.setdefault(matter_id, client_name)
+
+        team_by_matter: dict[str, list[dict]] = {}
+        for matter_id, person_name, title, group, role in self.session.execute(
+            select(
+                MatterTeam.matter_id, FirmPerson.name, FirmPerson.title,
+                FirmPerson.practice_group, MatterTeam.role,
+            )
+            .join(FirmPerson, FirmPerson.id == MatterTeam.person_id)
+            .where(MatterTeam.matter_id.in_([m.id for m in page_matters] or [""]))
+            .order_by(MatterTeam.role, FirmPerson.name)
+        ).all():
+            team_by_matter.setdefault(matter_id, []).append(
+                {"name": person_name, "role": role, "title": title,
+                 "practice_group": group}
+            )
+
         result: list[dict] = []
-        for matter in visible[offset:]:
-            citations = citations_by_matter[matter.id]
+        for matter in page_matters:
+            involved = sorted(
+                {
+                    member["practice_group"]
+                    for member in team_by_matter.get(matter.id, [])
+                    if member.get("practice_group")
+                }
+                | ({matter.practice_group} if matter.practice_group else set())
+            )
             area_payload = None
             if matter.practice_area:
                 area_payload = {
@@ -766,20 +1173,118 @@ class RetrievalService:
                     "project": self.project_reference(matter.project_id),
                     "title": matter.title,
                     "reference_numbers": matter.reference_numbers,
+                    "client": client_by_matter.get(matter.id),
                     "practice_area": area_payload,
                     "matter_kind": {
                         "id": matter.matter_kind,
                         "label": service_scope.label_of(matter.matter_kind)
                         if service_scope
                         else None,
+                        # Same shape as practice_area above, and for the same
+                        # reason: the leaf label alone hides the hierarchy, so
+                        # "Debt Financing Practice" and "Lending Practice" read as
+                        # unrelated kinds when they are siblings under "Financing
+                        # Practice". A caller scoping a practice needs the path to
+                        # see that.
+                        "path": service_scope.path_labels(matter.matter_kind)
+                        if service_scope and matter.matter_kind in service_scope.visible
+                        else [],
                     }
                     if matter.matter_kind
                     else None,
-                    "visible_versions": len(citations),
-                    "citations": citations,
+                    # What the matter IS and whether it happened. Both are
+                    # properties of the whole folder that no single document
+                    # shows, so they are derived by the matter-level pass — and
+                    # both change which matters belong in an answer. Without
+                    # `lifecycle` a caller cannot tell a closed deal from an
+                    # abandoned one without reading every document of every
+                    # candidate, which agents did inconsistently and so included
+                    # terminated matters in answers about live ones. Without
+                    # `instrument` they qualify a matter by what its documents
+                    # MENTION rather than what the matter is, so a term loan that
+                    # merely repays a revolver counts as a revolver.
+                    "lifecycle": matter.lifecycle,
+                    # The group that OWNS the matter — the book it is filed in,
+                    # which is the group of the partner responsible for it.
+                    "practice_group": matter.practice_group,
+                    # Who at the firm works it. A caller asking "what has this
+                    # partner done" or "who ran this" gets it from the row instead
+                    # of reading the matter's intake memo.
+                    "firm_team": team_by_matter.get(matter.id, []),
+                    # Every group with someone on this matter, the owner included.
+                    # A cross-practice financing belongs to more than one book and
+                    # a single value hides the others.
+                    "practice_groups": involved,
+                    # The groups seconded in, owner excluded. A tax partner sitting
+                    # on a capital markets IPO makes it a matter the tax group has
+                    # WORKED, not one the tax group RUNS, and the difference decides
+                    # whether it belongs in an answer about "our tax matters". The
+                    # split is stated rather than left to be inferred by comparing
+                    # the two fields above: on a filtered page of twenty-six that
+                    # inference is where an answer over-includes.
+                    "supporting_groups": [
+                        group for group in involved if group != matter.practice_group
+                    ],
+                    "instrument": (matter.profile or {}).get("instrument"),
+                    "principal_document": (matter.profile or {}).get(
+                        "principal_document"
+                    ),
+                    "summary": (matter.profile or {}).get("summary"),
+                    # A listing is a collection resource: each row carries what a
+                    # caller needs to decide which matter to open, plus the COUNT
+                    # of citable documents behind it — never the citations
+                    # themselves. Embedding them (one citation per visible
+                    # version) made a row ~28 KB and a 100-row page ~2.9 MB, and
+                    # a partial embed would misrepresent the set. The citations
+                    # live where the item does: search_filter / get_document on
+                    # the chosen matter.
+                    "visible_versions": visible_counts[matter.id],
                 }
             )
+            if include_documents:
+                result[-1]["source_paths"] = paths_by_matter.get(matter.id, [])
+            if practice_group is not None:
+                # Why THIS row is on a group-filtered page. The filter matches any
+                # group staffed on the matter, so a page mixes the group's own book
+                # with matters it was merely seconded onto, and a caller answering
+                # "which matters does this group have" needs to see which is which
+                # without re-deriving it per row.
+                result[-1]["group_match"] = (
+                    "owner"
+                    if matter.practice_group in matched_names
+                    else "supporting"
+                )
         return result
+
+    def _visible_version_counts(
+        self, matter_ids: list[str], principals: set[str]
+    ) -> dict[str, int]:
+        """Document versions per matter the caller may actually see.
+
+        Same fail-closed rule as building a citation for each version and
+        counting what came back — a version counts only when the caller passes
+        the ACL predicate AND holds at least one authorized source observation
+        for it — but as one set-based pass over the whole batch instead of a
+        citation record per version.
+        """
+        wanted = [m for m in matter_ids if m]
+        if not wanted:
+            return {}
+        rows = self.session.execute(
+            select(Document.matter_id, DocumentVersion.id)
+            .join(Document, Document.id == DocumentVersion.document_id)
+            .where(Document.matter_id.in_(wanted))
+        ).all()
+        if not rows:
+            return {}
+        authorized = self._bulk_authorized_sources(
+            [version_id for _, version_id in rows], principals
+        )
+        counts: dict[str, int] = {}
+        for matter_id, version_id in rows:
+            if authorized.get(version_id):
+                counts[matter_id] = counts.get(matter_id, 0) + 1
+        return counts
 
     def list_matters_page(
         self,
@@ -788,6 +1293,11 @@ class RetrievalService:
         limit: int = 100,
         offset: int = 0,
         practice_area: str | None = None,
+        matter_kind: str | None = None,
+        lifecycle: str | None = None,
+        practice_group: str | None = None,
+        firm_person: str | None = None,
+        include_documents: bool = False,
     ) -> Page:
         """``list_matters`` plus an exact ``has_more``, via one extra matter.
 
@@ -802,19 +1312,319 @@ class RetrievalService:
                 limit=limit + 1,
                 offset=offset,
                 practice_area=practice_area,
+                matter_kind=matter_kind,
+                lifecycle=lifecycle,
+                practice_group=practice_group,
+                firm_person=firm_person,
+                include_documents=include_documents,
             ),
             offset=offset,
             limit=limit,
         )
 
-    def _practice_area_subtree(self, area_scope, practice_area: str) -> set[str]:
-        """Every visible Area-of-Law node id at or below ``practice_area``."""
-        if area_scope is None:
+    def list_matter_documents(
+        self, matter_id: str, *, principals: set[str]
+    ) -> list[dict]:
+        """Every document in one matter, complete, in folder order.
+
+        A matter is a bounded set — tens of documents, occasionally a couple of
+        hundred — so this is the one listing that does not paginate. That is the
+        point of it. `search_filter(matter_id=...)` answers the same question a
+        page at a time, and a caller that asks once and reads the first twenty
+        rows of a seventy-five-document matter concludes the other fifty-five are
+        not there. The failure is quiet and it looks like an answer: an agreement
+        filed under a title the query did not use goes unseen, and the reply says
+        the matter has no such document while it sits in the folder, executed.
+        A folder view has to be a folder — all of it, or the absence claims made
+        from it are unfounded.
+
+        It is deliberately the same view the matter-profile pass gets, which is
+        why that pass can judge a folder no single document reveals: path, title,
+        type, date, version standing. No excerpts and no citations — this says
+        what the matter CONTAINS, and get_document says what a document says.
+        """
+        rows = self.session.execute(
+            select(
+                SourceObject.path,
+                Document.id,
+                Document.title,
+                Document.doc_type,
+                Document.doc_date,
+                DocumentVersion.id,
+                DocumentVersion.status,
+            )
+            .join(
+                DocumentVersionSource,
+                DocumentVersionSource.source_object_id == SourceObject.id,
+            )
+            .join(
+                DocumentVersion,
+                DocumentVersion.id == DocumentVersionSource.version_id,
+            )
+            .join(Document, Document.id == DocumentVersion.document_id)
+            .where(Document.matter_id == matter_id)
+            .order_by(SourceObject.path)
+        ).all()
+        if not rows:
+            return []
+        authorized = self._bulk_authorized_sources(
+            [version_id for *_, version_id, _ in rows], principals
+        )
+        try:
+            type_scope = self.config.ontology_facet("document_type")
+        except ValueError:
+            type_scope = None
+        # The chain each row belongs to. One row is one VERSION, so a document that
+        # exists as a draft, a redline and an execution copy is three rows that only
+        # a shared document_id relates -- and an operative instrument is routinely a
+        # base agreement plus an amendment. An agent holding the amendment and no way
+        # to see the chain concludes the base "is not on file" and drops the matter.
+        # Slim by design: enough to know a chain exists and to ask get_document for a
+        # specific member, without repeating the row's own content once per sibling.
+        chain: dict[str, list[dict]] = {}
+        for path, doc_id, _t, _dt, _dd, version_id, status in rows:
+            if authorized.get(version_id):
+                chain.setdefault(doc_id, []).append(
+                    {
+                        "version_id": version_id,
+                        "status": status,
+                        "filename": path.rsplit("/", 1)[-1],
+                    }
+                )
+        for members in chain.values():
+            for position, member in enumerate(members, start=1):
+                member["position"] = f"{position} of {len(members)}"
+
+        out: list[dict] = []
+        for path, doc_id, title, doc_type, doc_date, version_id, status in rows:
+            if not authorized.get(version_id):
+                continue
+            siblings = chain.get(doc_id, [])
+            out.append(
+                {
+                    "source_path": path,
+                    "document_id": doc_id,
+                    "version_id": version_id,
+                    # Omitted when the document has a single version, which is most
+                    # of them: a one-entry list on every row is noise that makes the
+                    # rows that DO have a chain harder to notice.
+                    **({"versions": siblings} if len(siblings) > 1 else {}),
+                    "title": title,
+                    "doc_type_label": (
+                        type_scope.label_of(doc_type)
+                        if type_scope and doc_type in type_scope.visible
+                        else None
+                    ),
+                    "doc_date": doc_date.isoformat() if doc_date else None,
+                    "version_status": status,
+                }
+            )
+        return out
+
+    def list_firm_people(
+        self,
+        *,
+        principals: set[str],
+        limit: int = 100,
+        offset: int = 0,
+        practice_group: str | None = None,
+        name: str | None = None,
+    ) -> Page:
+        """The firm's own lawyers, with the group they sit in and how many
+        visible matters each works.
+
+        This is the directory behind the ``firm_person`` and ``practice_group``
+        filters on ``list_matters``. Without it a caller has to already know how
+        a name is spelled before it can filter by one, and a filter you can only
+        use when you know the answer is not a filter.
+
+        A person is listed only when the caller can see at least one matter they
+        are on, and ``matter_count`` counts only those — so the directory never
+        leaks the shape of an estate the caller has no access to.
+        """
+        if limit <= 0:
+            return Page(items=[], offset=max(0, offset), limit=0, has_more=False)
+        statement = select(FirmPerson).order_by(FirmPerson.name, FirmPerson.id)
+        if practice_group is not None:
+            names = self._group_spellings(practice_group)
+            if not names:
+                return Page(items=[], offset=max(0, offset), limit=limit, has_more=False)
+            statement = statement.where(FirmPerson.practice_group.in_(names))
+        if name is not None:
+            statement = statement.where(self._person_name_matches(name))
+        people = self.session.scalars(statement).all()
+        if not people:
+            return Page(items=[], offset=max(0, offset), limit=limit, has_more=False)
+
+        assignments = self.session.execute(
+            select(MatterTeam.person_id, MatterTeam.matter_id, MatterTeam.role).where(
+                MatterTeam.person_id.in_([p.id for p in people])
+            )
+        ).all()
+        # One authorization pass over every matter in the directory, rather than
+        # per person: the same matter is staffed by several people, and asking
+        # once per person would re-check it once per seat.
+        visible = self._visible_version_counts(
+            sorted({matter_id for _, matter_id, _ in assignments}), principals
+        )
+        matters_by_person: dict[str, set[str]] = {}
+        roles_by_person: dict[str, set[str]] = {}
+        for person_id, matter_id, role in assignments:
+            if not visible.get(matter_id):
+                continue
+            matters_by_person.setdefault(person_id, set()).add(matter_id)
+            if role:
+                roles_by_person.setdefault(person_id, set()).add(role)
+
+        rows = [
+            {
+                "id": person.id,
+                "name": person.name,
+                "title": person.title,
+                "practice_group": person.practice_group,
+                "email": person.email,
+                "roles": sorted(roles_by_person.get(person.id, ())),
+                # Collection row: the count, not the matters. Open them with
+                # list_matters(firm_person=...), which pages and carries the
+                # metadata a caller needs to choose among them.
+                "matter_count": len(matters_by_person.get(person.id, ())),
+            }
+            for person in people
+            if matters_by_person.get(person.id)
+        ]
+        # The whole directory is materialized and authorized above, so `total`
+        # here is the real number of people the caller can see, not a bound.
+        return Page.slice(rows, offset=max(0, offset), limit=limit)
+
+    # How alike a typed name and a stored one must be before a fuzzy fallback
+    # accepts it. Both are trigram similarities on the normalized form, so they
+    # measure spelling, not meaning. 0.45 admits ordinary typos and a dropped
+    # letter; below that the near-misses start being different people.
+    _NAME_FUZZ = 0.45
+    _GROUP_FUZZ = 0.55
+
+    def _group_spellings(self, practice_group: str) -> list[str]:
+        """Every stored spelling of the group the caller means.
+
+        A caller types the group the way they say it — "Banking and Finance",
+        "the Banking & Finance Group", "Private Funds" — and the estate stores it
+        the way its documents wrote it. Matching those two strings directly is
+        what made the filter silently return nothing: a group that exists, a
+        caller who named it, and an empty page that reads exactly like "we have
+        no such matters".
+
+        So the typed name is resolved the same way an insertion resolves one:
+        normalize, then look for a group whose canonical name or recorded alias
+        matches. Aliases are the important half — they hold the equivalences a
+        model already judged at insertion time ("Private Funds" is Funds & Asset
+        Management), and re-deciding that at query time would be both slower and
+        free to disagree with the stored data.
+
+        Falls back to trigram similarity for a name close to a real group but not
+        equal to any spelling of it, and finally to the typed string itself, so a
+        group recorded before the registry existed is still reachable.
+        """
+        normalized = normalize_group(practice_group)
+        if not normalized:
+            return []
+        key = normalize_entity_name(normalized)
+        groups = self.session.scalars(select(FirmPracticeGroup)).all()
+        wanted = {
+            group.name
+            for group in groups
+            if group.normalized_name == key or key in (group.aliases or [])
+        }
+        if not wanted and groups:
+            best = max(
+                (
+                    (name_similarity(key, group.normalized_name)[0], group.name)
+                    for group in groups
+                ),
+                default=(0.0, ""),
+            )
+            if best[0] >= self._GROUP_FUZZ:
+                wanted = {best[1]}
+        # Whatever the registry knows, the raw spellings still count: a person or
+        # matter written before this table existed holds a string no group row
+        # claims, and dropping it here would hide them.
+        stored = self.session.scalars(
+            select(FirmPerson.practice_group)
+            .where(FirmPerson.practice_group.isnot(None))
+            .union(
+                select(Matter.practice_group).where(Matter.practice_group.isnot(None))
+            )
+        ).all()
+        wanted |= {
+            spelling
+            for spelling in stored
+            if normalize_entity_name(normalize_group(spelling) or "") == key
+        }
+        return sorted(wanted)
+
+    def _person_name_matches(self, query: str):
+        """Predicate for "this is the lawyer they meant".
+
+        Names arrive in every order a person writes one: "Sylvia Hartwell",
+        "Hartwell, Sylvia", "Hartwell", "S. Hartwell", "Sylvia J. Hartwell". A
+        substring test on the normalized name answered only the first, third and
+        an accidental fourth — reversing the tokens or adding a middle initial
+        returned nobody, and nobody is indistinguishable from "that lawyer has no
+        matters".
+
+        Resolved in three passes, each tried only when the one before it found
+        nothing, so a precise query never widens:
+
+        1. every token present, in any order, matching at a word start. An
+           initial finds the name it abbreviates, so "L. Cross" reaches Leonard
+           and not Pamela.
+        2. the same with single-letter tokens dropped. This is for the initial
+           the caller supplies and the estate does not store — "Sylvia J.
+           Hartwell" against a recorded "Sylvia Hartwell" — and it only runs when
+           insisting on the initial found no one at all.
+        3. trigram similarity, for a genuine misspelling where no token matches.
+
+        Two lawyers who share a surname stay two lawyers: "Cross" returns both
+        because it names both, and "Leonard Cross" returns one.
+        """
+        normalized = normalize_entity_name(query)
+        tokens = normalized.split()
+        if not tokens:
+            return false()
+
+        def all_of(wanted: list[str]):
+            return and_(
+                *(
+                    or_(
+                        FirmPerson.normalized_name.like(f"{token}%"),
+                        FirmPerson.normalized_name.like(f"% {token}%"),
+                    )
+                    for token in wanted
+                )
+            )
+
+        attempts = [all_of(tokens)]
+        longer = [token for token in tokens if len(token) > 1]
+        if longer and len(longer) != len(tokens):
+            attempts.append(all_of(longer))
+        attempts.append(
+            func.similarity(FirmPerson.normalized_name, normalized) >= self._NAME_FUZZ
+        )
+        for predicate in attempts:
+            ids = self.session.scalars(
+                select(FirmPerson.id).where(predicate)
+            ).all()
+            if ids:
+                return FirmPerson.id.in_(ids)
+        return false()
+
+    def _subtree(self, scope, node_id: str) -> set[str]:
+        """Every visible node id in ``scope`` at or below ``node_id``."""
+        if scope is None:
             return set()
         return {
-            node_id
-            for node_id in area_scope.visible
-            if practice_area in area_scope.ancestors(node_id)
+            candidate
+            for candidate in scope.visible
+            if node_id in scope.ancestors(candidate)
         }
 
     def search_decisions(
@@ -896,7 +1706,9 @@ class RetrievalService:
                 "rationale_text": row.rationale_text,
                 "generalizable": row.generalizable,
                 "score": round(score, 6),
-                "citations": [citation],
+                # Collection row: the decision content plus document_id to open
+                # the underlying document. The citation gated visibility above;
+                # its record comes from get_document, not from every list row.
             }
             for score, row, citation in scored
         ]
@@ -1095,6 +1907,35 @@ class RetrievalService:
                 scope=scope,
             )
 
+    def _drop_superseded(self, hits: list[SearchHit]) -> list[SearchHit]:
+        """Apply ``only_final``: keep the authoritative version of each document.
+
+        A version is dropped only when the SAME document has a final/executed
+        version and this is not it. A document whose only version is a draft is
+        kept — nothing supersedes it, and hiding it made whole matters look
+        smaller than they are (12 documents returning 10) for no reason a caller
+        could see.
+        """
+        if not hits:
+            return hits
+        # One query for the whole page: latest_final_version_id is a cache and is
+        # not always populated, so authority is read from the versions themselves.
+        document_ids = {hit.document_id for hit in hits}
+        rows = self.session.execute(
+            select(DocumentVersion.document_id, DocumentVersion.id, DocumentVersion.status)
+            .where(DocumentVersion.document_id.in_(document_ids))
+        ).all()
+        authoritative: dict[str, set[str]] = {}
+        for document_id, version_id, status in rows:
+            if status in ("final", "executed"):
+                authoritative.setdefault(document_id, set()).add(version_id)
+        return [
+            hit
+            for hit in hits
+            if hit.document_id not in authoritative
+            or hit.version_id in authoritative[hit.document_id]
+        ]
+
     def _select_document_version(
         self, document_id: str, version_id: str | None
     ) -> tuple[Document, DocumentVersion] | None:
@@ -1124,6 +1965,10 @@ class RetrievalService:
         citation = self.citation_for_version(version.id, principals)
         if citation is None:
             return None
+        # A graph/listing summary is a collection row: identity and the info
+        # needed to decide whether to open the document — not its citation
+        # record. The citation still gates visibility above (no citation, no
+        # row); the record itself comes from get_document on the chosen id.
         return {
             "document_id": document.id,
             "version_id": version.id,
@@ -1135,40 +1980,110 @@ class RetrievalService:
             "source_paths": [
                 source["path"] for source in citation["source_objects"]
             ],
-            "citations": [citation],
         }
 
+    def _resolve_matter_filters(self, filters: SearchFilters) -> SearchFilters:
+        """Translate the matter-level filters into the matter-id set they cover.
+
+        A practice group, a lawyer and a lifecycle are properties of the MATTER, and
+        the index stores chunks. Rather than denormalising three mutable fields onto
+        every chunk of every document — where they would go stale the moment a
+        partner moves groups — they are resolved here against the same predicates
+        ``list_matters`` uses, and the backend is handed a matter-id set.
+
+        That shared predicate is the point: a caller who lists a group's matters and
+        then searches within that group must be looking at the same set, and would
+        have no way to notice if they were not.
+
+        An empty match is preserved rather than dropped, so a filter that covers no
+        matter returns nothing instead of silently widening to the whole estate.
+        """
+        wanted = (filters.practice_group, filters.firm_person, filters.lifecycle)
+        if not any(wanted):
+            return filters
+        statement = select(Matter.id)
+        if filters.lifecycle:
+            statement = statement.where(Matter.lifecycle == filters.lifecycle)
+        if filters.practice_group:
+            names = self._group_spellings(filters.practice_group)
+            if not names:
+                return replace(
+                    filters, practice_group=None, firm_person=None, lifecycle=None,
+                    matter_ids=[],
+                )
+            statement = statement.where(
+                or_(
+                    Matter.practice_group.in_(names),
+                    Matter.id.in_(
+                        select(MatterTeam.matter_id)
+                        .join(FirmPerson, FirmPerson.id == MatterTeam.person_id)
+                        .where(FirmPerson.practice_group.in_(names))
+                    ),
+                )
+            )
+        if filters.firm_person:
+            statement = statement.where(
+                Matter.id.in_(
+                    select(MatterTeam.matter_id)
+                    .join(FirmPerson, FirmPerson.id == MatterTeam.person_id)
+                    .where(self._person_name_matches(filters.firm_person))
+                )
+            )
+        matched = list(self.session.scalars(statement).all())
+        if filters.matter_ids is not None:
+            allowed = set(filters.matter_ids)
+            matched = [matter_id for matter_id in matched if matter_id in allowed]
+        return replace(
+            filters, practice_group=None, firm_person=None, lifecycle=None,
+            matter_ids=matched,
+        )
+
     def _resolve_practice_area(self, filters: SearchFilters) -> SearchFilters:
-        """Translate a practice_area filter into the matter-id set it covers.
+        """Translate the ontology filters into the matter-id set they cover.
+
+        practice_area is an Area-of-Law node and matter_kind a Service node — what
+        body of law applies, versus what the firm is DOING. Both live on Matter
+        rather than on a chunk, both use SUBTREE semantics (a parent covers its
+        children), and both compose, so "fund formations in healthcare" is one
+        call. They intersect: each pass narrows the matter set the next one sees.
 
         practice_area lives on Matter, not on the chunk, so it cannot be a term on the
         index. We resolve it here with the same SUBTREE semantics as list_matters (a
         parent area matches its children) and hand the backend a matter-id filter. The
         backend's ACL scope still applies on top, so this set only narrows results — it is
         not an authorization boundary. An empty match is preserved, not dropped: a
-        practice_area that covers no matter yields no hits rather than silently widening to
-        every matter.
+        A filter that covers no matter yields no hits rather than silently widening
+        to every matter.
         """
-        if not filters.practice_area:
+        if not filters.practice_area and not filters.matter_kind:
+            # Untouched, and the SAME object: callers rely on a no-op resolver
+            # being free, and returning a copy would quietly break that.
             return filters
-        try:
-            area_scope = self.config.ontology_facet("area_of_law")
-        except ValueError:
-            area_scope = None
-        matched: list[str] = []
-        if area_scope is not None:
-            rows = self.session.execute(
-                select(Matter.id, Matter.practice_area).where(Matter.practice_area.isnot(None))
-            ).all()
-            matched = [
-                matter_id
-                for matter_id, area in rows
-                if filters.practice_area in area_scope.ancestors(area)
-            ]
-        if filters.matter_ids is not None:
-            allowed = set(filters.matter_ids)
-            matched = [matter_id for matter_id in matched if matter_id in allowed]
-        return replace(filters, practice_area=None, matter_ids=matched)
+        for wanted, facet, column in (
+            (filters.practice_area, "area_of_law", Matter.practice_area),
+            (filters.matter_kind, "service", Matter.matter_kind),
+        ):
+            if not wanted:
+                continue
+            try:
+                scope = self.config.ontology_facet(facet)
+            except ValueError:
+                scope = None
+            matched: list[str] = []
+            if scope is not None:
+                rows = self.session.execute(
+                    select(Matter.id, column).where(column.isnot(None))
+                ).all()
+                matched = [
+                    matter_id
+                    for matter_id, node in rows
+                    if wanted in scope.ancestors(node)
+                ]
+            if filters.matter_ids is not None:
+                allowed = set(filters.matter_ids)
+                matched = [matter_id for matter_id in matched if matter_id in allowed]
+            filters = replace(filters, matter_ids=matched)
+        return replace(filters, practice_area=None, matter_kind=None)
 
     def _search_opensearch(
         self,
@@ -1193,6 +2108,7 @@ class RetrievalService:
 
         from knowledge_index.search_backend import OpenSearchIndex
 
+        filters = self._resolve_matter_filters(filters)
         # practice_area is a Matter attribute, not a chunk field; translate it into a
         # matter-id set the backend can filter on (SUBTREE semantics, same as list_matters).
         filters = self._resolve_practice_area(filters)
@@ -1221,9 +2137,10 @@ class RetrievalService:
             rows = index.search(
                 query_vector=None, scope=scope, filters=filters, limit=window
             )
-            return self._materialize_metadata(
-                rows, principals=principals, limit=window
-            )[offset:]
+            hits = self._materialize_metadata(rows, principals=principals, limit=window)
+            if filters.only_final:
+                hits = self._drop_superseded(hits)
+            return hits[offset:]
 
         query_terms = _terms(query)
         query_cf = query.casefold()
@@ -1301,6 +2218,8 @@ class RetrievalService:
 
         if retrieval.rerank_enabled:
             hits = self._rerank(query, hits)
+        if filters.only_final:
+            hits = self._drop_superseded(hits)
         return hits[offset:window]
 
     def _materialize_metadata(
@@ -1515,7 +2434,31 @@ class RetrievalService:
             title=document.title,
             doc_type=document.doc_type,
             doc_type_label=doc_type_label,
+            doc_date=document.doc_date.isoformat() if document.doc_date else None,
+            language=document.language,
+            matter_ref=(
+                matter.reference_numbers[0]
+                if (matter := self._warm_matters.get(document.matter_id or ""))
+                and matter.reference_numbers
+                else None
+            ),
+            parties=[
+                {
+                    "name": party.name,
+                    "role": entry.get("role_in_doc"),
+                }
+                for entry in (document.parties or [])
+                if isinstance(entry, dict)
+                and (party := self._warm_parties.get(str(entry.get("party_id"))))
+            ],
+            identifiers=list(document.identifiers or []),
             version_status=version.status,
+            version_ordinal=version.ordinal,
+            is_latest_final=bool(
+                document.latest_final_version_id
+                and version.id == document.latest_final_version_id
+            ),
+            latest_final_version_id=document.latest_final_version_id,
             score=score,
             excerpt=_excerpt(str(source.get("text") or ""), query_terms),
             source_paths=[item.path for item in authorized_sources],
@@ -1553,6 +2496,36 @@ class RetrievalService:
                     select(Document).where(Document.id.in_(doc_ids))
                 )
             }
+        # Hit rows surface matter references and party names, so warm those
+        # tables for the page too — same identity-map contract as above: the
+        # caller holds the maps, per-hit session.get stays a dict lookup.
+        matter_ids = {doc.matter_id for doc in documents.values()} - {None, ""}
+        party_ids = {
+            str(entry.get("party_id"))
+            for doc in documents.values()
+            for entry in (doc.parties or [])
+            if isinstance(entry, dict) and entry.get("party_id")
+        }
+        self._warm_matters = (
+            {
+                matter.id: matter
+                for matter in self.session.scalars(
+                    select(Matter).where(Matter.id.in_(matter_ids))
+                )
+            }
+            if matter_ids
+            else {}
+        )
+        self._warm_parties = (
+            {
+                party.id: party
+                for party in self.session.scalars(
+                    select(Party).where(Party.id.in_(party_ids))
+                )
+            }
+            if party_ids
+            else {}
+        )
         if version_ids:
             versions = {
                 version.id: version

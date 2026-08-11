@@ -34,7 +34,10 @@ def _index(monkeypatch, *, filter_body: dict, responses: list[dict]) -> tuple[sb
         captured["content"] = kwargs.get("content")
         return _FakeResponse({"responses": responses})
 
-    monkeypatch.setattr(sb.httpx, "post", fake_post)
+    # The pooled client, not the module-level httpx.post: search goes through one
+    # shared httpx.Client so a query costs no new connection. Patching httpx.post
+    # here silently stops intercepting anything and the test dials a real host.
+    monkeypatch.setattr(sb._HTTP, "post", fake_post)
     return index, captured
 
 

@@ -276,10 +276,6 @@ function pagedCount(shown: number, page: PageBlock | null, noun: string): string
   return `${shown} ${noun}`;
 }
 
-interface Citation {
-  document?: { id?: string; title?: string };
-}
-
 interface RelatedDocument {
   document_id: string;
   title?: string | null;
@@ -450,7 +446,6 @@ export const MattersUI = makeAssistantToolUI<Record<string, never>, unknown>({
       practice_area?: { label?: string; path?: string[] } | null;
       matter_kind?: { label?: string } | null;
       visible_versions?: number;
-      citations?: Citation[];
     }>(result);
     if (!matters.length) return null;
 
@@ -467,7 +462,6 @@ export const MattersUI = makeAssistantToolUI<Record<string, never>, unknown>({
           // node in a tree here, not a free-text label, and the path is what
           // makes a parent-area filter meaningful.
           const path = matter.practice_area?.path ?? [];
-          const first = matter.citations?.[0]?.document;
           return (
             <div key={matter.id} className="border-b px-3.5 py-3 last:border-b-0">
               <div className="flex items-baseline gap-2">
@@ -511,9 +505,6 @@ export const MattersUI = makeAssistantToolUI<Record<string, never>, unknown>({
                   <span className="lm-mono text-[9.5px] text-[var(--lm-muted-3)]">
                     {matter.visible_versions} visible
                   </span>
-                )}
-                {first?.id && (
-                  <RevealLink documentId={first.id} label={first.title ?? "Open a document"} />
                 )}
               </div>
             </div>

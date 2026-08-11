@@ -178,5 +178,54 @@ def test_traversal_resolves_document_edges_back_to_authorized_sources(
             edge["kind"] == "references" and edge["to"]["id"] == litigation.id
             for edge in visible
         )
-        assert all(edge["citations"] for edge in visible)
-        assert all(citation["source_objects"] for edge in visible for citation in edge["citations"])
+        # Edges are collection rows: endpoints + provenance, no embedded
+        # citation records — those come from the item-level tools.
+        assert all("citations" not in edge for edge in visible)
+        assert all(edge["from"]["id"] and edge["to"]["id"] for edge in visible)
+
+
+def test_search_in_document_ranks_inside_one_file_and_pages(
+    factory: sessionmaker[Session], corpus: AppConfig
+) -> None:
+    """Find the passage without reading the file, and point at the page it is on.
+
+    The estate search collapses to one excerpt per document, which answers
+    "which document" and not "where in this one". Reading a long agreement end
+    to end to find a single clause is what exhausts a context window, so this is
+    the tool that has to work for a large file to be usable at all.
+    """
+    with factory() as session:
+        spa = document_for_path(session, "SPA_final")
+        service = RetrievalService(session, corpus)
+
+        # An unauthorized reader gets nothing — same wall as get_document.
+        assert (
+            service.search_in_document(spa.id, "Haftung", principals={"group:litigation"})
+            is None
+        )
+
+        found = service.search_in_document(
+            spa.id, "Haftung Kaufpreis", principals={"group:ma-team"}, limit=5
+        )
+        assert found is not None
+        assert found["document_id"] == spa.id
+        assert found["results"], "a document that contains the term must return a passage"
+        top = found["results"][0]
+        assert "Haftung" in top["text"]
+        # Every hit says which get_document page holds it, so reading around the
+        # hit is one call and no arithmetic.
+        assert top["get_document_page"] == top["ordinal"] // 12 + 1
+        assert found["page"]["returned"] == len(found["results"])
+        assert found["page"]["total_chunks_in_document"] >= 1
+
+        # The result set is scoped to THIS document: the other side of the
+        # ethical wall shares vocabulary ("Kaufpreis") and must not leak in.
+        klage = document_for_path(session, "Klage_final")
+        assert klage.id != spa.id
+        chunk_ids = {result["ordinal"] for result in found["results"]}
+        assert chunk_ids, "expected ranked chunks from the SPA itself"
+
+        # An empty query is a caller error, not an empty result: it would
+        # otherwise return the document's first chunks and look like an answer.
+        with pytest.raises(ValueError):
+            service.search_in_document(spa.id, "   ", principals={"group:ma-team"})

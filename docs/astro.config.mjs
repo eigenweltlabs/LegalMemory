@@ -96,6 +96,7 @@ export default defineConfig({
           label: "Development",
           items: [
             { label: "Benchmarks", slug: "development/benchmarks" },
+            { label: "Agent harnesses", slug: "development/agent-harnesses" },
             { label: "Plugin connectors", slug: "development/plugin-connectors" },
           ],
         },

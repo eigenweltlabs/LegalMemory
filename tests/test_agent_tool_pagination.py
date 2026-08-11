@@ -42,12 +42,20 @@ def source_id(factory: sessionmaker[Session]) -> str:
 
 
 def _seed_matters(session: Session, count: int, *, prefix: str = "Fischer") -> None:
+    """Matters findable the way the search actually looks for them.
+
+    A matter's title is its reference — the filing system's, not a string this
+    pipeline derived — so the lexical legs read the matter's own metadata: the
+    practice group and the instrument, plus the client and parties by trigram.
+    Seeding a title and querying it would test a leg that no longer exists.
+    """
     for index in range(count):
         session.add(
             Matter(
                 id=f"m-{index:03d}",
                 reference_numbers=[f"M-2026-{index:04d}"],
-                title=f"{prefix} Handelsstreit {index:03d}",
+                title=f"M-2026-{index:04d}",
+                practice_group=f"{prefix} Handelsrecht",
             )
         )
     session.commit()
@@ -163,7 +171,7 @@ def test_search_entities_tool_pages(factory) -> None:
     session = factory()
     try:
         seen: set[str] = set()
-        tool = party_resolution_tools(session, AppConfig(), seen)[0]
+        tool = party_resolution_tools(session, seen)[0]
         payload = json.loads(tool.handler({"query": "Nordwind", "limit": 4}))
         assert len(payload["results"]) == 4
         assert payload["page"]["has_more"] is True

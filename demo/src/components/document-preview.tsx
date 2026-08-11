@@ -397,7 +397,7 @@ function ConvertedText({ file, fallbackNotice }: { file: TreeFile; fallbackNotic
         {state.text || "This document has no extracted text."}
       </pre>
       {state.more && (
-        <p className="lm-label mt-3 text-center">Truncated at 40,000 characters</p>
+        <p className="lm-label mt-3 text-center">First page of a longer document</p>
       )}
     </div>
   );

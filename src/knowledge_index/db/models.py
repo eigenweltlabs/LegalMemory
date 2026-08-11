@@ -33,7 +33,15 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from sqlalchemy.orm import (
+    DeclarativeBase,
+    Mapped,
+    mapped_column,
+    relationship,
+    validates,
+)
+
+from knowledge_index.entity_names import normalize_entity_name
 
 JSONVariant = JSON().with_variant(JSONB(), "postgresql")
 
@@ -311,28 +319,98 @@ class Artifact(Base):
 # ------------------------------------------------------------------------ knowledge layer
 
 
-class Client(TimestampMixin, Base):
-    __tablename__ = "clients"
+def _normalized_name_default(context) -> str:
+    """``normalized_name`` derived from whatever ``name`` this statement writes.
 
-    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    Set as a column default rather than left to the caller so no insert path can
+    produce a row the uniqueness constraint and the resolver disagree about — the
+    constraint is only worth its name if every row is keyed the same way.
+    """
+    parameters = context.get_current_parameters()
+    return normalize_entity_name(parameters.get("name"))
+
+
+class EntityIdentityMixin:
+    """The columns that make one real-world entity one row.
+
+    ``normalized_name`` is the identity key (see knowledge_index.entity_names) and
+    carries a trigram index, so the insertion-time resolver can ask "who does the
+    estate already know by roughly this name" instead of the substring test it used
+    to run — which found "Verimark Hospitality Group Inc." from "Verimark
+    Hospitality Group Inc" and from nothing else.
+
+    ``identity_discriminator`` is empty for every entity the estate has no reason to
+    split. Two genuinely different companies DO share a name, and the corpus plants
+    exactly that case; when a mention carries a register identifier that contradicts
+    the same-named incumbent's, the new row records that identifier here and the
+    unique constraint admits it as a second, deliberately distinct entity. Anything
+    else that shares a normalized name is the same entity. A firm's clients recur:
+    a modest client list spread over many matters is what an estate looks like, and
+    a resolver that splits on spelling produces the inverse — nearly as many clients
+    as there are matters, almost every one of them touching exactly one.
+
+    ``normalized_aliases`` is every OTHER name form seen for this entity, normalized,
+    so a variant the corpus has already taught the resolver resolves exactly rather
+    than fuzzily on the next document that uses it.
+    """
+
     name: Mapped[str] = mapped_column(Text)
+    normalized_name: Mapped[str] = mapped_column(Text, default=_normalized_name_default)
+    identity_discriminator: Mapped[str] = mapped_column(Text, default="", server_default="")
     aliases: Mapped[list] = mapped_column(JSONVariant, default=list)
+    normalized_aliases: Mapped[list] = mapped_column(JSONVariant, default=list)
     kind: Mapped[str] = mapped_column(String(20), default="legal_entity")
     identifiers: Mapped[dict] = mapped_column(JSONVariant, default=dict)  # HRB, USt-Id, DMS code
     provenance: Mapped[dict | None] = mapped_column(JSONVariant)
 
+    @validates("name")
+    def _keep_normalized_name(self, _key: str, value: str) -> str:
+        """Renaming an entity re-keys it, in the same statement.
 
-class Party(TimestampMixin, Base):
+        The column default covers Core inserts; this covers every ORM write,
+        including the ones that only touch ``name``. A row whose normalized name no
+        longer matches its name is invisible to the resolver that is supposed to
+        find it, which is the failure this whole change exists to end.
+        """
+        self.normalized_name = normalize_entity_name(value)
+        return value
+
+
+def _entity_identity_args(table: str) -> tuple:
+    """Uniqueness and the two lookup indexes, identical for clients and parties."""
+    return (
+        UniqueConstraint(
+            "normalized_name", "identity_discriminator", name=f"uq_{table}_identity"
+        ),
+        Index(
+            f"ix_{table}_normalized_name_trgm",
+            "normalized_name",
+            postgresql_using="gin",
+            postgresql_ops={"normalized_name": "gin_trgm_ops"},
+        ),
+        Index(
+            f"ix_{table}_normalized_aliases",
+            "normalized_aliases",
+            postgresql_using="gin",
+            postgresql_ops={"normalized_aliases": "jsonb_path_ops"},
+        ),
+    )
+
+
+class Client(EntityIdentityMixin, TimestampMixin, Base):
+    __tablename__ = "clients"
+    __table_args__ = _entity_identity_args("clients")
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+
+
+class Party(EntityIdentityMixin, TimestampMixin, Base):
     """Any natural/legal person appearing in matters or documents (incl. non-clients)."""
 
     __tablename__ = "parties"
+    __table_args__ = _entity_identity_args("parties")
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
-    name: Mapped[str] = mapped_column(Text)
-    aliases: Mapped[list] = mapped_column(JSONVariant, default=list)
-    kind: Mapped[str] = mapped_column(String(20), default="legal_entity")
-    identifiers: Mapped[dict] = mapped_column(JSONVariant, default=dict)
-    provenance: Mapped[dict | None] = mapped_column(JSONVariant)
 
 
 class Matter(TimestampMixin, Base):
@@ -354,6 +432,150 @@ class Matter(TimestampMixin, Base):
         Boolean, default=False
     )  # from practice-mgmt = authoritative
     provenance: Mapped[dict | None] = mapped_column(JSONVariant)
+    # Where the matter stands: executed | closed | terminated | dormant | in_progress.
+    # Distinct from `status` above, which is the triage flag for a fallback holding
+    # matter. A caller asking "which financings actually closed" needs this, and
+    # without it must read every document of every candidate — which agents did
+    # inconsistently, including terminated matters in answers about live deals.
+    lifecycle: Mapped[str | None] = mapped_column(String(20))
+    # The firm's OWN practice book for this matter ("Banking & Finance", "Funds &
+    # Asset Management"), distinct from practice_area, which is the area of LAW: a
+    # matter whose subject is corporate entity formation can be filed in the funds
+    # group, and only the firm's paperwork shows that. Denormalised from the
+    # responsible partner's group in `matter_team` — a matter belongs to the group
+    # of the partner who owns it — and cached here so scoping a practice is one
+    # indexed predicate rather than a join.
+    practice_group: Mapped[str | None] = mapped_column(String(120), index=True)
+    # The rest of the matter-level profile: what the deal IS, which document
+    # constitutes it, a one-line summary, and the evidence behind each. JSON rather
+    # than columns because the useful fields are still being learned and a rubric
+    # should not mint a migration; promote a field only once something filters on it.
+    profile: Mapped[dict | None] = mapped_column(JSONVariant)
+
+
+class FirmPerson(TimestampMixin, Base):
+    """A lawyer or professional AT the firm, as distinct from a party to a matter.
+
+    Kept apart from ``Party`` deliberately. A party is someone the firm deals with;
+    a firm person is someone the firm staffs with. They answer different questions
+    — "which matters involve Nexford" versus "which matters does Merritt run" — and
+    conflating them would let a party filter match the firm's own lawyers and put
+    counsel on the other side of their own deal.
+
+    The practice group lives HERE rather than on the matter because that is where
+    the firm puts it: the paperwork says "Priya Anand, Responsible Partner,
+    Litigation Department". A matter's group is the group of the partner who owns
+    it, which is why the same person's matters move together when they move.
+    """
+
+    __tablename__ = "firm_people"
+    __table_args__ = (
+        UniqueConstraint("normalized_name", name="uq_firm_people_normalized_name"),
+        Index("ix_firm_people_practice_group", "practice_group"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    name: Mapped[str] = mapped_column(Text)
+    normalized_name: Mapped[str] = mapped_column(Text)
+    # Seniority as the firm writes it: Partner, Of Counsel, Associate, Paralegal.
+    title: Mapped[str | None] = mapped_column(String(120))
+    practice_group: Mapped[str | None] = mapped_column(String(120))
+    email: Mapped[str | None] = mapped_column(String(255))
+    provenance: Mapped[dict | None] = mapped_column(JSONVariant)
+
+    @validates("name")
+    def _normalize(self, _key: str, value: str) -> str:
+        self.normalized_name = normalize_entity_name(value or "")
+        return value
+
+
+class FirmPracticeGroup(TimestampMixin, Base):
+    """One of the firm's own practice groups, with every spelling it goes by.
+
+    A group is an entity, not a label, for the same reason a party is: the firm
+    writes it differently in every document that mentions it, and free strings
+    make each spelling its own group. Before this table an estate held "Capital
+    Markets", "Capital Markets & Structured Finance", "Capital Markets &
+    Regulatory" and "Structured Finance" as four separate books, so a caller
+    asking what the capital markets group has done got a quarter of it and no
+    indication the rest existed.
+
+    ``aliases`` is what makes resolution stick. Case, ampersands and the trailing
+    "practice group"/"department" fold deterministically into
+    ``normalized_name``; anything past that — whether "Private Funds" names the
+    Funds & Asset Management group or a real second book — is a judgement a model
+    makes once, against the groups already recorded, and the answer is written
+    here so it is never re-litigated.
+    """
+
+    __tablename__ = "firm_practice_groups"
+    __table_args__ = (
+        UniqueConstraint(
+            "normalized_name", name="uq_firm_practice_groups_normalized_name"
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    # The spelling the firm is taken to use, and what tool results show.
+    name: Mapped[str] = mapped_column(String(120))
+    normalized_name: Mapped[str] = mapped_column(Text)
+    # Other spellings resolved onto this group, normalized, including the ones a
+    # model judged equivalent. Looked up before any model is asked again.
+    aliases: Mapped[list | None] = mapped_column(JSONVariant, default=list)
+    provenance: Mapped[dict | None] = mapped_column(JSONVariant)
+
+
+class MatterTeam(TimestampMixin, Base):
+    """Which firm people work a matter, and in what role.
+
+    Role is the role ON THIS MATTER — responsible partner, billing partner, lead
+    associate — not the person's title, because the same partner is responsible on
+    one matter and merely supervising on another. A person can hold more than one
+    role on a matter, so the role is part of the key.
+    """
+
+    __tablename__ = "matter_team"
+    __table_args__ = (
+        Index("ix_matter_team_person", "person_id", "role"),
+    )
+
+    matter_id: Mapped[str] = mapped_column(ForeignKey("matters.id"), primary_key=True)
+    person_id: Mapped[str] = mapped_column(ForeignKey("firm_people.id"), primary_key=True)
+    role: Mapped[str] = mapped_column(String(60), primary_key=True)
+    provenance: Mapped[dict | None] = mapped_column(JSONVariant)
+
+
+class MatterProfileQueue(Base):
+    """Matters whose profile is stale, and when they were last touched.
+
+    A matter's practice area, kind, lifecycle and version chains are properties of
+    the whole folder, but insertion is per-document and parallel, so no document
+    can decide them. They are instead re-derived by a matter-level pass, and this
+    table is how that pass knows what to look at.
+
+    Every classified document upserts its matter here — one row write inside a
+    transaction that is committing anyway, next to a document that just cost a
+    model call. The work therefore scales with MATTERS TOUCHED, not documents: a
+    million documents across thirty thousand matters run thirty thousand profiles,
+    and one document added later runs one.
+
+    ``last_marked_at`` is what makes bulk and incremental the same code path. A
+    worker takes matters untouched for longer than the debounce window, so a matter
+    receiving five hundred documents stays out of the queue until its flood stops
+    and then profiles once, while a lone document profiles as soon as the window
+    passes. Nothing has to know which mode it is in.
+    """
+
+    __tablename__ = "matter_profile_queue"
+    __table_args__ = (Index("ix_matter_profile_queue_marked", "last_marked_at"),)
+
+    matter_id: Mapped[str] = mapped_column(ForeignKey("matters.id"), primary_key=True)
+    last_marked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    profiled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Non-fatal: a matter whose profile call failed keeps its old profile and is
+    # retried, rather than blocking the run or silently losing its place.
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    last_error: Mapped[str | None] = mapped_column(Text)
 
 
 class MatterClient(Base):

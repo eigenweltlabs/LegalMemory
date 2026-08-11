@@ -17,6 +17,7 @@ from knowledge_index.permissions import configure_access
 from knowledge_index.db import get_engine, init_db
 from knowledge_index.db.models import ProcessingState, Source
 from knowledge_index.pipeline import PipelineRunner
+from knowledge_index.pipeline.matter_profile import DEFAULT_DEBOUNCE_SECONDS
 from knowledge_index.pipeline.runner import connector_from_source
 from knowledge_index.sync import SyncEngine
 
@@ -143,6 +144,26 @@ def parser() -> argparse.ArgumentParser:
     run = commands.add_parser("run", help="process pending pipeline stages")
     run.add_argument("--limit", type=int)
     run.add_argument("--enable-evals", action="store_true")
+    profile = commands.add_parser(
+        "profile-matters",
+        help="re-derive matter-level facts (practice, kind, lifecycle, versions) "
+        "for matters whose documents have settled",
+    )
+    profile.add_argument(
+        "--debounce",
+        type=int,
+        default=DEFAULT_DEBOUNCE_SECONDS,
+        help="seconds a matter must be untouched before profiling; high during a "
+        "backfill so a matter profiles once its flood ends, low in steady state",
+    )
+    profile.add_argument(
+        "--sweep",
+        action="store_true",
+        help="profile everything queued regardless of the debounce window — the "
+        "end-of-run pass that makes the window a cost knob, not a correctness one",
+    )
+    profile.add_argument("--limit", type=int, default=500)
+    profile.add_argument("--matter", help="profile one matter by reference number")
     worker = commands.add_parser("hatchet-worker", help="run the Hatchet insertion worker")
     worker.add_argument(
         "--slots",
@@ -323,6 +344,17 @@ def parser() -> argparse.ArgumentParser:
     serve = commands.add_parser("serve", help="run admin UI, API, and MCP endpoint")
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8000)
+    serve.add_argument(
+        "--workers",
+        type=int,
+        default=int(os.environ.get("KI_WEB_WORKERS", "1")),
+        help=(
+            "HTTP worker processes. Retrieval is CPU-bound Python, so one worker is "
+            "one GIL: measured against twenty concurrent agents the container held "
+            "114%% of a single core and every tool call queued. Background schedulers "
+            "stay in this process whatever this is set to."
+        ),
+    )
     return root
 
 
@@ -532,6 +564,50 @@ def main() -> None:
             config.pipeline.stages["gen_evals"].enabled = True
         result = PipelineRunner(factory, config).run_until_idle(limit=args.limit)
         print(json.dumps(result.__dict__, indent=2))
+    elif args.command == "profile-matters":
+        from sqlalchemy import select
+
+        from knowledge_index.db.models import Matter
+        from knowledge_index.pipeline.matter_profile import due_matters, profile_matter
+
+        config = store.get()
+        session = factory()
+        try:
+            if args.matter:
+                matter = session.scalar(
+                    select(Matter).where(
+                        Matter.reference_numbers.op("->>")(0) == args.matter
+                    )
+                )
+                ids = [matter.id] if matter else []
+            else:
+                ids = due_matters(
+                    session,
+                    debounce_seconds=args.debounce,
+                    limit=args.limit,
+                    ignore_debounce=args.sweep,
+                )
+            done = failed = 0
+            for matter_id in ids:
+                result = profile_matter(session, config, matter_id)
+                session.commit()
+                if result is None:
+                    failed += 1
+                    continue
+                done += 1
+                print(
+                    json.dumps(
+                        {
+                            "matter": matter_id,
+                            "lifecycle": result.lifecycle,
+                            "instrument": result.instrument,
+                            "families": len(result.version_families),
+                        }
+                    )
+                )
+            print(json.dumps({"profiled": done, "failed": failed, "queued": len(ids)}))
+        finally:
+            session.close()
     elif args.command == "hatchet-worker":
         from knowledge_index.orchestration import start_hatchet_worker
 
@@ -713,7 +789,21 @@ def main() -> None:
         # is governed by backup.schedule.enabled in the admin UI; this only decides that
         # something is watching the clock.
         start_backup_scheduler(factory, store.get)
-        uvicorn.run(create_app(factory, store), host=args.host, port=args.port, log_level="info")
+        if args.workers > 1:
+            # Workers fork children that import the app rather than inheriting an
+            # object, so they get the importable entry point. The schedulers
+            # started above stay here, in the parent, and run once.
+            uvicorn.run(
+                "knowledge_index.web.asgi:app",
+                host=args.host,
+                port=args.port,
+                workers=args.workers,
+                log_level="info",
+            )
+        else:
+            uvicorn.run(
+                create_app(factory, store), host=args.host, port=args.port, log_level="info"
+            )
 
 
 if __name__ == "__main__":
@@ -829,8 +919,6 @@ def _rotate_connector_key(factory, new_key: str, *, dry_run: bool) -> int:
     The operator swaps KI_CONNECTOR_CREDENTIAL_KEY to the new value *after* this reports
     success, so the old key must still be in the environment while it runs.
     """
-    from sqlalchemy import select
-
     from knowledge_index.connectors.runtime.secrets import (
         CredentialCryptoError,
         decrypt_credentials,

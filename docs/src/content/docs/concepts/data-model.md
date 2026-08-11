@@ -93,6 +93,8 @@ table maintained by the connector.
 |---|---|
 | `id` | uuid |
 | `name`, `aliases[]` | all name forms seen for one client entity |
+| `normalized_name`, `normalized_aliases[]` | the same forms under one comparison rule (`knowledge_index.entity_names`): case-folded, transliterated, punctuation- and legal-form-stripped. This is the key insertion resolves on, so one real client is one row across every matter |
+| `identity_discriminator` | empty unless a mention carried a register identifier contradicting the same-named incumbent, in which case it holds that identifier. `(normalized_name, identity_discriminator)` is unique, so two companies that genuinely share a name each get a row and nothing else can |
 | `kind` | `legal_entity \| natural_person` |
 | `identifiers` | company-register number, tax id, DMS client code, whatever the firm has |
 | provenance | confidence + evidence (clients are usually *imported* from the practice-management system and are then authoritative, `confidence = 1.0`) |
@@ -117,7 +119,9 @@ retrieval is matter-aware.
 
 ### Party (natural or legal person)
 Shared by matters (an opposing party in one matter may be the client in another;
-conflict checks care about exactly this). `{id, name, aliases, kind, identifiers}`.
+conflict checks care about exactly this). Same identity columns as Client:
+`{id, name, aliases, normalized_name, normalized_aliases, identity_discriminator,
+kind, identifiers}`.
 
 ### Document (logical) and DocumentVersion
 A **Document** is the logical work product ("the SPA for project Falke"); a

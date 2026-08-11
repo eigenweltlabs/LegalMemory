@@ -122,6 +122,9 @@ def _ensure_database(*, recreate: bool) -> None:
     try:
         with engine.connect() as connection:
             connection.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+            # The entity resolver's name search rides a trigram GIN index, so
+            # create_all cannot build the clients/parties schema without pg_trgm.
+            connection.execute(text("CREATE EXTENSION IF NOT EXISTS pg_trgm"))
             connection.commit()
         Base.metadata.create_all(engine)
     finally:

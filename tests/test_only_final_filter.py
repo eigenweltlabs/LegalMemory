@@ -24,8 +24,17 @@ def _clauses(filters: SearchFilters) -> list[dict]:
     return _combined_filter(_AllowAllScope(), filters)["bool"]["filter"]
 
 
-def test_only_final_appends_final_executed_terms_clause() -> None:
-    assert _FINAL_CLAUSE in _clauses(SearchFilters(only_final=True))
+def test_only_final_is_not_translated_into_a_version_status_clause() -> None:
+    """only_final selects a VERSION; it is not a per-chunk term filter.
+
+    `version_status in {final, executed}` looks like the same thing and is not:
+    it hides a document whose only version is a draft, even though nothing
+    supersedes it, so a matter reports fewer documents than it holds and the
+    caller has no way to see why. Authority is a fact about a document's other
+    versions, which a chunk-level filter cannot know — it is applied after
+    materialization instead, in RetrievalService._drop_superseded.
+    """
+    assert _FINAL_CLAUSE not in _clauses(SearchFilters(only_final=True))
 
 
 def test_default_leaves_version_status_unconstrained() -> None:
@@ -34,13 +43,12 @@ def test_default_leaves_version_status_unconstrained() -> None:
     assert all(c.get("term", {}).get("version_status") is None for c in clauses)
 
 
-def test_only_final_composes_with_version_status_without_erroring() -> None:
-    # draft + only_final: both clauses are present and AND together, so at query
-    # time no document matches (nothing is both draft and final/executed) — the
-    # contradictory-but-legal case must produce a filter, never raise.
+def test_an_explicit_version_status_is_still_a_clause() -> None:
+    # version_status is a genuine per-chunk fact and stays in the query; asking
+    # for drafts AND only_final is legal and must produce a filter, never raise.
     clauses = _clauses(SearchFilters(version_status="draft", only_final=True))
     assert {"term": {"version_status": "draft"}} in clauses
-    assert _FINAL_CLAUSE in clauses
+    assert _FINAL_CLAUSE not in clauses
 
 
 def test_active_filters_omits_only_final_when_false() -> None:

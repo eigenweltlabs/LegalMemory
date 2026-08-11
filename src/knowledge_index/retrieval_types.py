@@ -96,6 +96,12 @@ class SearchFilters:
     party: str | None = None
     clause_type: str | None = None
     chunk_kind: str | None = None
+    # document_id / document_version_id: scope the search INSIDE one document.
+    # Every other filter here narrows which documents are searched; these two say
+    # "search within this one", which is what a reader needs once retrieval has
+    # already found the right file and the file is too large to read whole.
+    document_id: str | None = None
+    document_version_id: str | None = None
     # chunk_kinds: restrict to a *set* of chunk kinds (terms semantics). Set by
     #   RetrievalService from config.retrieval.search_chunk_kinds; a single
     #   chunk_kind above is the narrower filter and wins when both are present.
@@ -107,5 +113,18 @@ class SearchFilters:
     # matter_ids: restrict to this set of matters (ANDs with ``matter_id``). Carries the
     #   resolved practice_area matter set to the backend; an empty list is meaningful — it
     #   means the practice_area filter matched no matters, so the search returns nothing.
+    # practice_group / firm_person / lifecycle: the same story as practice_area — all
+    #   three are properties of the MATTER, not of a chunk, so RetrievalService resolves
+    #   them into ``matter_ids`` before the query reaches the backend, which never reads
+    #   these fields. practice_group matches any group staffed on the matter and
+    #   firm_person any of its lawyers, exactly as list_matters does, so a filtered
+    #   search and a filtered listing always describe the same set of matters.
     practice_area: str | None = None
+    # matter_kind: a Service node id, SUBTREE semantics, resolved to matter_ids the
+    #   same way practice_area is. What the firm is DOING, as against what body of
+    #   law applies.
+    matter_kind: str | None = None
+    practice_group: str | None = None
+    firm_person: str | None = None
+    lifecycle: str | None = None
     matter_ids: list[str] | None = None
