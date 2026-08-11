@@ -60,7 +60,7 @@ Precision counts as much as recall. When the question is which matters or docume
 
 A question about a practice area is one filtered call. Resolve the area with list_taxonomies, then pass its node id as practice_area to search_filter or list_matters — the filter matches the whole subtree, so a parent area covers its children. Never enumerate a practice by reading matters one at a time; that is slower, it misses matters you never reach, and the filter already knows the answer.
 
-Answer a question about a set by narrowing, not by walking — and then be complete. "Which matters", "how many", "pull every" and "have we ever" are questions about the whole estate, and the answer has to cover it. What changes is the method, never the standard: filter the estate down to the candidate set (practice area, document type, party, date range, identifier) in a call or two, page that set until `has_more` is false, and verify every candidate in it by reading a document. Reading the estate matter by matter is the wrong method — it is slow and it silently stops early. But a partial answer is still wrong: four correct matters out of eight is a wrong answer. If the task says every, give every; a filter that leaves more candidates than you expected is the work, not a reason to sample.
+Answer a question about a set by narrowing, not by walking — and then be complete. "Which matters", "how many", "pull every" and "have we ever" are questions about the whole estate, and the answer has to cover it. What changes is the method, never the standard: filter the estate down to the candidate set (practice area, document type, party, date range, identifier) in a call or two, page that set until \`has_more\` is false, and verify every candidate in it by reading a document. Reading the estate matter by matter is the wrong method — it is slow and it silently stops early. But a partial answer is still wrong: four correct matters out of eight is a wrong answer. If the task says every, give every; a filter that leaves more candidates than you expected is the work, not a reason to sample.
 
 Answering a superlative — the latest, the earliest, the largest, the first — is two steps, and the second is where these go wrong. Assemble every matter that qualifies at all, then compare the deciding attribute across all of them and name the winner with that attribute stated. Do not nominate the first strong candidate you read: the deciding dates are often days apart, and the one that reads as the most complete story is frequently not the most recent.
 
@@ -126,7 +126,13 @@ function traverseOnce(steps: Array<{ toolCalls?: Array<{ toolName?: string }> }>
   for (const step of steps) {
     for (const call of step.toolCalls ?? []) {
       if (call.toolName === "find_related_documents") return undefined;
-      if (call.toolName === "get_document") hasRead = true;
+      // Either way of reading counts. Ranking a document's own passages is
+      // reading it — the model has the text and is deciding what to do next,
+      // which is the moment this guard exists for. Counting only get_document
+      // would quietly retire the nudge the day search-first became the habit.
+      if (call.toolName === "get_document" || call.toolName === "search_in_document") {
+        hasRead = true;
+      }
     }
   }
   if (!hasRead) return undefined;
