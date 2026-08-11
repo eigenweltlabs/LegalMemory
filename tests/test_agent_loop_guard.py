@@ -57,6 +57,16 @@ def _tool_call_body(name: str, arguments: dict, *, prompt_tokens: int = 1000) ->
     }
 
 
+def _final_answer_body(answer: str, *, prompt_tokens: int = 1000) -> dict:
+    """A finished turn: no tool call, content that validates as the final schema."""
+    return {
+        "choices": [
+            {"message": {"role": "assistant", "content": json.dumps({"answer": answer})}}
+        ],
+        "usage": {"prompt_tokens": prompt_tokens, "completion_tokens": 10},
+    }
+
+
 def _agent() -> tuple[str, AppConfig]:
     """The gateway-served model name and the config, as chat_agent takes them."""
     return TEST_LLM_MODEL, AppConfig()
@@ -95,27 +105,34 @@ def test_identical_repeated_call_is_warned_then_aborted(monkeypatch) -> None:
     assert len(executed) == providers_module.REPEATED_CALL_WARN - 1
 
 
-def test_prompt_token_budget_aborts(monkeypatch) -> None:
+def test_a_large_prompt_is_not_a_reason_to_abort(monkeypatch) -> None:
+    """A big conversation is work, not a runaway loop.
+
+    There used to be a prompt-token budget here, and it aborted the agents doing
+    the most reading — large folders, tracked-changes markup, long mail threads —
+    while a genuinely looping agent stayed well under it. Being deterministic, it
+    also failed the same documents on every retry, so the quarantine it produced
+    could not be worked off. The repeated-call trip above is what catches a loop;
+    size is not evidence of one, and nothing may abort on it.
+    """
     model, config = _agent()
     monkeypatch.setenv("LITELLM_MASTER_KEY", "sk-test")
     monkeypatch.setattr(providers_module, "_record_usage", lambda *a, **k: None)
     monkeypatch.setattr(
         providers_module,
         "_post_to_gateway",
-        lambda *a, **k: _FakeResponse(
-            _tool_call_body("lookup", {"q": "x"}, prompt_tokens=200_000)
-        ),
+        lambda *a, **k: _FakeResponse(_final_answer_body("done", prompt_tokens=900_000)),
     )
-    with pytest.raises(ModelOutputInvalid, match="prompt tokens"):
-        chat_agent(
-            model,
-            config,
-            system="s",
-            user="u",
-            tools=[_noop_tool([])],
-            final_schema=_Result,
-            max_iters=50,
-        )
+    result = chat_agent(
+        model,
+        config,
+        system="s",
+        user="u",
+        tools=[_noop_tool([])],
+        final_schema=_Result,
+        max_iters=50,
+    )
+    assert result.answer == "done"
 
 
 def test_record_failure_never_overwrites_done(

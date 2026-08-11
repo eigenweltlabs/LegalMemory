@@ -17,6 +17,7 @@ from knowledge_index.db.models import (
     Artifact,
     BillingInvoice,
     Blob,
+    Chunk,
     Client,
     DecisionRecord,
     Document,
@@ -414,15 +415,19 @@ def test_all_document_query_paths_return_exact_citations(
 
     matters = service.list_matters(principals=PRINCIPALS)
     assert matters[0]["project_id"] == "project-1"
-    _assert_exact_citation(matters[0]["citations"][0])
+    # A listing row advertises the count of citable documents, not the
+    # citations themselves — those belong to the item-level tools.
+    assert "citations" not in matters[0]
+    assert matters[0]["visible_versions"] >= 1
 
     decisions = service.search_decisions("limits exposure", principals=PRINCIPALS)
     assert decisions[0]["project_id"] == "project-1"
-    _assert_exact_citation(decisions[0]["citations"][0])
+    assert decisions[0]["document_id"] == "document-1"
+    assert "citations" not in decisions[0]
 
     edges = service.traverse("document", "document-1", principals=PRINCIPALS)
-    assert edges and edges[0]["citations"]
-    _assert_exact_citation(edges[0]["citations"][0])
+    assert edges and edges[0]["from"]["id"] and edges[0]["to"]["id"]
+    assert "citations" not in edges[0]
 
     entity_citations = service.citations_for_party_or_client(
         "client", seeded["client"].id, PRINCIPALS
@@ -471,35 +476,120 @@ def test_mcp_query_tools_preserve_citations(factory, tmp_path) -> None:
         _assert_exact_citation(document["citations"][0])
 
         matters = _call_mcp(client, "list_matters")
-        _assert_exact_citation(matters[0]["citations"][0])
+        assert "citations" not in matters["results"][0]
+        assert matters["results"][0]["visible_versions"] >= 1
 
         edges = _call_mcp(
             client,
             "traverse",
             {"entity_type": "document", "entity_id": "document-1"},
         )
-        _assert_exact_citation(edges[0]["citations"][0])
+        assert "citations" not in edges["results"][0]
+        assert edges["results"][0]["from"]["id"] and edges["results"][0]["to"]["id"]
 
         rollup = _call_mcp(client, "billing_rollup", {"matter_id": "matter-1"})
         _assert_exact_citation(rollup["citations"][0])
 
         invoices = _call_mcp(client, "list_invoices", {"matter_id": "matter-1"})
-        _assert_exact_citation(invoices[0]["citations"][0])
+        assert invoices["results"][0]["document_ids"] == ["document-1"]
+        assert "citations" not in invoices["results"][0]
 
         entities = _call_mcp(client, "resolve_entity", {"query": "Citation GmbH"})
-        _assert_exact_citation(entities[0]["citations"][0])
+        assert entities["results"][0]["citation_count"] >= 1
+        assert "citations" not in entities["results"][0]
 
         decisions = _call_mcp(
             client,
             "search_decisions",
             {"query": "limits exposure"},
         )
-        _assert_exact_citation(decisions[0]["citations"][0])
+        assert decisions["results"][0]["document_id"] == "document-1"
+        assert "citations" not in decisions["results"][0]
 
         scope = _call_mcp(client, "preview_search_scope")
         assert scope["project_ids"] == ["project-1"]
-        assert scope["document_ids"] == ["document-1"]
-        _assert_exact_citation(scope["citations"][0])
+        assert scope["document_count"] == 1
+        assert scope["documents"]["results"] == ["document-1"]
+        assert "citations" not in scope["documents"]
+
+
+def test_get_document_pages_by_chunk_and_names_where_the_reader_is(
+    factory, tmp_path
+) -> None:
+    """A long document reads page by page, and never looks finished when it is not.
+
+    The unit is the chunk, not the character: chunk 41 in a search hit and page 4
+    of this reader name the same place, which is what makes "search inside, then
+    read around the hit" a two-call move instead of arithmetic.
+    """
+    artifact_dir = tmp_path / "artifacts"
+    with factory() as session:
+        _seed_downloadable_pair(session, artifact_dir)
+        # 30 chunks over one version: paged 12 at a time, that is 3 pages.
+        session.add_all(
+            [
+                Chunk(
+                    id=f"chunk-{ordinal:03d}",
+                    document_version_id="download-version",
+                    ordinal=ordinal,
+                    text=f"Clause {ordinal}. Ordinary contractual boilerplate.",
+                    meta={"section": f"Article {ordinal // 5 + 1}"},
+                    document_id="download-document",
+                    matter_id="download-matter",
+                    project_id="download-project",
+                )
+                for ordinal in range(30)
+            ]
+        )
+        session.commit()
+
+    store = ConfigStore(tmp_path / "config.json")
+    store.save(_header_auth_config(artifact_dir))
+    with TestClient(create_app(factory, store)) as client:
+        first = _call_mcp(client, "get_document", {"document_id": "download-document"})
+        assert first["page"] == {
+            "page": 1,
+            "pages": 3,
+            "chunks_per_page": 12,
+            "first_chunk": 0,
+            "last_chunk": 11,
+            "total_chunks": 30,
+            "has_more": True,
+            "next_page": 2,
+        }
+        assert "Clause 0." in first["content"]["text"]
+        assert "Clause 11." in first["content"]["text"]
+        assert "Clause 12." not in first["content"]["text"]
+        # The marker sits in the TEXT, not only in the page block: a field beside
+        # the text can be skimmed past, a sentence where the text stops cannot.
+        # It names both ways on — the targeted one first — rather than ordering a
+        # full walk, which on a long document is the expensive default.
+        marker = first["content"]["text"]
+        assert "[PAGE 1 OF 3" in marker
+        assert "chunks 0–11 of 30" in marker
+        assert "search_in_document" in marker
+        assert "get_document(page=2)" in marker
+        assert "PREFIX" in marker
+        # The locus travels with the chunk, so a citation can say where it came from.
+        assert first["chunks"][0]["locus"] == {"section": "Article 1"}
+
+        last = _call_mcp(
+            client, "get_document", {"document_id": "download-document", "page": 3}
+        )
+        assert last["page"]["has_more"] is False
+        assert last["page"]["next_page"] is None
+        assert last["page"]["last_chunk"] == 29
+        # No marker on the final page: it means "unread text remains", never
+        # "this response was paginated".
+        assert "[PAGE" not in last["content"]["text"]
+
+        # A page past the end is empty rather than an error — the caller has
+        # simply run off the document, and has_more already said so.
+        past = _call_mcp(
+            client, "get_document", {"document_id": "download-document", "page": 9}
+        )
+        assert past["chunks"] == []
+        assert past["page"]["has_more"] is False
 
 
 def test_mcp_document_reads_are_paginated_and_related_docs_are_discoverable(
@@ -512,19 +602,15 @@ def test_mcp_document_reads_are_paginated_and_related_docs_are_discoverable(
     store = ConfigStore(tmp_path / "config.json")
     store.save(_header_auth_config(artifact_dir))
     with TestClient(create_app(factory, store)) as client:
-        page = _call_mcp(
-            client,
-            "get_document",
-            {"document_id": "download-document", "offset": 5, "max_chars": 10},
-        )
-        assert page["content"] == {"text": "56789abcde"}
-        assert page["content_page"] == {
-            "offset": 5,
-            "returned_chars": 10,
-            "total_chars": 36,
-            "has_more": True,
-            "next_offset": 15,
-        }
+        # This version has no chunk rows, so the reader falls back to the whole
+        # converted text as one page. An unchunked document must still read as a
+        # document: an empty page reads as "there is nothing here", which is the
+        # one answer a missing side table must never produce.
+        whole = _call_mcp(client, "get_document", {"document_id": "download-document"})
+        assert whole["content"]["text"] == "0123456789abcdefghijklmnopqrstuvwxyz"
+        assert "[PAGE" not in whole["content"]["text"]
+        assert whole["page"]["has_more"] is False
+        assert whole["page"]["unchunked"] is True
 
         related = _call_mcp(
             client,
@@ -538,7 +624,8 @@ def test_mcp_document_reads_are_paginated_and_related_docs_are_discoverable(
             "stored_relation",
             "shared_matter",
         }
-        assert item["citations"][0]["source_objects"][0]["path"] == "DL-001/related.docx"
+        assert item["source_paths"] == ["DL-001/related.docx"]
+        assert "citations" not in item
 
 
 def test_mcp_download_returns_exact_original_blob_and_short_lived_workspace_link(

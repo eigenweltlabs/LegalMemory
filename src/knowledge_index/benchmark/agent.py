@@ -105,6 +105,20 @@ class AgentResult:
 # --------------------------------------------------------------------------- tool suite
 
 
+def _result_count(result: object) -> int:
+    """How many rows a tool call actually surfaced.
+
+    Paginated tools return ``{results, page}`` rather than a bare list, so the
+    old ``len(result) if isinstance(result, list)`` counted every search as one
+    result — the trajectory would have said a 20-hit search surfaced 1.
+    """
+    if isinstance(result, dict) and isinstance(result.get("results"), list):
+        return len(result["results"])
+    if isinstance(result, list):
+        return len(result)
+    return 0 if result is None else 1
+
+
 class ToolSuite:
     """Sync facade over the real MCP server — the single source of truth for the tools.
 
@@ -198,11 +212,16 @@ class ToolSuite:
             return json.dumps({"error": f"{type(exc).__name__}: {exc}"})
         self._track_paths(result)
         # record the full trajectory step: the call, its args, and what it surfaced
-        n_results = len(result) if isinstance(result, list) else (0 if result is None else 1)
-        self.trace.append({
-            "tool": name, "args": args, "n_results": n_results,
+        step = {
+            "tool": name, "args": args, "n_results": _result_count(result),
             "surfaced_paths": sorted(self.retrieved_paths - before),
-        })
+        }
+        # Whether the agent left results on the table is a trajectory fact worth
+        # reading next to n_results: a run that answered from page 1 of 40 hits
+        # looks identical to one that saw everything, unless the trace says so.
+        if isinstance(result, dict) and isinstance(result.get("page"), dict):
+            step["has_more"] = bool(result["page"].get("has_more"))
+        self.trace.append(step)
         payload = json.dumps(result, ensure_ascii=False, default=str)
         # Cap a whole-document dump: a credit agreement can exceed the model's context
         # window and hard-400 the loop. The agent can search_semantic for the passage.

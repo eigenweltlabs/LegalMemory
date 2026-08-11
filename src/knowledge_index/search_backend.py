@@ -17,6 +17,20 @@ from knowledge_index.retrieval_types import SearchFilters
 _SOURCE_EXCLUDES = {"_source": {"excludes": ["embedding"]}}
 
 
+# One pooled HTTP client for the whole process.
+#
+# Every call site here used the module-level ``httpx.post`` / ``httpx.get``,
+# which builds a client, opens a TCP connection, and tears both down per
+# request. A hybrid search issues several legs, so thirty concurrent searches
+# meant hundreds of handshakes — and the cost was invisible from inside
+# OpenSearch, which reported 64.6ms per query while callers measured seconds.
+# A shared pool makes the measured cost the query cost.
+_HTTP = httpx.Client(
+    limits=httpx.Limits(max_connections=200, max_keepalive_connections=100),
+    timeout=30.0,
+)
+
+
 class OpenSearchIndex:
     """Small adapter; OpenSearch owns BM25/vector indexing, not authorization policy."""
 
@@ -74,7 +88,7 @@ class OpenSearchIndex:
             lines.append(json.dumps({"index": {"_id": chunk.id}}))
             lines.append(json.dumps(self._doc_body(chunk)))
         body = "\n".join(lines) + "\n"
-        response = httpx.post(
+        response = _HTTP.post(
             f"{self.base_url}/{self.index_name}/_bulk",
             params={"refresh": "false"},
             content=body.encode("utf-8"),
@@ -174,8 +188,22 @@ class OpenSearchIndex:
         strict_filter = _combined_filter(scope, filters)
         size = _oversample(limit)
         if query_vector is None:
+            # A metadata search returns DOCUMENTS, so it must page over documents.
+            # Without the collapse below this asked for `_oversample(limit)` CHUNKS
+            # and let the caller dedupe them: one 800-chunk offering memorandum then
+            # consumed the whole window and the rest of the matter was never seen —
+            # a matter with 33 documents returned 16, and `has_more` said false
+            # because the collapse, not the corpus, had run out. Collapsing in the
+            # index makes `size` count versions, so `limit` means what it says.
+            #
+            # The sort below is the collapse's tiebreaker as well as the caller's
+            # order, and it is a total order, so paging stays stable.
+            # Small headroom over the window: the ACL is already applied inside the
+            # query, so the SQL re-verify only drops rows the index has gone stale
+            # on. A handful covers that without going back to 5x oversampling.
             body: dict = {
-                "size": size,
+                "size": min(max(limit + 10, 20), 2500),
+                "collapse": {"field": "document_version_id"},
                 **_SOURCE_EXCLUDES,
                 "query": strict_filter,
                 # F6 date-trust guard: after O10, undated docs carry a null
@@ -184,7 +212,17 @@ class OpenSearchIndex:
                 # range filter already excludes null-dated docs (a range query
                 # never matches a missing field), so bounded date searches drop
                 # them entirely — undated == not date-searchable, by design.
-                "sort": [{"doc_date": {"order": "desc", "missing": "_last"}}],
+                #
+                # document_version_id breaks doc_date ties. Without it the order
+                # among same-dated chunks is whatever the shards return, which
+                # differs between two calls — so an offset page could repeat a
+                # row the previous page already showed and skip one it did not.
+                # It is a total order over versions, which is the granularity
+                # the collapse downstream keeps anyway.
+                "sort": [
+                    {"doc_date": {"order": "desc", "missing": "_last"}},
+                    {"document_version_id": {"order": "asc"}},
+                ],
             }
             return self._run_search(body)
         return self._run_search(self._knn_body(query_vector, strict_filter, size))
@@ -272,7 +310,7 @@ class OpenSearchIndex:
             lines.append(json.dumps({}))  # per-search header targets the same index (URL)
             lines.append(json.dumps(body))
         payload = "\n".join(lines) + "\n"
-        response = httpx.post(
+        response = _HTTP.post(
             f"{self.base_url}/{self.index_name}/_msearch",
             params={"typed_keys": "false"},
             content=payload.encode("utf-8"),
@@ -293,7 +331,7 @@ class OpenSearchIndex:
         physically cannot enter the field; different-model-same-dimension vectors are
         blocked by binding the index name to the embedding signature + the reindex flow.
         Nothing degrades silently."""
-        response = httpx.get(f"{self.base_url}/{self.index_name}/_mapping", timeout=5)
+        response = _HTTP.get(f"{self.base_url}/{self.index_name}/_mapping", timeout=5)
         response.raise_for_status()
         mappings = response.json().get(self.index_name, {}).get("mappings", {})
         embedding = (mappings.get("properties") or {}).get("embedding") or {}
@@ -324,7 +362,7 @@ class OpenSearchIndex:
         return self._run_search(body)
 
     def _run_search(self, body: dict) -> list[dict]:
-        response = httpx.post(
+        response = _HTTP.post(
             f"{self.base_url}/{self.index_name}/_search",
             json=body,
             timeout=30,
@@ -373,7 +411,7 @@ class OpenSearchIndex:
         so an unmapped field is silently dropped at index time — a code-side field
         addition must be pushed to indexes created before it). Additive only; docs
         indexed before the push need a re-sync to become searchable on new fields."""
-        response = httpx.get(f"{self.base_url}/{self.index_name}/_mapping", timeout=5)
+        response = _HTTP.get(f"{self.base_url}/{self.index_name}/_mapping", timeout=5)
         response.raise_for_status()
         live = next(iter(response.json().values()))["mappings"].get("properties", {})
         missing = {
@@ -424,7 +462,7 @@ class OpenSearchIndex:
                 "aggs": {"v": {"terms": {"field": field, "size": 400}}},
             }
             try:
-                response = httpx.post(
+                response = _HTTP.post(
                     f"{self.base_url}/{self.index_name}/_search", json=body, timeout=30
                 )
                 response.raise_for_status()
@@ -488,7 +526,15 @@ class OpenSearchIndex:
 
 
 def _oversample(limit: int) -> int:
-    return min(max(limit * 5, 50), 500)
+    """Candidate depth to request per leg for a caller that wants ``limit`` hits.
+
+    The ceiling has to clear the deepest window a paginated caller can ask for
+    (``offset + limit``), not just the first page: fusion, collapse and the ACL
+    re-verify all shrink the candidate set, so a leg that stops at 500 chunks
+    cannot honestly answer whether a page at offset 400 exists. A first-page
+    search is unaffected — limit 8 still asks for 400, well under either cap.
+    """
+    return min(max(limit * 5, 50), 2500)
 
 
 # Words that open a question are capitalised by grammar, not because they name
@@ -555,6 +601,9 @@ def _combined_filter(scope: CompiledAccessScope, filters: SearchFilters) -> dict
         # keyword term match was too strict to be usable.)
         ("clause_type", filters.clause_type),
         ("chunk_kind", filters.chunk_kind),
+        # Search inside one document (or one specific version of it).
+        ("document_id", filters.document_id),
+        ("document_version_id", filters.document_version_id),
     ):
         if value:
             clauses.append({"term": {field: value}})
@@ -610,11 +659,12 @@ def _combined_filter(scope: CompiledAccessScope, filters: SearchFilters) -> dict
     date_range = _date_range(filters.date_from, filters.date_to)
     if date_range:
         clauses.append({"range": {"doc_date": date_range}})
-    if filters.only_final:
-        # VersionStatus.FINAL / EXECUTED — authoritative versions only. All three
-        # legs inherit this because they share this strict filter. It ANDs with any
-        # version_status term above, so draft + only_final yields no hits (not an error).
-        clauses.append({"terms": {"version_status": ["final", "executed"]}})
+    # only_final is deliberately NOT a clause here. It selects a VERSION, and which
+    # version is authoritative is a fact about the document's other versions, which
+    # a per-chunk term filter cannot see: `version_status in {final, executed}` hid
+    # every single-version draft too, even though nothing supersedes it. It is
+    # applied after materialization, where the document's siblings are known —
+    # see RetrievalService._drop_superseded.
     return {"bool": {"filter": clauses}}
 
 

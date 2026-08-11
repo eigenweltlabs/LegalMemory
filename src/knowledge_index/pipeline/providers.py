@@ -34,14 +34,29 @@ log = logging.getLogger(__name__)
 # Reasoning-capable extraction models can legitimately need several minutes for
 # large documents. Keep the client timeout above LiteLLM's gateway timeout so a
 # gateway 408 is reported cleanly and owned by the pipeline retry policy.
-MODEL_REQUEST_TIMEOUT_SECONDS = float(os.getenv("KI_MODEL_REQUEST_TIMEOUT_SECONDS", "660"))
+# A matter-level agent reading a large folder legitimately runs for many turns, and
+# the previous 660s cut those off mid-conversation. The failure surfaced as a gateway
+# 408, burned a stage attempt, and quarantined a document that was doing nothing
+# wrong. Which documents it hits depends on what is in flight rather than on the
+# file, so the casualties differ every run. Must stay above the gateway's own request
+# timeout, or the gateway cuts first and this never applies.
+MODEL_REQUEST_TIMEOUT_SECONDS = float(os.getenv("KI_MODEL_REQUEST_TIMEOUT_SECONDS", "1980"))
 
-# Degenerate-agent-loop trips (see chat_agent): warn on the Nth identical
-# back-to-back tool call, abort on the Mth; cap the conversation's prompt size
-# well below the model's serving context (262k on the current fleet).
+# Degenerate-agent-loop trip (see chat_agent): warn on the Nth identical
+# back-to-back tool call, abort on the Mth. This catches an agent that has stopped
+# making progress, which is a real fault.
+#
+# There is deliberately NO prompt-size budget. One used to abort the conversation at
+# 160k tokens "well below the serving context", and it did not prevent runaway loops
+# -- the repeated-call trip above does that -- it only killed the agents doing the
+# most work. It aborted documents whose folders were large or whose text was
+# sprawling -- tracked-changes markup, spreadsheet trackers, long email threads --
+# and did so deterministically: those files failed every attempt, on every retry, at
+# any concurrency, so they were the only ones the pipeline could never index. A
+# conversation that genuinely exceeds the model's serving context gets a real error
+# from the gateway saying so.
 REPEATED_CALL_WARN = int(os.getenv("KI_AGENT_REPEATED_CALL_WARN", "3"))
 REPEATED_CALL_ABORT = int(os.getenv("KI_AGENT_REPEATED_CALL_ABORT", "6"))
-AGENT_PROMPT_TOKEN_BUDGET = int(os.getenv("KI_AGENT_PROMPT_TOKEN_BUDGET", "160000"))
 
 # One dead billing key must not be rediscovered once per document. After a permanent
 # fault the same model fails fast for this long without touching the network, so a
@@ -228,7 +243,7 @@ def chat_json(
     system: str,
     user: str,
     schema: type[SchemaT],
-    max_output_tokens: int = 2000,
+    max_output_tokens: int | None = None,
     trace_tags: list[str] | None = None,
 ) -> SchemaT:
     """One structured chat completion, validated against the stage's schema.
@@ -247,7 +262,17 @@ def chat_json(
         json={
             "model": model,
             "temperature": 0.0,  # pipeline output is deterministic by design
-            "max_tokens": max_output_tokens,
+            # No output cap by default. This model reasons before it answers, and
+            # a cap truncates the reasoning rather than shortening the answer:
+            # measured on one classification, 12,000 tokens went entirely into a
+            # 29,904-character reasoning trace and `content` came back None. That
+            # surfaces as ModelOutputInvalid, the document's extraction is lost,
+            # and — because the matter's practice area is set by the first
+            # document that survives — an unlucky survivor defines the matter (a
+            # $700M term loan filed under Real Property Law because a mortgage
+            # form won the lottery). 1,441 documents were quarantined this way in
+            # one 51k run. A cap here buys nothing the stage timeout does not.
+            **({"max_tokens": max_output_tokens} if max_output_tokens else {}),
             "response_format": {"type": "json_object"},
             "messages": [
                 {
@@ -283,9 +308,9 @@ def chat_agent(
     user: str,
     tools: list[AgentTool],
     final_schema: type[SchemaT],
-    max_iters: int = 6,
-    max_output_tokens: int = 1500,
-    max_tool_result_chars: int = 6000,
+    max_iters: int | None = None,
+    max_output_tokens: int | None = None,
+    max_tool_result_chars: int | None = None,
     result_validator: Callable[[SchemaT], str | None] | None = None,
     trace_tags: list[str] | None = None,
 ) -> SchemaT:
@@ -342,12 +367,20 @@ def chat_agent(
     repeat_signature: str | None = None
     repeat_count = 0
 
-    for iteration in range(max_iters):
-        # Give the agent freedom to inspect evidence, but make the bounded loop
-        # actually converge: on the final turn it must submit the typed result
-        # instead of spending its last chance on another read-only tool call.
+    # No turn limit by default. Every cap on this loop has cost us more than it
+    # saved: the agent stops mid-investigation and raises ModelOutputInvalid, the
+    # stage retries the whole interaction, and if it keeps failing the document's
+    # metadata is decided by whatever survived — which is how a $700M term loan
+    # came to be filed under Real Property Law. An agent that has not answered yet
+    # needs another turn, not a refusal.
+    iteration = -1
+    while max_iters is None or iteration + 1 < max_iters:
+        iteration += 1
+        # Give the agent freedom to inspect evidence, but make a BOUNDED loop
+        # actually converge: on its final permitted turn it must submit the typed
+        # result rather than spend its last chance on another read-only call.
         tool_choice: str | dict = "auto"
-        if iteration == max_iters - 1:
+        if max_iters is not None and iteration == max_iters - 1:
             tool_choice = {"type": "function", "function": {"name": submit}}
         response = _post_to_gateway(
             f"{base}/v1/chat/completions",
@@ -357,7 +390,7 @@ def chat_agent(
             json={
                 "model": model,
                 "temperature": 0.0,  # pipeline output is deterministic by design
-                "max_tokens": max_output_tokens,
+                    **({"max_tokens": max_output_tokens} if max_output_tokens else {}),
                 "tools": tool_specs,
                 "tool_choice": tool_choice,
                 "messages": messages,
@@ -370,13 +403,6 @@ def chat_agent(
         # One row per gateway turn: an agent loop is several real, separately billed
         # calls, not one call retried.
         _record_usage(response, body, model, call="agent")
-        prompt_tokens = int(((body.get("usage") or {}).get("prompt_tokens")) or 0)
-        if prompt_tokens > AGENT_PROMPT_TOKEN_BUDGET:
-            raise ModelOutputInvalid(
-                f"agent {model} conversation reached {prompt_tokens} prompt tokens "
-                f"(budget {AGENT_PROMPT_TOKEN_BUDGET}) without submitting — aborted "
-                "before the serving context limit"
-            )
         message = body["choices"][0]["message"]
         tool_calls = message.get("tool_calls") or []
 
@@ -465,13 +491,20 @@ def chat_agent(
                 {
                     "role": "tool",
                     "tool_call_id": call.get("id"),
-                    "content": str(result)[:max_tool_result_chars],
+                    # Never truncated by default: a clipped tool result is
+                    # evidence cut mid-structure, and the agent then reasons from
+                    # a payload that looks complete and is not.
+                    "content": (
+                        str(result)[:max_tool_result_chars]
+                        if max_tool_result_chars
+                        else str(result)
+                    ),
                 }
             )
 
     raise ModelOutputInvalid(
         f"agent {model} did not submit a valid result within {max_iters} iterations"
-    )
+    )  # only reachable when a caller opted into a turn limit
 
 
 def _record_usage(response: httpx.Response, body: dict, model: str, *, call: str) -> None:

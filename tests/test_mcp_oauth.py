@@ -345,10 +345,14 @@ def test_a_valid_token_sees_exactly_what_the_source_shared_with_that_person(
             for who in (LITIGATOR, CORPORATE)
         }
 
-    assert set(scopes[LITIGATOR]["document_ids"]) == {"d-0"}
-    assert set(scopes[CORPORATE]["document_ids"]) == {"d-1"}
+    assert set(scopes[LITIGATOR]["documents"]["results"]) == {"d-0"}
+    assert set(scopes[CORPORATE]["documents"]["results"]) == {"d-1"}
     # A perfectly valid token for somebody the source never shared anything with.
-    assert scopes["temp.contractor@kanzlei.example"]["document_ids"] == []
+    assert scopes["temp.contractor@kanzlei.example"]["documents"]["results"] == []
+    # document_count is the whole scope, not the page — the field an agent is told
+    # to read for "how much can I see".
+    assert scopes["temp.contractor@kanzlei.example"]["document_count"] == 0
+    assert scopes[LITIGATOR]["document_count"] == 1
     assert reachable[LITIGATOR]["citations"][0]["document"]["id"] == "d-0"
     # The corporate lawyer holds a valid token and asks for the litigation document by
     # its exact id; the answer is that no such document exists for her.

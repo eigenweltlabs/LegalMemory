@@ -32,7 +32,6 @@ from knowledge_index.db.models import (
     DocumentGrant,
     DocumentVersion,
     DocumentVersionSource,
-    EntityIdentifier,
     Extraction,
     Matter,
     MatterAssignment,
@@ -57,6 +56,7 @@ from knowledge_index.pipeline.distill import (
     context_header,
     contextualize,
 )
+from knowledge_index.pipeline.matter_profile import mark_matter_dirty
 from knowledge_index.pipeline.extraction import (
     AREA_OF_LAW_INSTRUCTION,
     MATTER_KIND_INSTRUCTION,
@@ -74,11 +74,13 @@ from knowledge_index.pipeline.folder_context import (
     build_member_doc,
     folder_ls,
 )
+from knowledge_index.entity_names import normalize_entity_name
 from knowledge_index.pipeline.matter_search import (
     classification_tools,
     entity_search_covered,
     party_resolution_tools,
     relation_tools,
+    resolve_or_create_entity,
 )
 from knowledge_index.pipeline.providers import (
     ModelOutputInvalid,
@@ -842,11 +844,9 @@ class PipelineRunner:
                 else []
             ),
             final_schema=MatterClassification,
-            max_iters=100,
-            max_output_tokens=16_000,
-            # Service listings with definitions can exceed the default cap, and a
-            # truncated listing hides the right candidate. Effectively no truncation.
-            max_tool_result_chars=200_000,
+            # Nothing here is capped: a truncated service listing hides the right
+            # candidate, and an exhausted turn budget makes the agent give up
+            # mid-investigation — both produce confident wrong metadata.
             trace_tags=trace_tags,
             result_validator=validate_classification,
         )
@@ -907,20 +907,44 @@ class PipelineRunner:
                     if unassigned
                     else classification.matter_title or matter_ref
                 ),
-                practice_area=practice_area,
-                matter_kind=matter_kind,
+                # Both labels are left unset here and derived from the vote below,
+                # so the document that happens to create the matter carries exactly
+                # the same weight as the twenty that join it.
                 status="unassigned" if unassigned else "unknown",
                 imported=False,
                 provenance=provenance,
             )
             session.add(matter)
             session.flush()
-        elif matter.practice_area is None and practice_area and not matter.imported:
-            # first valid area wins; a 30-document matter must not flap between
-            # areas, and practice-management imports stay authoritative
-            matter.practice_area = practice_area
-        if matter.matter_kind is None and matter_kind and not matter.imported:
-            matter.matter_kind = matter_kind
+        if not matter.imported:
+            # A matter's area and kind are properties of the MATTER, but this agent
+            # only ever sees ONE document, so its answer is about that document.
+            # "First valid answer wins" then froze whichever parallel call returned
+            # first: a Master Clinical Trial Agreement became Contract Law (a CTA is
+            # a contract), a continuation-vehicle LPA became Tax Law (its §1061 memo
+            # won the race), a co-invest LP became M&A (the deal it funded). Each
+            # answer was right about its document and wrong about the matter.
+            #
+            # Every document votes instead, weighted by the agent's own confidence,
+            # and the running mode is the label. Order stops mattering, so the
+            # anti-flapping property that first-wins was protecting survives — a
+            # settled matter only changes when the evidence does. Practice area and
+            # matter kind go through the identical path: they were both first-wins,
+            # and a matter that asserts "Funds Practice" and "Tax Law" at once is
+            # exactly what two independent races produce.
+            _record_matter_vote(
+                matter,
+                area=practice_area,
+                kind=matter_kind,
+                weight=float(classification.confidence or 0.0),
+            )
+        # The matter's own facts — practice, service, lifecycle, what the deal is,
+        # which files are versions of one another — cannot be seen from here, and
+        # the vote above only makes this document's guess stable, not right. Record
+        # that the matter changed; a matter-level pass re-derives them from the
+        # folder once its documents settle. One upsert, no new task.
+        if not matter.imported:
+            mark_matter_dirty(session, matter.id)
         if matter.project_id is None and source.project_id:
             project = session.get(Project, source.project_id)
             if project is None:
@@ -1081,9 +1105,6 @@ class PipelineRunner:
                 ensure_ready=self.ensure_source_object_ready,
             ),
             final_schema=FileRelationResult,
-            max_iters=100,
-            max_output_tokens=16_000,
-            max_tool_result_chars=24000,
             result_validator=validate_opened_refs,
             trace_tags=trace_tags,
         )
@@ -1162,10 +1183,13 @@ class PipelineRunner:
             # anchor honestly answering "I am not a version of anything I see" is NOT
             # a contradiction of their attachment, and splitting the anchor out would
             # undo the merge. Only the non-anchor case moves out.
+            previous_document = current_document
             current_document, current_version = self._create_file_entity(
                 session, source_object, matter, provenance
             )
             _relink_version_source(session, current_version.id, source_object.id)
+            # The chain it just left has a hole where this version used to sit.
+            _renumber_chain(session, previous_document)
         if (
             result.identity in {"duplicate", "new_version"}
             and identity_ref
@@ -1966,7 +1990,9 @@ class PipelineRunner:
                 kind=RelationKind.SUPERSEDES.value,
                 provenance=provenance,
             )
-
+        # Placement above is pairwise against ONE anchor; renumbering folds that
+        # decision into the chain as a whole so the ordinals stay dense and stable.
+        _renumber_chain(session, document)
 
     def _extract_metadata(self, session: Session, state: ProcessingState) -> StageResult:
         # Runs on EVERY version: this stage is the sole owner of document typing
@@ -2011,11 +2037,12 @@ class PipelineRunner:
                     )
                 if node not in clause_scope.visible:
                     return f"clause_type_node {node!r} is not part of the active clause facet"
-            # A linked party must be one the agent actually saw via search_entities —
-            # the "a matching name is not enough" guard against merging two entities.
-            # And symmetrically: a NEW party is only accepted when the agent actually
-            # searched for it — without this, create is the frictionless default and
-            # the entity layer fills with same-name twins instead of resolutions.
+            # Both guards are about what the agent SAW, not about what is stored: a
+            # submitted existing_id has to come from a search result, and a party the
+            # agent never searched for cannot be asserted as new. Whether two names
+            # are one entity is decided afterwards, by rule, in
+            # _resolve_document_parties — so neither of these is load-bearing for
+            # deduplication any more, and neither ever was.
             for party in candidate.parties:
                 if party.existing_id and party.existing_id not in seen_ids:
                     return (
@@ -2038,7 +2065,9 @@ class PipelineRunner:
         if clause_scope is not None:
             tools.append(clause_search_tool(clause_scope, clause_visited))
         tools.extend(
-            party_resolution_tools(session, self.config, seen_ids, searched_queries)
+            party_resolution_tools(
+                session, seen_ids, searched_queries, matter_id=document.matter_id
+            )
         )
         metadata = chat_agent(
             model,
@@ -2054,14 +2083,11 @@ class PipelineRunner:
             ),
             tools=tools,
             final_schema=DocumentMetadata,
-            max_iters=40,
             # Reasoning models account internal reasoning against max_tokens. Keep enough
             # room for both reasoning and the dense, clause-heavy JSON response.
-            max_output_tokens=16_000,
             # Ontology listings are bounded (~25KB for the largest sibling list) and
             # must NEVER be cut: a truncated list means the right candidate is
             # invisible and the walk fails silently. Effectively no truncation.
-            max_tool_result_chars=200_000,
             result_validator=validate_metadata,
             trace_tags=trace_tags,
         )
@@ -2102,7 +2128,13 @@ class PipelineRunner:
             doc_date_source = "none"
         document.title = metadata.title or document.title
         document.parties = _resolve_document_parties(
-            session, document, metadata.parties, model=model, evidence=source_object.id
+            session,
+            document,
+            metadata.parties,
+            model=model,
+            evidence=source_object.id,
+            session_factory=self.session_factory,
+            config=self.config,
         )
         document.identifiers = sorted(
             {value.strip() for value in metadata.identifiers if value.strip()}
@@ -2183,7 +2215,6 @@ class PipelineRunner:
                 ensure_ascii=False,
             ),
             schema=DecisionExtraction,
-            max_output_tokens=16_000,
             trace_tags=trace_tags,
         )
         if not result.has_decision:
@@ -2414,6 +2445,52 @@ class PipelineRunner:
                 row.last_error = None
 
 
+def _record_matter_vote(
+    matter: Matter, *, area: str | None, kind: str | None, weight: float
+) -> None:
+    """Add one document's opinion to the matter's tally and re-derive the labels.
+
+    The classify agent sees one document, so its answer is evidence about the
+    matter rather than a verdict on it. Tallying the evidence and taking the mode
+    makes the label a property of the whole matter and makes arrival order stop
+    mattering — the two things "first valid answer wins" got wrong.
+
+    ``weight`` is the agent's own confidence in that answer, so a document it
+    classified reluctantly counts for less than one it was sure about. Votes live
+    in ``provenance`` (already JSON) so this needs no migration, and they are kept
+    rather than reduced away: they are the audit trail for why a matter carries
+    the label it does, and they let a later document change a wrong early call.
+    """
+    if weight <= 0:
+        # The agent said it was guessing. Recording a zero-weight vote would still
+        # let enough guesses outvote one confident answer.
+        return
+    votes = dict(matter.provenance or {})
+    for field, value in (("area_votes", area), ("kind_votes", kind)):
+        if not value:
+            continue
+        tally = dict(votes.get(field) or {})
+        tally[value] = round(tally.get(value, 0.0) + weight, 4)
+        votes[field] = tally
+        # Ties keep the incumbent: re-running the same corpus must not shuffle a
+        # matter between two equally-supported areas.
+        current = matter.practice_area if field == "area_votes" else matter.matter_kind
+        winner = max(tally, key=lambda node: (tally[node], node == current))
+        if field == "area_votes":
+            matter.practice_area = winner
+        else:
+            matter.matter_kind = winner
+        # A label the matter's own documents do not agree on is a label to review,
+        # not one to trust. This is the signal the old first-wins path destroyed:
+        # it recorded a winner and threw the disagreement away, so a matter split
+        # between Tax and Funds looked exactly like one every document agreed on.
+        total = sum(tally.values())
+        votes.setdefault("contested", {})[field] = round(
+            1.0 - (tally[winner] / total), 3
+        ) if total else 0.0
+    matter.provenance = votes
+
+
 def _advisory_xact_lock(session: Session, key: str) -> None:
     """Serialize one logical entity on Postgres for the current transaction only."""
     if session.bind is None or session.bind.dialect.name != "postgresql":
@@ -2475,6 +2552,58 @@ def connector_from_source(source: Source, session: Session | None = None) -> Syn
     return LocalFilesystemSource(config["root"], acl_resolver=acl_resolver if has_acl else None)
 
 
+def _effective_party_role(
+    session: Session,
+    matter: Matter | None,
+    party: ExtractedParty,
+    role: str,
+    config: AppConfig,
+) -> tuple[str, str | None]:
+    """The role a mention actually gets, and why it is not the one claimed.
+
+    ``client`` does not mean "an important company on this page" — it means the party
+    THIS FIRM acts for on THIS matter. The 9,288-document run had 985 distinct names
+    carrying it, including individuals, counterparties, co-investors, and the firm
+    itself 16 times. Three refusals, none of them a prompt:
+
+    * the firm is never its own client (config.firm; off when unset, because an
+      appliance that has not been told whose it is cannot recognise its own name);
+    * an entity already recorded as a party on this matter keeps the role it has —
+      nobody is the opposing party and the client of the same matter;
+    * a matter whose client came from practice management is authoritative, so a
+      document-level claim that disagrees is recorded as a named party instead.
+    """
+    if role != PartyRole.CLIENT.value:
+        return role, None
+    if config.firm.is_self(party.name):
+        # Recorded as the advising law firm, which is what it is, rather than dropped:
+        # it IS on the document.
+        return PartyRole.ADVISOR.value, "own_firm"
+    if matter is None:
+        return role, None
+    normalized = normalize_entity_name(party.name)
+    incumbent = session.scalar(
+        select(MatterParty.role)
+        .join(Party, Party.id == MatterParty.party_id)
+        .where(MatterParty.matter_id == matter.id, Party.normalized_name == normalized)
+        .order_by(MatterParty.role)
+        .limit(1)
+    )
+    if incumbent:
+        return incumbent, "already_a_party_on_this_matter"
+    if matter.imported:
+        authoritative = set(
+            session.scalars(
+                select(Client.normalized_name)
+                .join(MatterClient, MatterClient.client_id == Client.id)
+                .where(MatterClient.matter_id == matter.id)
+            )
+        )
+        if authoritative and normalized not in authoritative:
+            return PartyRole.OTHER.value, "matter_client_is_authoritative"
+    return role, None
+
+
 def _resolve_document_parties(
     session: Session,
     document: Document,
@@ -2482,102 +2611,84 @@ def _resolve_document_parties(
     *,
     model: str,
     evidence: str,
+    session_factory: sessionmaker[Session],
+    config: AppConfig,
 ) -> list[dict]:
-    """Materialize the agent's resolved parties into the firm-wide entity layer.
+    """Materialize the document's named parties into the firm-wide entity layer.
 
-    Resolution is the AGENT's: it either LINKED to an existing entity (set existing_id,
-    which the stage validator confirmed it saw via search_entities) or decided CREATE.
-    One deterministic safety net backs the agent up: a CREATE whose verbatim name this
-    matter already knows (case-insensitively) reuses that entity instead of minting a
-    twin — same-name entities in DIFFERENT matters stay distinct on purpose, since
-    different companies share names and that ambiguity is genuinely the agent's call.
-    The firm's client (role=client) lands in ``clients`` + ``matter_clients``; every
-    other party lands in ``parties`` + ``matter_parties``. Typed identifiers are
-    promoted to ``entity_identifiers``. Link writes are idempotent via the composite
-    PKs. Returns the ``document.parties`` payload with each mention's resolved entity
-    id.
+    Resolution is NOT the agent's to decline. It searched, and it may have linked by
+    id; but whether two names are one entity is a rule (see
+    ``matter_search.link_decision``), applied here to every mention regardless of what
+    the agent submitted. That is the difference between a client with five matters and
+    five clients with one matter each — and left to per-document judgement it lands on
+    the second, giving an estate almost as many clients as it has matters.
+
+    Each entity is resolved-or-created in its OWN committed transaction, so a sibling
+    document extracting the same party in parallel sees it immediately instead of
+    creating its own copy minutes later. The matter links written here belong to this
+    stage's transaction, because they are facts about this document.
+
+    Returns the ``document.parties`` payload with each mention's resolved entity id.
     """
     matter_id = document.matter_id
+    matter = session.get(Matter, matter_id) if matter_id else None
     provenance = {"method": "inferred", "model": model, "evidence": [evidence]}
     resolved: list[dict] = []
+    # Entities already resolved on THIS document corroborate the next one: a
+    # candidate that shares a matter with a party named beside it here is very
+    # likely the same entity as the name that reached it.
+    siblings: set[str] = set()
+    # Now that two mentions of one name resolve to ONE entity, a document naming it
+    # twice reaches the same link twice; session.get cannot see the first one while
+    # it is still pending, so the pair is remembered here instead.
+    linked: set[tuple[str, str]] = set()
     for party in parties:
-        role = party.role.value if isinstance(party.role, PartyRole) else str(party.role)
+        claimed = party.role.value if isinstance(party.role, PartyRole) else str(party.role)
+        role, demotion = _effective_party_role(session, matter, party, claimed, config)
         is_client = role == PartyRole.CLIENT.value
         entity_type = "client" if is_client else "party"
-        model_cls = Client if is_client else Party
+        outcome = resolve_or_create_entity(
+            session_factory,
+            entity_type=entity_type,
+            name=party.name,
+            kind=party.kind,
+            identifiers={ident.scheme: ident.value for ident in party.identifiers},
+            provenance=provenance,
+            matter_id=matter_id,
+            sibling_entity_ids=siblings,
+            preferred_entity_id=party.existing_id,
+        )
+        entity_id = outcome["id"]
+        siblings.add(entity_id)
 
-        entity = session.get(model_cls, party.existing_id) if party.existing_id else None
-        if entity is None and matter_id:
-            normalized_name = party.name.strip().lower()
+        if matter_id and (entity_id, role) not in linked:
+            linked.add((entity_id, role))
             if is_client:
-                entity = session.scalar(
-                    select(Client)
-                    .join(MatterClient, MatterClient.client_id == Client.id)
-                    .where(
-                        MatterClient.matter_id == matter_id,
-                        func.lower(func.trim(Client.name)) == normalized_name,
-                    )
-                    .limit(1)
-                )
-            else:
-                entity = session.scalar(
-                    select(Party)
-                    .join(MatterParty, MatterParty.party_id == Party.id)
-                    .where(
-                        MatterParty.matter_id == matter_id,
-                        func.lower(func.trim(Party.name)) == normalized_name,
-                    )
-                    .limit(1)
-                )
-        if entity is None:
-            entity = model_cls(
-                name=party.name,
-                kind=party.kind,
-                aliases=[],
-                identifiers={ident.scheme: ident.value for ident in party.identifiers},
-                provenance=provenance,
-            )
-            session.add(entity)
-            session.flush()
-
-        if matter_id:
-            if is_client:
-                if session.get(MatterClient, (matter_id, entity.id)) is None:
-                    session.add(MatterClient(matter_id=matter_id, client_id=entity.id))
-            elif session.get(MatterParty, (matter_id, entity.id, role)) is None:
+                if session.get(MatterClient, (matter_id, entity_id)) is None:
+                    session.add(MatterClient(matter_id=matter_id, client_id=entity_id))
+            elif session.get(MatterParty, (matter_id, entity_id, role)) is None:
                 session.add(
                     MatterParty(
                         matter_id=matter_id,
-                        party_id=entity.id,
+                        party_id=entity_id,
                         role=role,
                         provenance=provenance,
                     )
                 )
-        for ident in party.identifiers:
-            _ensure_entity_identifier(session, entity_type, entity.id, ident.scheme, ident.value)
-        resolved.append(
-            {"name": party.name, "role": role, "entity_type": entity_type, "party_id": entity.id}
-        )
+        mention = {
+            "name": party.name,
+            "role": role,
+            "entity_type": entity_type,
+            "party_id": entity_id,
+            "resolution": outcome["reason"],
+        }
+        if demotion:
+            # The claim is kept next to the refusal: an operator reading this row
+            # should see what the model said, not only what was stored.
+            mention["claimed_role"] = claimed
+            mention["role_refused_because"] = demotion
+        resolved.append(mention)
     return resolved
-
-
-def _ensure_entity_identifier(
-    session: Session, entity_type: str, entity_id: str, scheme: str, value: str
-) -> None:
-    exists = session.scalar(
-        select(EntityIdentifier).where(
-            EntityIdentifier.entity_type == entity_type,
-            EntityIdentifier.entity_id == entity_id,
-            EntityIdentifier.scheme == scheme,
-            EntityIdentifier.value == value,
-        )
-    )
-    if exists is None:
-        session.add(
-            EntityIdentifier(
-                entity_type=entity_type, entity_id=entity_id, scheme=scheme, value=value
-            )
-        )
 
 def _close_connectors(connectors: dict) -> None:
     for connector in connectors.values():
@@ -2725,6 +2836,42 @@ def _version_is_chain_anchor(
         ),
     )
     return anchor.id == version_id
+
+
+def _renumber_chain(session: Session, document: Document) -> None:
+    """Re-derive the whole version chain's numbering after any join, split or move.
+
+    Files are inserted individually and in parallel, so a chain is assembled from
+    many independent pairwise decisions — and the numbering drifts out of shape as
+    they land. A version that moves to another document leaves its ordinal behind,
+    so chains are observed starting at 2 with no 1; ``before`` shifts every later
+    ordinal up, so repeated inserts leave holes. A caller reading "ordinal 2" then
+    cannot tell the second of five from the second of three with two gaps.
+
+    Every relate task therefore renumbers the chain it touched, which makes the
+    numbering a property of the chain's current members rather than of arrival
+    order — the same set of files converges on the same numbering however they
+    interleave. Only the SPACING changes: the relative order the model established
+    is preserved exactly, versions that shared an ordinal (``relative_order:
+    "same"``) still share one, and a NULL ordinal stays NULL because the model
+    said it did not know and inventing a position is worse than an honest gap.
+    """
+    versions = session.scalars(
+        select(DocumentVersion).where(DocumentVersion.document_id == document.id)
+    ).all()
+    placed = [version for version in versions if version.ordinal is not None]
+    if not placed:
+        _refresh_latest_final(session, document)
+        return
+    earliest = datetime.min.replace(tzinfo=UTC)
+    placed.sort(key=lambda v: (v.ordinal, v.created_at or earliest, v.id))
+    next_ordinal, previous = 0, object()
+    for version in placed:
+        if version.ordinal != previous:  # a new rung, not a tie on the same one
+            next_ordinal += 1
+            previous = version.ordinal
+        version.ordinal = next_ordinal
+    _refresh_latest_final(session, document)
 
 
 def _refresh_latest_final(session: Session, document: Document) -> None:

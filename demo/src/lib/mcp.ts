@@ -46,11 +46,25 @@ export type McpClient = Awaited<ReturnType<typeof openMcpClient>>;
 const searchFilters = {
   matter_id: z.string().optional().describe("Restrict to one matter."),
   doc_type: z.string().optional().describe("Ontology node id for a document type."),
+  practice_area: z
+    .string()
+    .optional()
+    .describe(
+      "Ontology node id for a practice area; matches the whole subtree, so a parent " +
+        "area covers its children. Resolve the id with list_taxonomies first. This is " +
+        "how a question about a practice is answered in one call.",
+    ),
   only_final: z
     .boolean()
     .optional()
     .describe("Only authoritative final/executed versions. Default false searches drafts too."),
   limit: z.number().int().min(1).max(20).optional().describe("Results to return; prefer 5-8."),
+  offset: z
+    .number()
+    .int()
+    .min(0)
+    .optional()
+    .describe("Skip this many results. Pass page.next_offset to continue a search."),
 };
 
 export const CHAT_TOOL_SCHEMAS = {
@@ -70,11 +84,30 @@ export const CHAT_TOOL_SCHEMAS = {
       party: z.string().optional().describe("A party's exact canonical name, or a party id."),
     }),
   },
+  // Two scopes, and the order between them is the point. search_in_document
+  // reaches a clause without the pages in front of it and names the page it sits
+  // on; get_document reads the document through, and is what an enumeration or a
+  // claim of absence needs. A document runs to many pages and most questions turn
+  // on one of them, so reading first is a habit that costs the whole prefix.
+  search_in_document: {
+    inputSchema: z.object({
+      document_id: z.string().describe("From document_id on a search result row."),
+      query: z.string().describe("What you are looking for inside this one document."),
+      version_id: z.string().optional(),
+      limit: z.number().int().min(1).max(10).optional().describe("Passages to return; default 5."),
+      offset: z.number().int().min(0).optional().describe("Continue from page.next_offset."),
+    }),
+  },
   get_document: {
     inputSchema: z.object({
-      document_id: z.string().describe("From citations[].document.id in a search result."),
+      document_id: z.string().describe("From document_id on a search result row."),
       version_id: z.string().optional(),
-      offset: z.number().int().min(0).optional().describe("Continue from content_page.next_offset."),
+      page: z
+        .number()
+        .int()
+        .min(1)
+        .optional()
+        .describe("Page of chunks, 1-based. Continue with page.next_page while has_more."),
     }),
   },
   find_related_documents: {
@@ -82,11 +115,23 @@ export const CHAT_TOOL_SCHEMAS = {
       document_id: z.string().describe("The document whose relations to trace."),
       include_same_matter: z.boolean().optional(),
       limit: z.number().int().min(1).max(50).optional(),
+      offset: z.number().int().min(0).optional().describe("Continue from page.next_offset."),
     }),
   },
   list_matters: {
-    // An empty object, not an absent schema: a tool with no arguments still
-    // needs a declared shape or the provider has nothing to emit.
+    inputSchema: z.object({
+      practice_area: z
+        .string()
+        .optional()
+        .describe("Ontology node id; matches the whole subtree. From list_taxonomies."),
+      limit: z.number().int().min(1).max(50).optional(),
+      offset: z.number().int().min(0).optional().describe("Continue from page.next_offset."),
+    }),
+  },
+  // The filters above take ontology node ids, and nothing else in this surface
+  // produces one. Without this tool "every matter in a given practice area"
+  // has no filtered form and degrades into reading the estate matter by matter.
+  list_taxonomies: {
     inputSchema: z.object({}),
   },
 } as const;

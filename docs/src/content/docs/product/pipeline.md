@@ -95,6 +95,22 @@ hash and one `Extraction` provenance row per document. An untyped result is reco
 honestly (`doc_type = NULL`) with the fingerprint of the scope that judged it, so a
 later, richer ontology re-types exactly those documents.
 
+Parties are searched by the agent (`search_entities`) but resolved by rule, so one
+real company is one row across every matter it appears on. A mention links to an
+entity the firm already holds when the two share a typed identifier, when their
+normalized names are identical or the mention's name is already on that entity's
+alias ledger, or when one name contains the other token-for-token *and* something
+beyond the name agrees — the entity is already on this matter, shares a matter with
+another party named on this document, or acts on another matter for this matter's
+client. Anything weaker is left to the agent, and a new entity created next to a
+known same-name candidate records that candidate on its own `provenance.resolution`,
+so it stays countable. Two companies that genuinely share a name are kept apart by a
+contradicting register identifier, which is the only thing the uniqueness constraint
+on the identity key admits as a second row. `role = client` means the party the firm
+acts for: the firm itself is recorded as `advisor` when [`firm.name`](#configuration)
+is set, an entity already carrying a role on the matter keeps it, and on an imported
+matter the practice-management client outranks any document-level claim.
+
 ### Extract decisions (`extract_decisions`)
 
 Reads the `structured_json` artifact's `revisions` and `comments`. With no revision
@@ -269,13 +285,15 @@ unfinished sync run: a stranded run would otherwise stop indexing silently.
 
 ## Configuration
 
-All fields live under `pipeline.*` in the saved configuration; scalar fields can be
-pinned by environment variables using the `KI_` prefix and `__` as the nesting
-delimiter (an environment-pinned setting refuses console edits with a 409 rather than
-silently losing them).
+All fields live under `pipeline.*` in the saved configuration, except `firm.*` as
+noted; scalar fields can be pinned by environment variables using the `KI_` prefix and
+`__` as the nesting delimiter (an environment-pinned setting refuses console edits with
+a 409 rather than silently losing them).
 
 | Field | Env var | Default | Effect |
 | --- | --- | --- | --- |
+| `firm.name` | `KI_FIRM__NAME` | `""` | Whose appliance this is — the one fact no document states. The firm is on its own letterhead, signs its own engagement letters and is copied on every mail, so extraction reads it as a party; naming it here records it as `advisor` instead of as the firm's own client. Empty and inert by default: an appliance that has not been told whose it is must not guess, and a wrong name here would demote a real client. |
+| `firm.aliases` | `KI_FIRM__ALIASES` | `[]` | The other forms the firm writes itself in — the short letterhead name, the historical partnership name, the English rendering. Compared the same way entity names are, so legal forms and punctuation need not be repeated. |
 | `pipeline.max_file_mb` | `KI_PIPELINE__MAX_FILE_MB` | 512 | Fetch limit; a larger blob raises `ArtifactTooLarge` and quarantines deterministically. |
 | `pipeline.claim_timeout_seconds` | `KI_PIPELINE__CLAIM_TIMEOUT_SECONDS` | 900 | A `running` claim older than this is failed as `StaleClaim` and retried. |
 | `pipeline.retry_base_seconds` | `KI_PIPELINE__RETRY_BASE_SECONDS` | 5 | Base of the exponential backoff (`base × 2^(attempts−1)`). |
@@ -362,10 +380,15 @@ document titles, and the first 8 000 characters of converted text.
 
 Tools:
 
-- `search_matters(query)`: ranks existing matters by semantic similarity over
-  already-indexed chunks, title substring, and reference-number match.
+- `search_matters(query, limit=8, offset=0)`: ranks existing matters by semantic
+  similarity over already-indexed chunks, title substring, and reference-number
+  match. Returns `{results, page}`; the whole candidate set is ranked before the
+  page is cut, so `page.total` is exact and an `offset` walks the same ranking.
+  A full page with `has_more` is explicitly *not* grounds to create a new matter —
+  that mistake splits one file in two, so the tool description says so.
 - `peek_matter(matter_id)`: one matter's references, practice area, folders, and a
-  sample of document titles.
+  sample of document titles — with `document_count` (the true total) and
+  `document_titles_are_sample`, so a 12-title list is not read as the whole matter.
 - `list_folder()`: the ±2-level neighbourhood again.
 - `create_matter(reference_number, title)`: get-or-create, committed in its own
   session immediately so concurrently classifying documents of the same matter see it
@@ -393,10 +416,14 @@ model I/O and must not hold a transaction):
 
 - `list_folder(path)`: look inside any folder, including the name-only siblings;
   `/` lists the source root.
-- `search_documents(query)`: corpus-wide document search (semantic + title) for
-  targets outside the neighbourhood.
-- `open_file(path)`: pageable converted text of any listed file, with its own
-  tracked-changes digest. If the target has not converted yet, the stage pulls its
+- `search_documents(query, limit=10, offset=0)`: corpus-wide document search
+  (semantic + title) for targets outside the neighbourhood. Returns
+  `{results, page}` with an exact `page.total`.
+- `open_file(path, offset, max_chars)`: pageable converted text of any listed file,
+  with its own tracked-changes digest. The result carries `has_more` and
+  `next_offset` rather than leaving the model to compare `offset + returned_chars`
+  against `total_chars` — a long file read once used to look like a file read
+  whole. If the target has not converted yet, the stage pulls its
   `fetch`/`convert` forward through the normal claim machinery
   (`ensure_source_object_ready`), bounded by `inline_conversion_budget_seconds` and
   `inline_conversion_slots`, observing rather than duplicating a claim another worker

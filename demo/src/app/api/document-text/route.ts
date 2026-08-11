@@ -9,10 +9,11 @@ import { callMcpTool } from "@/lib/mcp";
  * useful than a download prompt, and is the thing a lawyer would want to check
  * anyway when a search result surprises them.
  *
- * Paginated at the source. `/api/documents/{id}` would also return this text,
- * but it computes related documents and clause extractions to do it; at fifty
- * thousand documents that is a large query to run because somebody clicked an
- * .eml file.
+ * Paginated at the source, by chunk — the same units search ranks, so the page
+ * a reader is on and the page a hit reports are the same page. `/api/documents/{id}`
+ * would also return this text, but it computes related documents and clause
+ * extractions to do it; at fifty thousand documents that is a large query to run
+ * because somebody clicked an .eml file.
  */
 export async function GET(request: Request) {
   const url = new URL(request.url);
@@ -21,19 +22,19 @@ export async function GET(request: Request) {
     return Response.json({ error: "document_id is required" }, { status: 400 });
   }
 
-  const offset = Number(url.searchParams.get("offset") ?? 0);
+  const requested = Number(url.searchParams.get("page") ?? 1);
   try {
     const result = await callMcpTool("get_document", {
       document_id: documentId,
       version_id: url.searchParams.get("version_id") ?? undefined,
-      offset: Number.isFinite(offset) ? Math.max(0, offset) : 0,
-      max_chars: 40_000,
+      page: Number.isFinite(requested) ? Math.max(1, requested) : 1,
+      chunks_per_page: 40,
     });
 
     const payload = result.structuredContent as
       | {
           content?: { text?: string };
-          content_page?: { has_more?: boolean; next_offset?: number | null; total_chars?: number };
+          page?: { page?: number; pages?: number; has_more?: boolean; next_page?: number | null };
           document?: { title?: string };
         }
       | undefined;
@@ -43,7 +44,7 @@ export async function GET(request: Request) {
     }
     return Response.json({
       text: payload.content?.text ?? "",
-      page: payload.content_page ?? null,
+      page: payload.page ?? null,
       title: payload.document?.title ?? null,
     });
   } catch (error) {
