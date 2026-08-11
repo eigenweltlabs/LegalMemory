@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import mimetypes
 from collections.abc import Iterable
+from math import ceil
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -21,6 +22,7 @@ from knowledge_index.entity_names import (
 from knowledge_index.db.models import (
     Artifact,
     Blob,
+    Chunk,
     DecisionRecord,
     Document,
     DocumentVersion,
@@ -76,15 +78,14 @@ class SearchHit:
     doc_type_label: str | None = None  # human label resolved from the ontology
     doc_date: str | None = None  # extracted document date, ISO, drives recency choices
     language: str | None = None
-    matter_ref: str | None = None  # human matter reference, e.g. 1038-00001
+    matter_ref: str | None = None  # human matter reference, as the firm writes it
     parties: list[dict] = field(default_factory=list)  # [{name, role}]
     identifiers: list[str] = field(default_factory=list)  # the document's own legal ids
     # Version position within the document. A row is one VERSION of a document, and
     # without these three a caller cannot tell "the draft" from "the signed one":
     # it sees two independent-looking rows that differ only in filename, and cites
-    # whichever it read first. Measured on graded runs, that is a recurring wrong
-    # answer — a near-final draft cited while the final sat one ordinal later on
-    # the same document.
+    # whichever it read first. That is a recurring wrong answer — a near-final
+    # draft cited while the final sat one ordinal later on the same document.
     version_ordinal: int | None = None  # 1 = earliest known version
     is_latest_final: bool = False  # this version IS the document's authoritative one
     latest_final_version_id: str | None = None  # which version is, when this is not
@@ -356,6 +357,258 @@ class RetrievalService:
             "project": citation["project"],
             "sources": citation["source_objects"],
             "citations": [citation],
+        }
+
+    def _converted_text(self, version: DocumentVersion) -> str:
+        """The converter's text for a version, for documents with no chunk rows yet."""
+        artifact = self.session.scalar(
+            select(Artifact)
+            .where(
+                Artifact.content_hash == version.content_hash,
+                Artifact.kind == "structured_json",
+            )
+            .order_by(Artifact.created_at.desc())
+        )
+        payload = artifact.payload if artifact else None
+        return str(payload.get("text") or "") if isinstance(payload, dict) else ""
+
+    def document_chunks(
+        self,
+        document_id: str,
+        *,
+        principals: set[str],
+        version_id: str | None = None,
+        page: int = 1,
+        chunks_per_page: int = 12,
+    ) -> dict | None:
+        """One page of a document, measured in the chunks it was indexed as.
+
+        Character offsets were the wrong unit for a reader. They cut mid-sentence,
+        they made the caller compute the next offset from a length it had to
+        measure itself, and — because a page was whatever fitted a character
+        budget — they gave no stable landmark to come back to. Chunks already
+        exist, they are what search returns, and they are numbered: a hit at
+        chunk 41 and page 4 of this tool name the same place in the same
+        document, so a caller can search inside a file and then read exactly
+        where the hit was.
+        """
+
+        if page < 1:
+            raise ValueError("page must be at least 1")
+        if chunks_per_page < 1:
+            raise ValueError("chunks_per_page must be at least 1")
+        selected = self._select_document_version(document_id, version_id)
+        if selected is None:
+            return None
+        document, version = selected
+        if not self._authorized_sources(version.id, principals):
+            return None
+
+        total = (
+            self.session.scalar(
+                select(func.count())
+                .select_from(Chunk)
+                .where(Chunk.document_version_id == version.id)
+            )
+            or 0
+        )
+        if not total:
+            # No chunk rows: the version exists but the index stage has not chunked
+            # it (a fresh insertion, a quarantined document, a re-index in flight).
+            # The tool's contract is "read this document", so fall back to the
+            # converted text as a single page rather than reporting an empty
+            # document — an empty read reads as "there is nothing here", which is
+            # the one answer that must never be produced by a missing side table.
+            return {
+                "document_id": document.id,
+                "version_id": version.id,
+                "title": document.title,
+                "chunks": [{"ordinal": 0, "text": self._converted_text(version), "locus": None}],
+                "page": {
+                    "page": 1,
+                    "pages": 1,
+                    "chunks_per_page": chunks_per_page,
+                    "first_chunk": 0,
+                    "last_chunk": 0,
+                    "total_chunks": 1,
+                    "has_more": False,
+                    "next_page": None,
+                    "unchunked": True,
+                },
+            }
+        pages = max(1, ceil(total / chunks_per_page))
+        start = (page - 1) * chunks_per_page
+        rows = list(
+            self.session.scalars(
+                select(Chunk)
+                .where(Chunk.document_version_id == version.id)
+                .order_by(Chunk.ordinal)
+                .offset(start)
+                .limit(chunks_per_page)
+            )
+        )
+        return {
+            "document_id": document.id,
+            "version_id": version.id,
+            "title": document.title,
+            "chunks": [
+                {
+                    "ordinal": chunk.ordinal,
+                    "text": chunk.text,
+                    # Section path / page / locus, when the converter knew them —
+                    # this is what lets a citation say where in the file it came from.
+                    "locus": {
+                        key: value
+                        for key, value in (chunk.meta or {}).items()
+                        if key in ("section", "section_path", "page", "heading", "locus")
+                    }
+                    or None,
+                }
+                for chunk in rows
+            ],
+            "page": {
+                "page": page,
+                "pages": pages,
+                "chunks_per_page": chunks_per_page,
+                "first_chunk": start if rows else None,
+                "last_chunk": start + len(rows) - 1 if rows else None,
+                "total_chunks": total,
+                "has_more": start + len(rows) < total,
+                "next_page": page + 1 if start + len(rows) < total else None,
+            },
+        }
+
+    def search_in_document(
+        self,
+        document_id: str,
+        query: str,
+        *,
+        principals: set[str],
+        version_id: str | None = None,
+        limit: int = 5,
+        offset: int = 0,
+        chunks_per_page: int = 12,
+    ) -> dict | None:
+        """Rank this one document's own chunks against a query.
+
+        The ordinary search collapses to one excerpt per document, which is right
+        when the question is "which document", and useless when the question is
+        "where in THIS document". Here every chunk of one version competes, so a
+        provision four fifths of the way into a long agreement is reachable
+        without reading the four fifths in front of it.
+        """
+
+        if not query.strip():
+            raise ValueError("query must not be empty")
+        if limit < 1:
+            raise ValueError("limit must be at least 1")
+        if offset < 0:
+            raise ValueError("offset must be non-negative")
+        selected = self._select_document_version(document_id, version_id)
+        if selected is None:
+            return None
+        document, version = selected
+        if not self._authorized_sources(version.id, principals):
+            return None
+
+        from knowledge_index.search_backend import OpenSearchIndex
+
+        scope = AccessService(self.session).compile_scope(principals)
+        filters = SearchFilters(document_version_id=version.id)
+        retrieval = self.config.retrieval
+        index = OpenSearchIndex(self.config)
+        want_semantic = retrieval.weight_semantic > 0
+        # Ask for one past the window so has_more is a fact, not a guess.
+        window = offset + limit + 1
+        with usage_stage("search"):
+            leg_hits = index.multi_search(
+                query_text=query,
+                query_vector=embed_text(query, self.config) if want_semantic else None,
+                scope=scope,
+                filters=filters,
+                limit=max(window * retrieval.candidate_pool_factor, window),
+            )
+
+        fused: dict[str, float] = {}
+        for weight, rows in (
+            (retrieval.weight_lexical, leg_hits["lexical"]),
+            (retrieval.weight_semantic, leg_hits["semantic"]),
+            (retrieval.weight_identifier, leg_hits["identifier"]),
+        ):
+            if weight <= 0:
+                continue
+            for rank, row in enumerate(rows):
+                chunk_id = row.get("_id")
+                if chunk_id:
+                    fused[chunk_id] = fused.get(chunk_id, 0.0) + weight / (
+                        retrieval.fusion_rrf_k + rank
+                    )
+
+        ranked = sorted(fused.items(), key=lambda item: item[1], reverse=True)
+        window_ids = [chunk_id for chunk_id, _ in ranked[offset : offset + limit + 1]]
+        has_more = len(window_ids) > limit
+        window_ids = window_ids[:limit]
+        # Read the text from the database, not from the index: the index is a
+        # ranking structure and may lag a re-index, and the answer a reader acts
+        # on has to be the stored text.
+        by_id = {
+            chunk.id: chunk
+            for chunk in self.session.scalars(select(Chunk).where(Chunk.id.in_(window_ids)))
+        }
+        total = (
+            self.session.scalar(
+                select(func.count())
+                .select_from(Chunk)
+                .where(Chunk.document_version_id == version.id)
+            )
+            or 0
+        )
+        pages = max(1, ceil(total / chunks_per_page)) if total else 1
+        results = []
+        for chunk_id in window_ids:
+            chunk = by_id.get(chunk_id)
+            if chunk is None:
+                continue
+            # Where to read around this hit. The page number is only meaningful
+            # against a page SIZE, so it is computed from the size the caller
+            # passed and echoed back with it: a hit that said "page 9" while the
+            # reader was paging 20 at a time would point at the wrong text and
+            # look authoritative doing it.
+            page_of_hit = chunk.ordinal // chunks_per_page + 1
+            results.append(
+                {
+                    "ordinal": chunk.ordinal,
+                    "score": round(fused[chunk_id], 6),
+                    "text": chunk.text,
+                    "get_document_page": page_of_hit,
+                    # The neighbours, so "read around this" needs no arithmetic
+                    # and cannot run off either end of the document.
+                    "context_pages": {
+                        "previous": page_of_hit - 1 if page_of_hit > 1 else None,
+                        "this": page_of_hit,
+                        "next": page_of_hit + 1 if page_of_hit < pages else None,
+                    },
+                }
+            )
+        return {
+            "document_id": document.id,
+            "version_id": version.id,
+            "title": document.title,
+            "query": query,
+            "results": results,
+            "page": {
+                "offset": offset,
+                "limit": limit,
+                "returned": len(results),
+                "has_more": has_more,
+                "next_offset": offset + len(results) if has_more else None,
+                "total_chunks_in_document": total,
+                # The page geometry these hits were numbered against. Pass the
+                # same chunks_per_page to get_document and the page numbers above
+                # address exactly the text the passage came from.
+                "chunks_per_page": chunks_per_page,
+                "document_pages": pages,
+            },
         }
 
     def get_downloadable_document(
@@ -841,9 +1094,9 @@ class RetrievalService:
         matched_names = set(self._group_spellings(practice_group)) if practice_group else set()
         # Paths only, and only when asked for. A caller enumerating a practice
         # otherwise has to open each matter to find out what is in it, and a
-        # graded run showed that is where matters get dropped: the agent judged
-        # them from search hits and never opened the two whose files decided the
-        # answer. One extra query for the whole page, no per-matter round trip,
+        # that is where matters get dropped: a caller judges them from search
+        # hits and never opens the ones whose files decide the answer. One extra
+        # query for the whole page, no per-matter round trip,
         # and nothing but the path — a row that also carried titles, types and
         # dates would put a 100-matter page back into megabytes.
         paths_by_matter: dict[str, list[str]] = {}
@@ -1077,14 +1330,13 @@ class RetrievalService:
         A matter is a bounded set — tens of documents, occasionally a couple of
         hundred — so this is the one listing that does not paginate. That is the
         point of it. `search_filter(matter_id=...)` answers the same question a
-        page at a time, and an agent that asks once and reads twenty rows of a
-        seventy-five-document matter concludes the other fifty-five are not
-        there: on the last benchmark run one reported "no LPA exists in that
-        matter's file" while `Amended Governing Documents/lpa-amendment-no-1.docx`
-        sat in the folder, executed, titled "Amendment No. 1 to the Amended and
-        Restated Agreement of Limited Partnership". Seventeen graded criteria
-        were lost to that shape of mistake, every one of them a document the
-        caller could have reached.
+        page at a time, and a caller that asks once and reads the first twenty
+        rows of a seventy-five-document matter concludes the other fifty-five are
+        not there. The failure is quiet and it looks like an answer: an agreement
+        filed under a title the query did not use goes unseen, and the reply says
+        the matter has no such document while it sits in the folder, executed.
+        A folder view has to be a folder — all of it, or the absence claims made
+        from it are unfounded.
 
         It is deliberately the same view the matter-profile pass gets, which is
         why that pass can judge a folder no single document reveals: path, title,

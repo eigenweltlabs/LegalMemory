@@ -601,6 +601,9 @@ def _combined_filter(scope: CompiledAccessScope, filters: SearchFilters) -> dict
         # keyword term match was too strict to be usable.)
         ("clause_type", filters.clause_type),
         ("chunk_kind", filters.chunk_kind),
+        # Search inside one document (or one specific version of it).
+        ("document_id", filters.document_id),
+        ("document_version_id", filters.document_version_id),
     ):
         if value:
             clauses.append({"term": {field: value}})

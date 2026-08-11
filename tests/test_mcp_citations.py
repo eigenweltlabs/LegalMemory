@@ -17,6 +17,7 @@ from knowledge_index.db.models import (
     Artifact,
     BillingInvoice,
     Blob,
+    Chunk,
     Client,
     DecisionRecord,
     Document,
@@ -512,6 +513,85 @@ def test_mcp_query_tools_preserve_citations(factory, tmp_path) -> None:
         assert "citations" not in scope["documents"]
 
 
+def test_get_document_pages_by_chunk_and_names_where_the_reader_is(
+    factory, tmp_path
+) -> None:
+    """A long document reads page by page, and never looks finished when it is not.
+
+    The unit is the chunk, not the character: chunk 41 in a search hit and page 4
+    of this reader name the same place, which is what makes "search inside, then
+    read around the hit" a two-call move instead of arithmetic.
+    """
+    artifact_dir = tmp_path / "artifacts"
+    with factory() as session:
+        _seed_downloadable_pair(session, artifact_dir)
+        # 30 chunks over one version: paged 12 at a time, that is 3 pages.
+        session.add_all(
+            [
+                Chunk(
+                    id=f"chunk-{ordinal:03d}",
+                    document_version_id="download-version",
+                    ordinal=ordinal,
+                    text=f"Clause {ordinal}. Ordinary contractual boilerplate.",
+                    meta={"section": f"Article {ordinal // 5 + 1}"},
+                    document_id="download-document",
+                    matter_id="download-matter",
+                    project_id="download-project",
+                )
+                for ordinal in range(30)
+            ]
+        )
+        session.commit()
+
+    store = ConfigStore(tmp_path / "config.json")
+    store.save(_header_auth_config(artifact_dir))
+    with TestClient(create_app(factory, store)) as client:
+        first = _call_mcp(client, "get_document", {"document_id": "download-document"})
+        assert first["page"] == {
+            "page": 1,
+            "pages": 3,
+            "chunks_per_page": 12,
+            "first_chunk": 0,
+            "last_chunk": 11,
+            "total_chunks": 30,
+            "has_more": True,
+            "next_page": 2,
+        }
+        assert "Clause 0." in first["content"]["text"]
+        assert "Clause 11." in first["content"]["text"]
+        assert "Clause 12." not in first["content"]["text"]
+        # The marker sits in the TEXT, not only in the page block: a field beside
+        # the text can be skimmed past, a sentence where the text stops cannot.
+        # It names both ways on — the targeted one first — rather than ordering a
+        # full walk, which on a long document is the expensive default.
+        marker = first["content"]["text"]
+        assert "[PAGE 1 OF 3" in marker
+        assert "chunks 0–11 of 30" in marker
+        assert "search_in_document" in marker
+        assert "get_document(page=2)" in marker
+        assert "PREFIX" in marker
+        # The locus travels with the chunk, so a citation can say where it came from.
+        assert first["chunks"][0]["locus"] == {"section": "Article 1"}
+
+        last = _call_mcp(
+            client, "get_document", {"document_id": "download-document", "page": 3}
+        )
+        assert last["page"]["has_more"] is False
+        assert last["page"]["next_page"] is None
+        assert last["page"]["last_chunk"] == 29
+        # No marker on the final page: it means "unread text remains", never
+        # "this response was paginated".
+        assert "[PAGE" not in last["content"]["text"]
+
+        # A page past the end is empty rather than an error — the caller has
+        # simply run off the document, and has_more already said so.
+        past = _call_mcp(
+            client, "get_document", {"document_id": "download-document", "page": 9}
+        )
+        assert past["chunks"] == []
+        assert past["page"]["has_more"] is False
+
+
 def test_mcp_document_reads_are_paginated_and_related_docs_are_discoverable(
     factory, tmp_path
 ) -> None:
@@ -522,32 +602,15 @@ def test_mcp_document_reads_are_paginated_and_related_docs_are_discoverable(
     store = ConfigStore(tmp_path / "config.json")
     store.save(_header_auth_config(artifact_dir))
     with TestClient(create_app(factory, store)) as client:
-        page = _call_mcp(
-            client,
-            "get_document",
-            {"document_id": "download-document", "offset": 5, "max_chars": 10},
-        )
-        # The requested window, then a marker IN THE TEXT saying the rest exists.
-        # content_page carries the same fact in a field, and a graded run showed a
-        # model reading one page of a 129,240-character agreement and reporting a
-        # clause absent from it — the field was there and was skimmed past.
-        assert page["content"]["text"].startswith("56789abcde")
-        assert "[DOCUMENT TRUNCATED" in page["content"]["text"]
-        assert "21 characters remain UNREAD" in page["content"]["text"]
-        assert "get_document(offset=15)" in page["content"]["text"]
-        assert page["content_page"] == {
-            "offset": 5,
-            "returned_chars": 10,
-            "total_chars": 36,
-            "has_more": True,
-            "next_offset": 15,
-        }
-
-        # A window that reaches the end carries no marker: the marker means
-        # "unread text remains", never "this response was paginated".
+        # This version has no chunk rows, so the reader falls back to the whole
+        # converted text as one page. An unchunked document must still read as a
+        # document: an empty page reads as "there is nothing here", which is the
+        # one answer a missing side table must never produce.
         whole = _call_mcp(client, "get_document", {"document_id": "download-document"})
-        assert "[DOCUMENT TRUNCATED" not in whole["content"]["text"]
-        assert whole["content_page"]["has_more"] is False
+        assert whole["content"]["text"] == "0123456789abcdefghijklmnopqrstuvwxyz"
+        assert "[PAGE" not in whole["content"]["text"]
+        assert whole["page"]["has_more"] is False
+        assert whole["page"]["unchunked"] is True
 
         related = _call_mcp(
             client,

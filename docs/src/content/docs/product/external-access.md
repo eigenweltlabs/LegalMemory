@@ -56,7 +56,8 @@ tool's name, short title, and tags.
 | --- | --- | --- |
 | `search_filter` | Lists documents by exact metadata filters, no query text. | `project_id`, `matter_id`, `doc_type`, `version_status`, `language`, `date_from`/`date_to`, `clause_type`, `limit` (default 20, capped 100), `offset` |
 | `search_semantic` | Hybrid semantic + lexical search over chunks, ACL-filtered before ranking. | `query`, the same metadata filters, `limit` (default 8, capped 100), `offset` (see the ranked-window cap below) |
-| `get_document` | Reads one authorized document version as paginated text. | `document_id`, `version_id`, `offset`, `max_chars` (1–50,000; default 30,000), `include_structured_metadata`; returns a `content_page` cursor with `next_offset`/`has_more` |
+| `get_document` | Reads one authorized document version, one page of chunks at a time. | `document_id`, `version_id`, `page` (default 1), `chunks_per_page` (default 12); returns a `page` block with `pages`, `first_chunk`, `last_chunk`, `total_chunks`, `has_more`, `next_page` |
+| `search_in_document` | Ranks one document's own passages against a query, for finding a clause without reading the file. | `document_id`, `query`, `version_id`, `limit` (default 5), `offset`; each result carries the chunk `ordinal` and the `get_document_page` that holds it |
 | `download_document` | Exports the exact original binary via a short-lived download link (see below). | `document_id`, `version_id`, `source_object_id`, `inline_blob` (embeds the base64 blob instead of only linking) |
 | `find_related_documents` | Stored relations plus labeled shared-thread and shared-matter context, with graph-ready edges. | `document_id`, `include_same_matter` (default true), `limit` (capped 250), `offset`; `page.total` is exact and the edge lists cover the current page |
 | `traverse` | Low-level walk of stored relation edges (`supersedes`, `annex_of`, `references`, `responds_to`, `belongs_to_thread`). | `entity_type`, `entity_id`, `limit` (capped 250), `offset`; the limit counts *visible* edges |
@@ -117,9 +118,12 @@ larger limit until it hit the cap.
   that they raise rather than clamp, pointing the caller at `matter_id`,
   `doc_type`, `party`, or a date range. Ranked pages are stable only while the
   index is unchanged — this is re-ranking, not a cursor.
-- `get_document` paginates by **character**, not by row, and keeps its own
-  `content_page` block (`offset`, `returned_chars`, `total_chars`, `has_more`,
-  `next_offset`).
+- `get_document` paginates by **chunk** — the same numbered units search ranks,
+  so a hit at chunk 41 and page 4 of the reader name the same place. Its `page`
+  block carries `page`, `pages`, `first_chunk`, `last_chunk`, `total_chunks`,
+  `has_more`, `next_page`, and a cut-short page also says so in the text itself.
+  A document is not read until `has_more` is false; `search_in_document` is the
+  way to reach one passage without reading up to it.
 - Tools whose description says **NOT PAGINATED** return their complete result in
   one call and may be treated as a total.
 

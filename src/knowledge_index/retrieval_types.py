@@ -96,6 +96,12 @@ class SearchFilters:
     party: str | None = None
     clause_type: str | None = None
     chunk_kind: str | None = None
+    # document_id / document_version_id: scope the search INSIDE one document.
+    # Every other filter here narrows which documents are searched; these two say
+    # "search within this one", which is what a reader needs once retrieval has
+    # already found the right file and the file is too large to read whole.
+    document_id: str | None = None
+    document_version_id: str | None = None
     # chunk_kinds: restrict to a *set* of chunk kinds (terms semantics). Set by
     #   RetrievalService from config.retrieval.search_chunk_kinds; a single
     #   chunk_kind above is the narrower filter and wins when both are present.

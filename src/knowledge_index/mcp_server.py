@@ -106,8 +106,11 @@ def create_mcp_server(
             "with one focused search_semantic call (normally 5-8 results), then constrain by "
             "matter_id with search_filter. Whenever the user asks for related/linked files or "
             "a document graph, call find_related_documents; do not rely on semantic similarity "
-            "alone. Use get_document only to read text and download_document to copy the exact "
-            "original binary into the client workspace. Results are restricted to the caller "
+            "alone. Once you have the right document, search_in_document ranks that one "
+            "document's own passages against your question and is the way in; get_document "
+            "reads it through a page at a time, which is what an enumeration — or a claim "
+            "that something is absent — needs. download_document copies the exact original "
+            "binary into the client workspace. Results are restricted to the caller "
             "identity. LIST ROWS CARRY THE DOCUMENT'S METADATA, NOT ITS EVIDENCE RECORD: "
             "search hits give you title, doc_type_label, doc_date, version_status, the "
             "matched excerpt, matched_identifiers, score and source_paths, plus "
@@ -145,7 +148,8 @@ def create_mcp_server(
             "type', 'how many', and any question whose answer is a set. Each "
             "hit carries the document's metadata (title, doc_type_label, doc_date, "
             "matter_ref, parties with roles, identifiers, version_status, source_paths) "
-            "and ids; read a hit with get_document for its text and citation record. "
+            "and ids; ask search_in_document for the passage that answers your question, or "
+            "get_document to read a hit through and for its citation record. "
             "Each row is ONE VERSION of a document: version_ordinal orders the versions "
             "(1 = earliest), is_latest_final says whether this row IS the authoritative "
             "one, and latest_final_version_id names the version that is when it is not. "
@@ -258,7 +262,9 @@ def create_mcp_server(
             "instead of repeated broad 20-result searches. Each hit includes exact project, "
             "the document's metadata (title, doc_type_label, doc_date, matter_ref, parties "
             "with roles, identifiers, version_status, excerpt, source_paths) and ids; "
-            "read a hit with get_document for its citation record. Each row is ONE "
+            "an excerpt marks where the match happened, not where the answer is — "
+            "search_in_document reaches the passage inside a hit, get_document reads "
+            "it through and carries its citation record. Each row is ONE "
             "VERSION: version_ordinal orders them, is_latest_final marks the "
             "authoritative one, latest_final_version_id names it when this row is not, "
             "and rows sharing a document_id are versions of one document. STATUS ANSWERS "
@@ -373,34 +379,32 @@ def create_mcp_server(
                 session.close()
 
     @mcp.tool(
-        title="Read one document as paginated text",
+        title="Read one document, one page of chunks at a time",
         tags={"read"},
         description=(
-            "Read one authorized document version as compact text with exact citations. Use "
-            "document_id/version_id from search results. Do NOT use this to download or "
+            "Read one authorized document version through, a page at a time, with exact "
+            "citations. This is the THOROUGH read, and it is the right tool for two jobs: "
+            "establishing that a document does NOT contain something, and enumerating "
+            "everything of some kind in it. For a specific question about a document — where "
+            "a clause is, what it says, whether a provision is present — call "
+            "search_in_document first; it reaches the passage without the pages in front of "
+            "it, and tells you which page to come here for if you want the surroundings. "
+            "Use document_id/version_id from search results. Do NOT use this to download or "
             "reconstruct Word/Excel/PDF files—call download_document for the exact original "
-            "binary. Structured Docling metadata is omitted unless "
-            "include_structured_metadata is explicitly requested. PAGINATION: the text is "
-            "paginated by CHARACTER, not by row, so the shape differs from the list tools. "
-            "BY DEFAULT YOU GET THE WHOLE DOCUMENT — no cap, however long it runs, so a "
-            "plain get_document call is always safe to reason about and absence is a "
-            "claim you can make from it. max_chars is optional and only for a caller "
-            "that deliberately wants a window; pass it and you are holding a PREFIX. "
-            "content_page = {offset, returned_chars, total_chars, has_more, next_offset}, "
-            "and a cut-short page also ends with a bracketed TRUNCATED marker in the "
-            "text itself naming how much is unread. If you see that marker you have not "
-            "read the document: page on with offset=content_page.next_offset until "
-            "has_more is false before saying any term or clause is missing. For finding "
-            "one clause in a very long agreement, search_semantic with matter_id and "
-            "clause_type ranks the passage for you rather than making you read to it."
+            "binary. PAGINATION IS BY CHUNK, the same numbered units search ranks: with the "
+            "default page 1 is chunks 0-11, page 2 is 12-23, and so on. The reply's `page` "
+            "block states where you are — {page, pages, first_chunk, last_chunk, "
+            "total_chunks, has_more, next_page} — and you continue with page=page.next_page. "
+            "A page is a PREFIX of the document, not the document: while has_more is true "
+            "there is text you have not seen, so no claim that something is absent can be "
+            "made from it."
         )
     )
     def get_document(
         document_id: str,
         version_id: str | None = None,
-        offset: int = 0,
-        max_chars: int | None = None,
-        include_structured_metadata: bool = False,
+        page: int = 1,
+        chunks_per_page: int = 12,
         headers: dict[str, str] = CurrentHeaders(),
     ) -> dict | None:
         with audited_call(
@@ -419,59 +423,99 @@ def create_mcp_server(
                 audit["found"] = result is not None
                 if result is None:
                     return None
-                if offset < 0:
-                    raise ValueError("offset must be non-negative")
-                if max_chars is not None and max_chars < 1:
-                    raise ValueError("max_chars must be at least 1")
-                payload = result.get("content")
-                if not isinstance(payload, dict):
-                    result["content_page"] = {
-                        "offset": offset,
-                        "returned_chars": 0,
-                        "total_chars": 0,
-                        "has_more": False,
-                        "next_offset": None,
-                    }
-                    return result
-                text = str(payload.get("text") or "")
-                # No default cap. This tool's contract is "read one document", and a
-                # tool that promises a whole thing must not quietly hand back a
-                # prefix: a graded run had a model read one 30,000-character window
-                # of a 129,240-character partnership agreement and report that the
-                # agreement contained no clawback clause. The clause was there. A
-                # window is now something a caller asks for, never something the
-                # tool decides on its behalf.
-                end = len(text) if max_chars is None else min(len(text), offset + max_chars)
-                body = text[offset:end]
-                if end < len(text):
-                    # The marker goes in the TEXT, not only in content_page.
-                    # content_page already said has_more, and on a graded run the
-                    # agent passed no offset at all and then reported that a
-                    # 129,240-character partnership agreement "does not contain a
-                    # clawback section in its body" — the clause was in the four
-                    # fifths it never asked for. A field beside the text can be
-                    # skimmed past; a sentence where the text stops cannot.
+                paged = retrieval.document_chunks(
+                    document_id,
+                    principals=principals,
+                    version_id=version_id,
+                    page=page,
+                    chunks_per_page=chunks_per_page,
+                )
+                if paged is None:
+                    return None
+                audit["page"] = page
+                body = "\n\n".join(chunk["text"] for chunk in paged["chunks"])
+                info = paged["page"]
+                if info["has_more"]:
+                    # The marker goes in the TEXT, not only in the page block. A
+                    # model given the first window of a long agreement will report
+                    # that a provision is absent from it, having read a fraction of
+                    # it: the structured field saying otherwise sits beside prose
+                    # that reads complete. A field can be skimmed past; a sentence
+                    # where the text stops cannot.
                     body += (
-                        f"\n\n[DOCUMENT TRUNCATED — you are holding characters "
-                        f"{offset:,}–{end:,} of {len(text):,}. "
-                        f"{len(text) - end:,} characters remain UNREAD. Call "
-                        f"get_document(offset={end}) to continue. Do not conclude "
-                        f"that anything is absent from this document until you "
-                        f"have read to the end.]"
+                        f"\n\n[PAGE {info['page']} OF {info['pages']} — chunks "
+                        f"{info['first_chunk']}–{info['last_chunk']} of "
+                        f"{info['total_chunks']}. This is a PREFIX of the document. "
+                        f"If you are looking for something specific, "
+                        f"search_in_document(query=…) reaches it directly and names the "
+                        f"page it is on. If you need the whole document — to enumerate "
+                        f"it, or to establish that something is NOT in it — continue "
+                        f"with get_document(page={info['next_page']}); that claim cannot "
+                        f"be made from a prefix.]"
                     )
-                compact_content = {"text": body}
-                if include_structured_metadata:
-                    compact_content.update(
-                        {key: value for key, value in payload.items() if key != "text"}
-                    )
-                result["content"] = compact_content
-                result["content_page"] = {
-                    "offset": offset,
-                    "returned_chars": max(0, end - offset),
-                    "total_chars": len(text),
-                    "has_more": end < len(text),
-                    "next_offset": end if end < len(text) else None,
-                }
+                result["content"] = {"text": body}
+                result["chunks"] = paged["chunks"]
+                result["page"] = info
+                return result
+            finally:
+                session.close()
+
+    @mcp.tool(
+        title="Search inside one document",
+        tags={"read"},
+        description=(
+            "THE FIRST CALL to make on a document you have identified: rank that one "
+            "document's own passages against your question and read only what answers it. "
+            "A document runs to many pages, and most questions turn on one or two of them — "
+            "'where does this agreement cap indemnity', 'does this credit agreement have a "
+            "springing lien', 'what does the termination clause say'. Ask here first, then "
+            "widen with get_document only if what comes back is not enough. "
+            "Every result carries the chunk `ordinal`, the passage text, `get_document_page` "
+            "— the page of get_document holding it — and `context_pages` {previous, this, "
+            "next}, so reading around a hit is one call and cannot run off either end. Page "
+            "numbers are computed against `chunks_per_page` (default 12); pass the same value "
+            "to get_document and they address exactly the text the passage came from. "
+            "Returns up to `limit` passages (default 5) with {offset, limit, has_more, "
+            "next_offset}; page on with offset=page.next_offset for more. "
+            "WHAT IT CANNOT DO: a ranked search shows that something IS present, never that "
+            "it is absent, and it does not enumerate. If your answer is a claim that a "
+            "document lacks something, or a list of everything of some kind in it, that "
+            "needs a full read via get_document. "
+            "This searches inside ONE document; search_semantic searches the estate and tells "
+            "you which document to open."
+        )
+    )
+    def search_in_document(
+        document_id: str,
+        query: str,
+        version_id: str | None = None,
+        limit: int = 5,
+        offset: int = 0,
+        chunks_per_page: int = 12,
+        headers: dict[str, str] = CurrentHeaders(),
+    ) -> dict | None:
+        with audited_call(
+            session_factory,
+            "mcp.search_in_document",
+            headers,
+            config_provider=config_provider,
+            target_type="document",
+            target_id=document_id,
+        ) as (principals, audit):
+            session, retrieval = service()
+            try:
+                result = retrieval.search_in_document(
+                    document_id,
+                    query,
+                    principals=principals,
+                    version_id=version_id,
+                    limit=limit,
+                    offset=offset,
+                    chunks_per_page=chunks_per_page,
+                )
+                audit["found"] = result is not None
+                if result is not None:
+                    audit["results"] = len(result["results"])
                 return result
             finally:
                 session.close()
@@ -543,9 +587,9 @@ def create_mcp_server(
                     f"{base_url}/api/downloads/{capability.token}/{encoded_name}"
                 )
                 # The link is for a client that shares a network with the appliance.
-                # An agent in a sandbox does not: on a graded run one called this
-                # sixteen times, ran the curl below, got connection refused, and
-                # reported it could not deliver the files the task had asked for.
+                # An agent in a sandbox does not. It will call this, run the curl
+                # below, get connection refused, and report — correctly from where
+                # it stands — that it could not deliver the files it was asked for.
                 # So the bytes ride back in the response by default and the command
                 # is offered as a fallback rather than as an instruction.
                 save_command = (
