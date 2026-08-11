@@ -24,6 +24,15 @@ model_list:
   - model_name: os.environ/KI_EMBEDDING_MODEL
     litellm_params:
       model: os.environ/KI_EMBEDDING_UPSTREAM
+      # Pin the width of a query vector to the width of the index, because the
+      # two are only equal by luck. text-embedding-3-small is natively 1536, so
+      # this is a no-op for it; gemini-embedding-2 is natively 3072 and LiteLLM
+      # maps `dimensions` onto Gemini's output_dimensionality (MRL truncation)
+      # to bring it back to 1536. Without the line, swapping the corpus to a
+      # Gemini-embedded one gets every query embed rejected with "returned 3072
+      # dimensions; index expects 1536" — and the index name will not warn you,
+      # since it is derived from the dimension the index was built at.
+      dimensions: 1536
       api_key: os.environ/KI_EMBEDDING_API_KEY
       input_cost_per_token: os.environ/KI_EMBEDDING_INPUT_COST_PER_TOKEN
       output_cost_per_token: 0.0

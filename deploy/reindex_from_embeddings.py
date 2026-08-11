@@ -25,6 +25,12 @@ one process per core, each taking a disjoint shard of the ranges:
       KI_REINDEX_SHARDS=6 KI_REINDEX_SHARD=$i python reindex_from_embeddings.py &
     done
 
+Size that to the cluster, not just to the cores. Measured 2026-08-07 against a
+single node with a 4 GB heap: 6 shards x 8 threads (48 concurrent bulks of ~3 MB)
+drove OpenSearch into indexing-pressure backpressure and managed 131 chunks/s,
+while 2 x 4 with KI_REINDEX_BATCH=200 sustained ~1,000 chunks/s with no
+rejections at all. More writers past that point is slower, not faster.
+
 Run it inside the appliance container, which already has the config and the
 models:
 
@@ -114,14 +120,27 @@ def _worker(slice_no: int, bounds: tuple[str, str | None], dsn: str, total: int,
             rows = list(session.scalars(stmt.order_by(Chunk.id).limit(BATCH)))
             if not rows:
                 break
-            try:
-                index.bulk_sync([], rows)
-                n = len(rows)
-            except Exception as exc:  # noqa: BLE001 - report, do not abort the run
-                n = 0
-                with _lock:
-                    _failed += len(rows)
-                sys.stdout.write(f"\n  slice {slice_no}: {type(exc).__name__}: {exc}\n")
+            # A 429 from OpenSearch is backpressure, not failure: the cluster is
+            # telling us to slow down, and the original code recorded that as a
+            # permanently lost batch. Retrying with a backoff makes the run
+            # self-throttling instead of silently dropping chunks.
+            n = 0
+            for _attempt in range(10):
+                try:
+                    index.bulk_sync([], rows)
+                    n = len(rows)
+                    break
+                except Exception as exc:  # noqa: BLE001 - report, do not abort the run
+                    text = str(exc)
+                    transient = any(s in text for s in
+                                    ("429", "503", "circuit_breaking", "Timeout", "timed out"))
+                    if transient and _attempt < 9:
+                        time.sleep(min(1.5 ** _attempt, 20.0))
+                        continue
+                    with _lock:
+                        _failed += len(rows)
+                    sys.stdout.write(f"\n  slice {slice_no}: {type(exc).__name__}: {exc}\n")
+                    break
             indexed += n
             with _lock:
                 _done += n
