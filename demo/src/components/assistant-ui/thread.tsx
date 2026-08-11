@@ -190,20 +190,25 @@ const ThreadWelcome: FC = () => <WelcomeHeading />;
 /**
  * Openers, phrased as the questions this appliance is actually good at.
  *
- * Each one exercises a different path: a semantic search over contents, a
- * relation traversal, the matter list, an entity-to-mandate traversal with
- * disambiguation, a cross-matter practice-research synthesis, and the
- * engagement history. Somebody opening the demo cold clicks one of these, and
- * what they get back should be the argument for the product rather than a
- * chat greeting.
+ * These are partner questions, not lookups, and each one is a whole-estate
+ * question with a different shape: scoping a practice group and enumerating a
+ * term of art inside it; a trend that has to be assembled year by year; a sweep
+ * that has to reach every matter before it can say "every"; a comparison across
+ * two buckets that must be defined before they can be counted; and a
+ * distinction between what was signed and what was only ever drafted.
+ *
+ * What makes them the argument for the product is that none can be answered
+ * from one search. Each needs a scope fixed with filters, the scope searched
+ * from several angles, documents actually read, and the answer stated with the
+ * matters behind it — which is the work, and the part a keyword search over a
+ * document store cannot do.
  */
 const STARTERS = [
-  "What pre-money valuation did we nail down for the Novabridge Series B round?",
-  "Which outside firm drafted Luminos's first markup on the deal?",
-  "Who is Carolyn Voss?",
-  "In which mandates is Sarah Castellano involved?",
-  "Have we dealt with Series A financing rounds? What issues surfaced during them?",
-  "Who have we worked with most recently?",
+  "Across our Bankruptcy & Restructuring matters, how often has DIP financing featured — whether we acted for the debtor, the DIP lender, or a creditor responding to one — and which matters were they?",
+  "How has representation and warranty insurance uptake on our M&A deals shifted year over year, and which deals sit behind each year's number?",
+  "I'm running a sanctions-exposure sweep: find every matter where OFAC comes up, and point me to the documents that reference it.",
+  "I'm advising a client negotiating a reverse termination fee. How often have these appeared in our sponsor-backed deals versus our strategic-buyer deals, and what did the triggers look like?",
+  "Give me a by-year breakdown of the Labor & Employment matters carrying an executed clawback provision — and flag separately any that were drafted but never signed.",
 ];
 
 const ThreadSuggestions: FC = () => {
