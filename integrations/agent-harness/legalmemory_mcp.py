@@ -1,11 +1,11 @@
 """Give an agent harness the appliance's tools instead of a filesystem.
 
-A reference bridge, written for the Harvey LAB harness and kept here because
-nothing in it is specific to that harness: a single-POST JSON-RPC client for
-the stateless /mcp mount, a schema sanitizer for providers whose
+A reference bridge, written against a third-party research harness and kept
+here because nothing in it is specific to that harness: a single-POST JSON-RPC
+client for the stateless /mcp mount, a schema sanitizer for providers whose
 function-calling dialect is narrower than JSON Schema, an executor that routes
 the appliance's tools and passes everything else through, and the working
-guidance that measurably changed answers on 250 graded firm-knowledge tasks.
+guidance an agent needs to use an index instead of a filesystem.
 
 See docs/development/agent-harnesses.md for the surrounding advice — budgets,
 what to measure, and the two upstream patches this expects of the harness it
@@ -27,10 +27,12 @@ import os
 import urllib.request
 
 # Every tool the appliance registers is exposed. Curating the list here was a
-# mistake worth recording: a five-tool subset left the agent unable to resolve a
-# practice area to its ontology node, so "every matter in the antitrust practice"
-# — one filtered call — became a 174-turn crawl through 266 matters. The server
-# decides what it offers; the harness passes it through.
+# mistake worth recording: a subset that kept only the obvious read tools left
+# the agent unable to resolve a practice area to its ontology node, so a
+# question one filtered call answers became a walk through the whole estate,
+# matter by matter, until it ran out of turns. A missing tool does not announce
+# itself — the agent just does the job the long way and reports a partial
+# answer. The server decides what it offers; the harness passes it through.
 READ_TOOLS: list[str] = []  # filled from tools/list at run start
 
 
@@ -84,7 +86,12 @@ def _gemini_safe(schema):
 class McpBridge:
     """Single-POST JSON-RPC client for the appliance's stateless /mcp mount."""
 
-    def __init__(self, url: str | None = None, principals: str | None = None):
+    def __init__(
+        self,
+        url: str | None = None,
+        principals: str | None = None,
+        workspace_dir: str | os.PathLike[str] | None = None,
+    ):
         base = url or os.environ["LEGALMEMORY_MCP_URL"]
         self.url = base.rstrip("/") + "/"
         self.principals = principals or os.environ.get(
@@ -92,9 +99,15 @@ class McpBridge:
         )
         self.call_counts: dict[str, int] = {}
         self._id = 0
-        # Where a returned file is written. The agent reads and writes files here,
-        # so a document it asks for has to land in the same place.
-        self.workspace_dir = os.environ.get("LEGALMEMORY_WORKSPACE") or os.getcwd()
+        # Where a returned file is written. The agent reads and writes files in its
+        # own sandbox, so "the same place" is the SANDBOX workspace — pass it in.
+        # Falling back to this process's cwd is the wrong default dressed as a safe
+        # one: the file is written, the call reports success, and the agent cannot
+        # see it. It then hunts for a document that is on the host, and the run ends
+        # in a search of the filesystem rather than of the estate.
+        self.workspace_dir = str(
+            workspace_dir or os.environ.get("LEGALMEMORY_WORKSPACE") or os.getcwd()
+        )
 
     def _post(self, method: str, params: dict) -> dict:
         self._id += 1
@@ -231,16 +244,16 @@ class McpToolExecutor:
 
 
 # Adapted from the LegalMemory demo's system prompt: the tool inventory, the
-# pagination contract, and the working order it was measured to need. UI- and
-# chat-specific rules (citation markup, decline policy) are replaced by the
-# deliverable conventions of this harness.
+# pagination contract, and the working order. UI- and chat-specific rules
+# (citation markup, decline policy) are replaced by the deliverable conventions
+# of this harness.
 MCP_PROMPT_SECTION = """
 
 ## The firm's knowledge base
 
-The task documents are NOT on your filesystem — `documents/` is empty. The
-firm's entire estate is indexed in a knowledge appliance you query through
-these tools:
+The documents are NOT on your filesystem — the working directory holds none of
+them. The firm's entire estate is indexed in a knowledge appliance you query
+through these tools:
 
 The appliance exposes its full tool surface and each tool carries its own
 description — read them. The ones that carry most questions:
@@ -261,7 +274,13 @@ description — read them. The ones that carry most questions:
   navigate the DOCUMENT-TYPE ontology. These are a different facet from the
   practice areas: an id from here is not a practice_area, and passing one as
   practice_area matches nothing.
-- get_document — read one document's text, paginated.
+- search_in_document — ranks ONE document's own passages against a question and
+  returns the few that answer it, each with the get_document page it sits on and
+  its neighbouring pages. The way into a document you have identified.
+- get_document — reads that document through, a page of chunks at a time
+  ({page, pages, first_chunk, last_chunk, has_more, next_page}). The thorough
+  read: what an enumeration needs, and the only basis for saying a document does
+  NOT contain something, since a page is a prefix.
 - find_related_documents / traverse — stored relations with the evidence that
   established them.
 - list_matter_documents — EVERY document in one matter, complete, not paged.
@@ -308,13 +327,13 @@ while reading almost nothing.
    not a survey. list_matter_documents shows a matter whole;
    find_related_documents reaches what ranking will not.
 
-3. **Read the documents, in full.** An excerpt marks where a match happened,
-   not where the answer is. get_document returns the WHOLE document — read it.
-   A provision sits four fifths of the way into a long agreement as readily as
-   at the front, so "this document does not contain X" is a claim you may make
-   only from the end of the text. Read every candidate you mean to include —
-   and every candidate you mean to exclude, because an exclusion is an
-   assertion too.
+3. **Read the documents.** An excerpt marks where a match happened, not where
+   the answer is: a provision sits four fifths of the way into a long agreement
+   as readily as at the front. Read every candidate you mean to include — and
+   every candidate you mean to exclude, because an exclusion is an assertion
+   too. What "read" costs depends on what you are asking of the document, and
+   the document tools say which of them fits; match the depth to the claim you
+   intend to make.
 
 4. **Conclude, and show the ground.** State the scope you searched, the test
    you applied, and the set that passed it.
@@ -395,8 +414,8 @@ that attribute stated. Do not nominate the first strong candidate you read
 — the deciding dates are often days apart, and the most complete-looking
 story is frequently not the most recent one.
 
-**Fix the definition before you enumerate, and hold it.** Many tasks turn
-on a term of art — covenant-lite, maintenance covenant, second request,
+**Fix the definition before you enumerate, and hold it.** Many questions
+turn on a term of art — covenant-lite, maintenance covenant, second request,
 closed. Decide what the term means, in the sense the market uses it, say so
 in one line, and apply that same line to every candidate. An answer that
 counts a borderline feature as qualifying in one paragraph and disqualifying
@@ -411,12 +430,12 @@ of the thing is a wrong answer.
 
 When your investigation is complete, write your answer to `response.md` with
 the `write` tool. Name every document you rely on by its path in the firm's
-filing system — take it verbatim from `source_paths` on the result row, e.g.
-`1003-00001/FTC/second-request-strategy-memo.docx`. A prose title is not an
+filing system — take it verbatim from `source_paths` on the result row, which
+looks like `<matter-ref>/<folder>/<filename>`. A prose title is not an
 identification: two documents in one matter often share a title, and the
-path is what distinguishes them. Where a task asks you to pull or include
-documents, list the paths. State counts and "all/none" claims only after
-paging to `has_more: false`.
+path is what distinguishes them. Where the question asks you to pull or
+include documents, list the paths. State counts and "all/none" claims only
+after paging to `has_more: false`.
 
 `response.md` MUST end with a section headed `## Sources`, listing one full
 `source_paths` value per line, grouped by matter, verbatim, no prose titles and
@@ -431,7 +450,7 @@ know where the answer lives, and "here is what I personally opened" is not that.
 
 Two failure modes, and the second is the common one. Listing a document you have
 no basis for is a false citation. Omitting one that plainly relates to the question
-because you did not open it is the mistake that loses tasks already researched
+because you did not open it spoils an answer that was already researched
 correctly — the matters were right, the paths were on the rows in front of you,
 and the closing checklists and executed agreements were dropped from the answer
 for having gone unread.
