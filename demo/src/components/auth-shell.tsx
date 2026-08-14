@@ -13,6 +13,8 @@
  */
 import type { ReactNode } from "react";
 
+import { NAV_LINKS } from "@/lib/nav-links";
+
 /**
  * The wordmark, set exactly as the header and the product page set it.
  *
@@ -71,7 +73,26 @@ export function AuthShell({
 
           <div className="mt-6 w-full sm:mt-8">{children}</div>
 
-          <p className="mt-8 text-center font-mono text-[10.5px] tracking-[0.08em] text-white/25 uppercase sm:mt-10">
+          {/* The header shows these only to somebody who signed in, and most
+              visitors never do — the door is where they turn around. The same
+              three links, in the chrome's own mono, below the form rather than
+              beside it: somebody here to sign in should not have to read past
+              them, and somebody about to leave should not have to hunt. */}
+          <nav className="mt-8 flex items-center gap-5 sm:mt-10">
+            {NAV_LINKS.map((link) => (
+              <a
+                key={link.href}
+                href={link.href}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="font-mono text-[10.5px] tracking-[0.11em] text-white/40 uppercase transition-colors duration-[var(--lm-dur-fast)] hover:text-[var(--lm-orange-hi)]"
+              >
+                {link.label}
+              </a>
+            ))}
+          </nav>
+
+          <p className="mt-5 text-center font-mono text-[10.5px] tracking-[0.08em] text-white/25 uppercase">
             Eigenwelt Labs
           </p>
         </div>
