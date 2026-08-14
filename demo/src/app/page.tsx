@@ -2,24 +2,11 @@ import { UserButton } from "@clerk/nextjs";
 
 import { principals } from "@/lib/appliance";
 import { authEnabled } from "@/lib/auth";
+import { NAV_LINKS } from "@/lib/nav-links";
 import { McpModal } from "@/components/mcp-modal";
 import { Workspace } from "@/components/workspace";
 
 export const dynamic = "force-dynamic";
-
-/**
- * Everything this demo is not.
- *
- * The demo answers one question well and then a visitor wants the rest: how it
- * works, what it costs them to run, and whether the source is real. Hard-coded
- * rather than configurable — these are the product's own addresses, and a demo
- * running somewhere else still points at them.
- */
-const NAV_LINKS = [
-  { label: "Docs", href: "https://legalmemory.eigenweltlabs.com/docs" },
-  { label: "GitHub", href: "https://github.com/eigenweltlabs/LegalMemory" },
-  { label: "Website", href: "https://eigenweltlabs.com/legalmemory" },
-] as const;
 
 /**
  * The whole application.
