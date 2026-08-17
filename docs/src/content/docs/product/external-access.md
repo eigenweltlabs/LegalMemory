@@ -160,9 +160,18 @@ text is stored as a SHA-256 fingerprint plus character count, never verbatim
 ### Downloads
 
 `download_document` answers two ways at once. The bytes ride back in the tool
-result as a base64 `BlobResourceContents` — that is the default, because an
-agent in a sandbox cannot reach the appliance over the network and a link is
-useless to it; pass `inline_blob=false` for the link alone.
+result as a base64 `BlobResourceContents`, and `inline_blob` defaults to true,
+because an agent in a sandbox cannot reach the appliance over the network and a
+link is useless to it. Pass `inline_blob=false` for the link alone.
+
+**The blob is charged to whoever holds the result, and for a model that is
+context.** Base64 costs about four characters per three bytes, and a document
+original is not text a model can read — a `.docx` is a zip. Measured on the
+hosted demo, one 68 KB agreement: 2,592 bytes of result with `inline_blob=false`,
+95,702 with it true, or roughly 650 tokens against 24,000 for the same call.
+A caller that can fetch the link should pass `inline_blob=false` and fetch it;
+the default suits a client that will write the bytes out and has no route to the
+appliance.
 
 Beside the blob sits the link. The tool issues a process-local capability token
 (`secrets.token_urlsafe(32)`, TTL 300 seconds) that freezes the
