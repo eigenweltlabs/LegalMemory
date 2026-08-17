@@ -693,3 +693,55 @@ def test_mcp_download_returns_exact_original_blob_and_short_lived_workspace_link
         resource = next(block["resource"] for block in inline["content"] if block["type"] == "resource")
         assert base64.b64decode(resource["blob"]) == original
         assert hashlib.sha256(original).hexdigest() == content_hash
+
+
+def test_mcp_download_link_names_the_origin_the_caller_reached(factory, tmp_path) -> None:
+    """The link and the curl are built for the caller, not for the appliance.
+
+    A client that reaches the appliance through a proxy — the hosted demo
+    republishing ``/mcp``, an ingress, anything terminating TLS — is answered by
+    a process whose own Host is a container address. Building the download URL
+    from that Host hands every such client a link to a host that does not exist
+    where they stand, which is how the link path came to be unusable while the
+    inline blob kept working. The forwarded origin is what the caller can
+    actually reach, so it is what the link has to name.
+    """
+
+    artifact_dir = tmp_path / "artifacts"
+    with factory() as session:
+        original, _ = _seed_downloadable_pair(session, artifact_dir)
+
+    store = ConfigStore(tmp_path / "config.json")
+    store.save(_header_auth_config(artifact_dir))
+    with TestClient(create_app(factory, store)) as client:
+        metadata = client.post(
+            "/mcp/",
+            json={
+                "jsonrpc": "2.0",
+                "id": "download",
+                "method": "tools/call",
+                "params": {
+                    "name": "download_document",
+                    "arguments": {"document_id": "download-document"},
+                },
+            },
+            headers={
+                "accept": "application/json, text/event-stream",
+                "x-ki-principals": "group:citation-test",
+                "x-forwarded-host": "legalmemory.example",
+                "x-forwarded-proto": "https",
+            },
+        ).json()["result"]["structuredContent"]
+
+        assert metadata["download_url"].startswith(
+            "https://legalmemory.example/api/downloads/"
+        )
+        # The curl a caller is invited to run carries the same origin: a link
+        # that is right and a command that is wrong is the same outage.
+        assert "https://legalmemory.example/api/downloads/" in metadata["save_command"]
+
+        # The path still resolves on the appliance itself, which is what lets a
+        # proxy re-base it onto its own origin and serve the bytes.
+        served = client.get(urlsplit(metadata["download_url"]).path)
+        assert served.status_code == 200
+        assert served.content == original

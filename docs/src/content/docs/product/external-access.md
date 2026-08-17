@@ -58,7 +58,7 @@ tool's name, short title, and tags.
 | `search_semantic` | Hybrid semantic + lexical search over chunks, ACL-filtered before ranking. | `query`, the same metadata filters, `limit` (default 8, capped 100), `offset` (see the ranked-window cap below) |
 | `get_document` | Reads one authorized document version, one page of chunks at a time. | `document_id`, `version_id`, `page` (default 1), `chunks_per_page` (default 12); returns a `page` block with `pages`, `first_chunk`, `last_chunk`, `total_chunks`, `has_more`, `next_page` |
 | `search_in_document` | Ranks one document's own passages against a query, for finding a clause without reading the file. | `document_id`, `query`, `version_id`, `limit` (default 5), `offset`; each result carries the chunk `ordinal` and the `get_document_page` that holds it |
-| `download_document` | Exports the exact original binary via a short-lived download link (see below). | `document_id`, `version_id`, `source_object_id`, `inline_blob` (embeds the base64 blob instead of only linking) |
+| `download_document` | Exports the exact original binary: the bytes in the result, plus a short-lived download link (see below). | `document_id`, `version_id`, `source_object_id`, `inline_blob` (default true; false returns the link alone) |
 | `find_related_documents` | Stored relations plus labeled shared-thread and shared-matter context, with graph-ready edges. | `document_id`, `include_same_matter` (default true), `limit` (capped 250), `offset`; `page.total` is exact and the edge lists cover the current page |
 | `traverse` | Low-level walk of stored relation edges (`supersedes`, `annex_of`, `references`, `responds_to`, `belongs_to_thread`). | `entity_type`, `entity_id`, `limit` (capped 250), `offset`; the limit counts *visible* edges |
 | `list_matters` | Matters containing at least one version visible to the caller. | `limit` (capped 250), `offset`, `practice_area` (Area-of-Law node id, subtree semantics); the limit counts *visible* matters, and no `total` is reported |
@@ -159,17 +159,35 @@ text is stored as a SHA-256 fingerprint plus character count, never verbatim
 
 ### Downloads
 
-`download_document` never puts document bytes in model context by default.
-It issues a process-local capability token (`secrets.token_urlsafe(32)`,
-TTL 300 seconds) that freezes the document/version/source-object identity,
-content hash, and, critically, the caller's principals at issuance. The
-returned `ResourceLink` points at
+`download_document` answers two ways at once. The bytes ride back in the tool
+result as a base64 `BlobResourceContents` — that is the default, because an
+agent in a sandbox cannot reach the appliance over the network and a link is
+useless to it; pass `inline_blob=false` for the link alone.
+
+Beside the blob sits the link. The tool issues a process-local capability token
+(`secrets.token_urlsafe(32)`, TTL 300 seconds) that freezes the
+document/version/source-object identity, content hash, and, critically, the
+caller's principals at issuance. The returned `ResourceLink` points at
 `GET /api/downloads/{token}/{filename}`, alongside a ready-to-run `curl`
 command, the SHA-256, size, and MIME type. On every fetch the endpoint
 re-checks the ACL snapshot with the captured principals, so a revoked grant
 invalidates an unexpired link (the token is also revoked on failure: 404 for
 invalid/expired or no-longer-authorized, 410 for a missing blob). The fetch
 itself lands in the audit ledger attributed to the capability's principals.
+
+**The link is built for the caller, not for the appliance.** Its origin comes
+from `X-Forwarded-Proto` / `X-Forwarded-Host`, falling back to `Host`. A proxy
+that republishes `/mcp` — the hosted demo does, and so does any ingress in
+front of an appliance that is not itself on the network the client is on — owes
+the link two things, or it names a host the client cannot reach:
+
+- forward those headers on the MCP request, so the minted URL is the public one;
+- republish `GET /api/downloads/{token}/{filename}` to the appliance, and leave
+  it outside the session gate. The capability token is the whole credential:
+  it is issued only to a caller already authorized for that document version,
+  bound to the principals held then, expiring, and re-checked on every read. A
+  second gate adds nothing and breaks what the link is for — a `curl` from a
+  terminal and a fetch from a client that carries no session.
 
 ## The OAuth resource-server surface
 

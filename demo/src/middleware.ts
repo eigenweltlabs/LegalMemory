@@ -60,6 +60,13 @@ const selfAuthenticating = (pathname: string) =>
   pathname.startsWith("/sign-up") ||
   pathname === "/mcp" ||
   pathname.startsWith("/mcp/") ||
+  // A capability link the appliance minted. The token in the path is the whole
+  // credential — issued only to a caller already authorized for that document
+  // version, bound to the principals held at that moment, short-lived, and
+  // re-checked against the ACL snapshot on every read. The session gate would
+  // add nothing to that and would break what the link is for: a curl from a
+  // terminal and a fetch from an agent, neither of which carries a session.
+  pathname.startsWith("/api/downloads/") ||
   pathname.startsWith("/.well-known/") ||
   // RFC 7591 registration is unauthenticated by design: a client posts here
   // precisely because it has no credentials yet. Behind the session gate it
