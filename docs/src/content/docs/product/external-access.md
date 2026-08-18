@@ -58,7 +58,7 @@ tool's name, short title, and tags.
 | `search_semantic` | Hybrid semantic + lexical search over chunks, ACL-filtered before ranking. | `query`, the same metadata filters, `limit` (default 8, capped 100), `offset` (see the ranked-window cap below) |
 | `get_document` | Reads one authorized document version, one page of chunks at a time. | `document_id`, `version_id`, `page` (default 1), `chunks_per_page` (default 12); returns a `page` block with `pages`, `first_chunk`, `last_chunk`, `total_chunks`, `has_more`, `next_page` |
 | `search_in_document` | Ranks one document's own passages against a query, for finding a clause without reading the file. | `document_id`, `query`, `version_id`, `limit` (default 5), `offset`; each result carries the chunk `ordinal` and the `get_document_page` that holds it |
-| `download_document` | Exports the exact original binary: the bytes in the result, plus a short-lived download link (see below). | `document_id`, `version_id`, `source_object_id`, `inline_blob` (default true; false returns the link alone) |
+| `download_document` | Exports the exact original binary: a short-lived download link, plus the bytes in the result when they are small (see below). | `document_id`, `version_id`, `source_object_id`, `inline_blob` (`true` always attaches the bytes, `false` never, unset while under 32 KB) |
 | `find_related_documents` | Stored relations plus labeled shared-thread and shared-matter context, with graph-ready edges. | `document_id`, `include_same_matter` (default true), `limit` (capped 250), `offset`; `page.total` is exact and the edge lists cover the current page |
 | `traverse` | Low-level walk of stored relation edges (`supersedes`, `annex_of`, `references`, `responds_to`, `belongs_to_thread`). | `entity_type`, `entity_id`, `limit` (capped 250), `offset`; the limit counts *visible* edges |
 | `list_matters` | Matters containing at least one version visible to the caller. | `limit` (capped 250), `offset`, `practice_area` (Area-of-Law node id, subtree semantics); the limit counts *visible* matters, and no `total` is reported |
@@ -159,19 +159,20 @@ text is stored as a SHA-256 fingerprint plus character count, never verbatim
 
 ### Downloads
 
-`download_document` answers two ways at once. The bytes ride back in the tool
-result as a base64 `BlobResourceContents`, and `inline_blob` defaults to true,
-because an agent in a sandbox cannot reach the appliance over the network and a
-link is useless to it. Pass `inline_blob=false` for the link alone.
+Every result carries the link. A small original *also* rides back as a base64
+`BlobResourceContents`, so a one-click export is a single round trip.
 
-**The blob is charged to whoever holds the result, and for a model that is
-context.** Base64 costs about four characters per three bytes, and a document
-original is not text a model can read — a `.docx` is a zip. Measured on the
-hosted demo, one 68 KB agreement: 2,592 bytes of result with `inline_blob=false`,
-95,702 with it true, or roughly 650 tokens against 24,000 for the same call.
-A caller that can fetch the link should pass `inline_blob=false` and fetch it;
-the default suits a client that will write the bytes out and has no route to the
-appliance.
+`inline_blob` decides that explicitly — `true` always attaches the bytes,
+`false` never does — and unset means "while they are small", currently under
+32 KB. The blob is charged to whoever holds the result, and for a model that is
+context spent on something it cannot read: base64 costs four characters per
+three bytes and a `.docx` is a zip. Measured on the hosted demo, one 68 KB
+agreement is 2,592 bytes of result without the blob and 95,702 with it, roughly
+650 tokens against 24,000 for the same call.
+
+Pass `true` if you will write the file out and cannot reach the appliance over
+the network — a sandboxed agent generally cannot, and that is what the bytes
+are there for.
 
 Beside the blob sits the link. The tool issues a process-local capability token
 (`secrets.token_urlsafe(32)`, TTL 300 seconds) that freezes the

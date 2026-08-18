@@ -179,6 +179,13 @@ class McpBridge:
 
     def call(self, name: str, arguments: dict) -> str:
         self.call_counts[name] = self.call_counts.get(name, 0) + 1
+        if name == "download_document":
+            # Asked for here rather than left to the tool's own judgement, because
+            # this harness is the case the bytes exist for: _save_resources writes
+            # them to disk and the agent never holds them, so size costs nothing
+            # here, and the link the tool would otherwise hand back points at an
+            # appliance the sandbox cannot reach.
+            arguments = {**arguments, "inline_blob": True}
         result = self._post("tools/call", {"name": name, "arguments": arguments})
         blocks = result.get("content", [])
         texts = [b.get("text", "") for b in blocks if b.get("type") == "text"]

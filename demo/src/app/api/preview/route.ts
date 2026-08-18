@@ -23,6 +23,9 @@ export async function GET(request: Request) {
       document_id: documentId,
       version_id: url.searchParams.get("version_id") ?? undefined,
       source_object_id: url.searchParams.get("source_object_id") ?? undefined,
+      // Only the capability path below is used, so the base64 copy of the same
+      // bytes would be built, sent and thrown away on every preview click.
+      inline_blob: false,
     });
 
     const meta = (result.structuredContent ?? {}) as {
