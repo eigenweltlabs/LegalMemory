@@ -70,6 +70,19 @@ def _with_filter(node: dict) -> dict:
     return {**node, "use_as_filter": _FACET_FILTER.get(facet)} if facet else node
 
 
+# How large an original may be before ``download_document`` stops volunteering the
+# bytes to a caller that did not ask for them either way.
+#
+# The blob is charged to whoever holds the result, and for a model that is context
+# spent on something it cannot read: base64 costs four characters per three bytes,
+# and a document original is not text (a .docx is a zip). Measured on the hosted
+# demo, one 68 KB agreement is 2.5 KB of result without the blob and 95 KB with it.
+# 32 KB is around 44 KB encoded, roughly 11k tokens — about as much as a tool
+# result should ever cost. Above it the caller gets the link, which is the answer
+# the tool gave everyone before the bytes were added.
+_INLINE_BLOB_AUTO_MAX_BYTES = 32 * 1024
+
+
 def _paged(page: Page, **extra) -> dict:
     """The response envelope every paginated tool returns."""
     return {"results": page.items, "page": page.as_dict(), **extra}
@@ -527,21 +540,23 @@ def create_mcp_server(
             "Download/export/copy one document into the current client workspace as the exact "
             "original Word, Excel, PDF, email, or other binary—never a text reconstruction. "
             "Call this whenever a task says download, save, copy, export, provide, or put a "
-            "document in the workspace. THE FILE COMES BACK IN THE RESULT: the bytes ride "
-            "along as a base64 BlobResourceContents, so write them out from there — you "
-            "already have the file and need to fetch nothing. A short-lived link and a curl "
-            "command come too, but they only work from a client that can reach this "
-            "appliance over the network, which a sandboxed agent generally cannot; treat "
-            "them as a fallback, never as the instruction. Pass inline_blob=false to get the "
-            "link alone when you truly do not want the bytes. The result includes SHA-256, "
-            "size, MIME type, filename, and exact citations."
+            "document in the workspace. Every result carries a short-lived download link "
+            "and a curl command; a small original ALSO rides along as a base64 "
+            "BlobResourceContents, so write it out from there rather than fetching it. "
+            "inline_blob decides that explicitly: TRUE always attaches the bytes — pass it "
+            "if you will write the file out and cannot reach this appliance over the "
+            "network, which a sandboxed agent generally cannot — and FALSE never does. "
+            "Left unset, the bytes come only when they are small enough to be worth "
+            "carrying; above that you get the link, because a base64 original is not "
+            "something you can read and costs you the context to hold. The result includes "
+            "SHA-256, size, MIME type, filename, and exact citations."
         )
     )
     def download_document(
         document_id: str,
         version_id: str | None = None,
         source_object_id: str | None = None,
-        inline_blob: bool = True,
+        inline_blob: bool | None = None,
         headers: dict[str, str] = CurrentHeaders(),
     ) -> ToolResult:
         with audited_call(
@@ -586,12 +601,18 @@ def create_mcp_server(
                 download_url = (
                     f"{base_url}/api/downloads/{capability.token}/{encoded_name}"
                 )
-                # The link is for a client that shares a network with the appliance.
-                # An agent in a sandbox does not. It will call this, run the curl
-                # below, get connection refused, and report — correctly from where
-                # it stands — that it could not deliver the files it was asked for.
-                # So the bytes ride back in the response by default and the command
-                # is offered as a fallback rather than as an instruction.
+                # Who carries the bytes. A client that will WRITE THE FILE OUT and
+                # cannot reach the appliance — an agent in a sandbox, which is what
+                # made the link alone insufficient — passes inline_blob=true and
+                # always gets them. A client that will fetch the link passes false.
+                # A caller that says nothing is usually a model, and for a model the
+                # blob is context spent on a base64 zip it cannot read, so it gets
+                # them only while they are small enough not to matter.
+                inline_blob = (
+                    downloadable.size_bytes <= _INLINE_BLOB_AUTO_MAX_BYTES
+                    if inline_blob is None
+                    else inline_blob
+                )
                 save_command = (
                     "curl --fail --location --output "
                     f"{shlex.quote(downloadable.filename)} {shlex.quote(download_url)}"
@@ -614,7 +635,11 @@ def create_mcp_server(
                                 "The file itself is attached to this result as a "
                                 "base64 blob — write it out from there. "
                                 if inline_blob
-                                else ""
+                                else "The bytes are not attached: this original is "
+                                "larger than is worth carrying in a result. Fetch it "
+                                "with the command below, or call again with "
+                                "inline_blob=true if you cannot reach this appliance "
+                                "and will write the file out yourself. "
                             )
                             + "If your client can reach this appliance directly, "
                             f"this also works:\n{save_command}"

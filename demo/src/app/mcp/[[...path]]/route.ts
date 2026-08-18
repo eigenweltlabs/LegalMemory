@@ -59,10 +59,20 @@ async function authorize(request: Request): Promise<Response | null> {
 }
 
 async function proxy(request: Request, body: string | null) {
+  // The appliance writes URLs into its own answers — `download_document` hands
+  // back a `download_url` and a `save_command` curl — and it builds them from
+  // the Host of the call it is answering. That is this process, on a container
+  // address no client can reach, so without these two headers every link it
+  // mints through here names a host that does not exist outside the network.
+  // Forwarding the origin the caller actually used points them at
+  // /api/downloads/..., which this app republishes.
+  const origin = new URL(publicOrigin(request));
   const upstream = await fetch(mcpUrl(), {
     method: request.method,
     headers: {
       ...identityHeaders(),
+      "x-forwarded-host": origin.host,
+      "x-forwarded-proto": origin.protocol.replace(/:$/, ""),
       "content-type": request.headers.get("content-type") ?? "application/json",
       // Streamable HTTP negotiates between JSON and SSE on this header, so the
       // client's preference is carried rather than replaced.

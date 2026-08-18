@@ -159,8 +159,16 @@ def _seed_cited_document(session: Session) -> dict[str, object]:
     }
 
 
-def _seed_downloadable_pair(session: Session, artifact_dir) -> tuple[bytes, str]:
-    original = b"PK\x03\x04exact-original-docx-bytes"
+def _seed_downloadable_pair(
+    session: Session, artifact_dir, original: bytes | None = None
+) -> tuple[bytes, str]:
+    """Seed one downloadable document plus a related one.
+
+    ``original`` overrides the root document's bytes, for the tests that turn on
+    how large it is. The related document stays small either way.
+    """
+
+    original = b"PK\x03\x04exact-original-docx-bytes" if original is None else original
     related_original = b"PK\x03\x04related-original-docx-bytes"
     stored = LocalArtifactStore(artifact_dir).put_blob(
         BytesIO(original), max_bytes=1024 * 1024
@@ -693,3 +701,118 @@ def test_mcp_download_returns_exact_original_blob_and_short_lived_workspace_link
         resource = next(block["resource"] for block in inline["content"] if block["type"] == "resource")
         assert base64.b64decode(resource["blob"]) == original
         assert hashlib.sha256(original).hexdigest() == content_hash
+
+
+def test_mcp_download_link_names_the_origin_the_caller_reached(factory, tmp_path) -> None:
+    """The link and the curl are built for the caller, not for the appliance.
+
+    A client that reaches the appliance through a proxy — the hosted demo
+    republishing ``/mcp``, an ingress, anything terminating TLS — is answered by
+    a process whose own Host is a container address. Building the download URL
+    from that Host hands every such client a link to a host that does not exist
+    where they stand, which is how the link path came to be unusable while the
+    inline blob kept working. The forwarded origin is what the caller can
+    actually reach, so it is what the link has to name.
+    """
+
+    artifact_dir = tmp_path / "artifacts"
+    with factory() as session:
+        original, _ = _seed_downloadable_pair(session, artifact_dir)
+
+    store = ConfigStore(tmp_path / "config.json")
+    store.save(_header_auth_config(artifact_dir))
+    with TestClient(create_app(factory, store)) as client:
+        metadata = client.post(
+            "/mcp/",
+            json={
+                "jsonrpc": "2.0",
+                "id": "download",
+                "method": "tools/call",
+                "params": {
+                    "name": "download_document",
+                    "arguments": {"document_id": "download-document"},
+                },
+            },
+            headers={
+                "accept": "application/json, text/event-stream",
+                "x-ki-principals": "group:citation-test",
+                "x-forwarded-host": "legalmemory.example",
+                "x-forwarded-proto": "https",
+            },
+        ).json()["result"]["structuredContent"]
+
+        assert metadata["download_url"].startswith(
+            "https://legalmemory.example/api/downloads/"
+        )
+        # The curl a caller is invited to run carries the same origin: a link
+        # that is right and a command that is wrong is the same outage.
+        assert "https://legalmemory.example/api/downloads/" in metadata["save_command"]
+
+        # The path still resolves on the appliance itself, which is what lets a
+        # proxy re-base it onto its own origin and serve the bytes.
+        served = client.get(urlsplit(metadata["download_url"]).path)
+        assert served.status_code == 200
+        assert served.content == original
+
+
+def test_mcp_download_volunteers_the_bytes_only_while_they_are_small(
+    factory, tmp_path
+) -> None:
+    """A caller that says nothing about the blob is not handed a large one.
+
+    ``inline_blob`` unset means the tool decides, and it decides on size: the
+    result is usually read by a model, where a base64 original is context spent
+    on something it cannot read. A caller that will write the file out and
+    cannot reach the appliance still asks for the bytes explicitly and still
+    gets them, whatever the size.
+    """
+
+    artifact_dir = tmp_path / "artifacts"
+    with factory() as session:
+        # Comfortably past the threshold, so the default has to choose the link.
+        original, _ = _seed_downloadable_pair(
+            session, artifact_dir, original=b"PK\x03\x04" + b"x" * (64 * 1024)
+        )
+
+    store = ConfigStore(tmp_path / "config.json")
+    store.save(_header_auth_config(artifact_dir))
+    headers = {
+        "accept": "application/json, text/event-stream",
+        "x-ki-principals": "group:citation-test",
+    }
+
+    def download(arguments: dict) -> dict:
+        return client.post(
+            "/mcp/",
+            json={
+                "jsonrpc": "2.0",
+                "id": "download",
+                "method": "tools/call",
+                "params": {"name": "download_document", "arguments": arguments},
+            },
+            headers=headers,
+        ).json()["result"]
+
+    def blobs(result: dict) -> list[dict]:
+        return [block for block in result["content"] if block["type"] == "resource"]
+
+    with TestClient(create_app(factory, store)) as client:
+        # Unset: the link, and the link alone.
+        unset = download({"document_id": "download-document"})
+        assert blobs(unset) == []
+        assert unset["structuredContent"]["delivery"] == "resource_link"
+        # Still a complete answer — the bytes are one fetch away, and the text
+        # says so rather than leaving a caller to conclude there is no file.
+        assert any(block["type"] == "resource_link" for block in unset["content"])
+        assert "inline_blob=true" in unset["content"][0]["text"]
+
+        # Explicit: the bytes, exactly as before, size notwithstanding.
+        asked = download({"document_id": "download-document", "inline_blob": True})
+        assert base64.b64decode(blobs(asked)[0]["resource"]["blob"]) == original
+        assert asked["structuredContent"]["delivery"] == "embedded_blob"
+
+        # A small original still comes back whole without being asked for, which
+        # is what keeps a one-click export a single round trip.
+        small = download({"document_id": "related-document"})
+        assert blobs(small), "a small original should not cost the caller a fetch"
+        assert small["structuredContent"]["delivery"] == "embedded_blob"
