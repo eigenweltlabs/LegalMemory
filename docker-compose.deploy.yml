@@ -111,6 +111,10 @@ services:
       # Behind the edge the demo cannot see its own public name, and OAuth
       # discovery has to publish one that clients can actually reach.
       DEMO_PUBLIC_URL: https://${DEMO_DOMAIN}
+      DOCS_DIR: /srv/docs
+    volumes:
+      # The same build Caddy serves at /docs, for the chat's docs search.
+      - docs_dist:/srv/docs:ro
 
 volumes:
   docs_dist:
