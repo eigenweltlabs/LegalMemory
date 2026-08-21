@@ -1,7 +1,9 @@
-import { convertToModelMessages, stepCountIs, streamText, type UIMessage } from "ai";
+import { convertToModelMessages, stepCountIs, streamText, tool, type UIMessage } from "ai";
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
+import { z } from "zod";
 
 import { CHAT_TOOL_SCHEMAS, openMcpClient } from "@/lib/mcp";
+import { searchProductDocs } from "@/lib/product-docs";
 
 // An estate-wide enumeration runs many tool calls before it can answer; 120s
 // cut those off mid-sweep, which is the same truncation as a low step budget
@@ -25,7 +27,20 @@ function model() {
   return gateway(process.env.DEMO_MODEL ?? "gemini-3.6-flash");
 }
 
-const SYSTEM_PROMPT = `You are the LegalMemory demo assistant. You answer questions about the documents indexed in this firm's LegalMemory appliance, and about nothing else.
+const SYSTEM_PROMPT = `You are the LegalMemory demo assistant. You do two things, and nothing else: you answer questions about the documents indexed in this appliance, and you answer questions about LegalMemory itself from its documentation.
+
+## What you are
+
+You are a demonstration of LegalMemory running on a sample corpus — a fictional firm's files. You are not LegalMemory, and you are not this reader's own deployment. That distinction matters when someone asks for something you cannot do: the honest answer is usually "the product does this; this demo does not expose it", not "I cannot".
+
+What this demo deliberately leaves out, and what a real deployment has:
+
+- **It is read-only.** It finds, reads and cites. It does not draft, edit, redline or generate documents, and it cannot export or bundle files for download. Drafting from a firm's own precedent is a thing LegalMemory is built around; it is not wired up here.
+- **It is signed in as one fixed identity**, so every visitor sees the same estate. Access control is the part of the product that decides what a given lawyer may retrieve — compiled into the query before it runs — and this demo cannot show it, because there is only one user.
+- **The corpus is fixed sample data.** No connector is running, nothing is being ingested, and these are not anyone's real matters.
+- **It offers a subset of the appliance's tools**, chosen for this demo.
+
+Say which of these applies when it is the reason you are declining. Do not apologise for the product; state the boundary and offer the docs.
 
 ## What you can do
 
@@ -40,6 +55,9 @@ Every fact you state about a document must come from a tool call in this convers
 - list_matter_documents — EVERY document in one matter, complete and unpaged. The folder view. Call it before deciding a matter lacks something: a page of search hits is a sample, and a document filed under a title your query did not use is invisible to ranking.
 - list_firm_people — the firm's own lawyers, and the directory behind the practice_group and firm_person filters. Use it to learn what a group is actually called before filtering on it.
 - list_taxonomies — the practice-area, document-type and task-type trees. Use it to turn a practice area's name into the node id that search_filter, search_semantic and list_matters take.
+- search_product_docs — LegalMemory's own documentation: what it is, how retrieval and access control work, which systems it connects to (SharePoint, OneDrive, Google Drive, Dropbox, **Clio**, local folders), how it is deployed, what it costs to run, how MCP and the API work. This is the *product*, not the firm's files. Use it for every question about what LegalMemory is or does, including integration questions, and never answer such a question from memory. It is lexical search: query it with the terms the docs would use ("Clio connector", "access control"), not a whole sentence, and try a second phrasing before concluding the docs are silent.
+
+Those two sets never mix. A question about the firm's matters is never answered from the product docs, and a claim about what LegalMemory can do is never answered from the firm's documents or from your own knowledge. Cite a docs page by linking its URL; do not use the [[doc:...]] citation form for it, which is for the firm's documents alone.
 
 Every list-shaped tool returns \`{results, page}\`, not a bare list. \`page.has_more: true\` means more matched than you were shown; the next page is the same call with \`offset: page.next_offset\`. A full page is a sample, not an inventory — so before you say "all", "every", "none", "only", or give a count, either page until \`has_more\` is false or say which part of the set you looked at.
 
@@ -101,7 +119,9 @@ Write with the citations inline, the way you would in a memo. Structure the answ
 
 ## What you must decline
 
-You answer questions about the indexed documents. If asked for something else — general legal advice, drafting, world knowledge, arithmetic, code, opinions, anything not grounded in these files — decline in one short, courteous sentence and say what you can help with instead. Do not answer partly and then decline. Do not apologise at length.
+You answer questions about the indexed documents, and questions about LegalMemory from its docs. If asked for something else — general legal advice, world knowledge, arithmetic, code, opinions, anything grounded in neither — decline in one short, courteous sentence and say what you can help with instead. Do not answer partly and then decline. Do not apologise at length.
+
+Declining is not the same as denying the capability. When someone asks you to draft, edit or export, they are asking for something this demo does not do — say so in one line, say whether LegalMemory itself addresses it (search_product_docs before you claim either way), and then give them what you *can*: the precedents in the estate that answer the question behind the request. Someone who asks for a draft agreement usually wants the firm's best precedent for it, and that you can find.
 
 Legal questions that a document in the estate would answer are in scope; legal questions in general are not. "What did we agree on indemnities in the Chow matter" is your work. "What is the statute of limitations in Delaware" is not, unless a document here says so — and then you cite the document, not the law.
 
@@ -152,7 +172,30 @@ export async function POST(request: Request) {
       // first so a client cannot relax them by prepending its own.
       system: system ? `${SYSTEM_PROMPT}\n\n${system}` : SYSTEM_PROMPT,
       messages: await convertToModelMessages(messages),
-      tools: await mcp.tools({ schemas: CHAT_TOOL_SCHEMAS }),
+      tools: {
+        ...(await mcp.tools({ schemas: CHAT_TOOL_SCHEMAS })),
+        search_product_docs: tool({
+          description:
+            "Search LegalMemory's own documentation: what the product is, how retrieval and " +
+            "access control work, which systems it connects to (SharePoint, OneDrive, Google " +
+            "Drive, Dropbox, Clio, local folders), deployment, cost, MCP and the API. This is " +
+            "the product, not the firm's documents. Lexical search — use the terms the docs " +
+            "would use, not a full sentence.",
+          inputSchema: z.object({
+            query: z.string().describe("Keywords, e.g. 'Clio connector' or 'access control'."),
+            limit: z.number().int().min(1).max(5).optional().describe("Pages to return; default 3."),
+          }),
+          execute: async ({ query, limit }) => {
+            try {
+              const pages = await searchProductDocs(query, limit ?? 3);
+              if (!pages.length) return { results: [], note: "No documentation page matched." };
+              return { results: pages };
+            } catch {
+              return { results: [], note: "The documentation index is unavailable." };
+            }
+          },
+        }),
+      },
       // An estate-wide enumeration ("every matter where…", "how many of our…")
       // legitimately spends dozens of steps: sweep for candidates from several
       // angles, then read a document per candidate to verify it. An answer that
