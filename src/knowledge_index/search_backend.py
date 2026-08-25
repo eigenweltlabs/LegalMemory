@@ -242,6 +242,55 @@ class OpenSearchIndex:
             return []
         return self._run_search(self._lexical_body(query_text, strict_filter, _oversample(limit)))
 
+    def document_versions_containing(
+        self,
+        phrase: str,
+        *,
+        scope: CompiledAccessScope,
+        filters: SearchFilters,
+        max_versions: int = 4000,
+    ) -> set[str]:
+        """Every authorized document version whose text contains ``phrase``.
+
+        Enumeration, not ranking: one aggregation bucket per version and no
+        scores, so a phrase that appears once in a long document counts exactly
+        as much as one that appears fifty times — which is the difference
+        between "find the top mentions" and "find every document that mentions
+        it at all". The phrase runs through the same analyzer as the lexical
+        leg, and the ACL scope filters before the aggregation like every other
+        leg. Capped at ``max_versions`` buckets; beyond that the caller is
+        enumerating the estate, not filtering it.
+        """
+        self.ensure_index()
+        strict_filter = _combined_filter(scope, filters)
+        if "match_none" in strict_filter:
+            return set()
+        body = {
+            "size": 0,
+            "query": {
+                "bool": {
+                    "filter": [strict_filter],
+                    "must": [{"match_phrase": {"text": phrase}}],
+                }
+            },
+            "aggs": {
+                "versions": {
+                    "terms": {"field": "document_version_id", "size": max_versions}
+                }
+            },
+        }
+        response = _HTTP.post(
+            f"{self.base_url}/{self.index_name}/_search", json=body, timeout=30
+        )
+        response.raise_for_status()
+        buckets = (
+            response.json()
+            .get("aggregations", {})
+            .get("versions", {})
+            .get("buckets", [])
+        )
+        return {bucket["key"] for bucket in buckets}
+
     def search_identifier(
         self,
         query_text: str,
@@ -590,6 +639,15 @@ def _combined_filter(scope: CompiledAccessScope, filters: SearchFilters) -> dict
         if not filters.matter_ids:
             return {"match_none": {}}
         clauses.append({"terms": {"matter_id": filters.matter_ids}})
+    # document_version_ids carries a resolved contains_all_terms intersection
+    # (RetrievalService sets it); same contract as matter_ids — an empty list is
+    # a real answer, not an absent filter.
+    if filters.document_version_ids is not None:
+        if not filters.document_version_ids:
+            return {"match_none": {}}
+        clauses.append(
+            {"terms": {"document_version_id": filters.document_version_ids}}
+        )
     for field, value in (
         ("project_id", filters.project_id),
         ("matter_id", filters.matter_id),

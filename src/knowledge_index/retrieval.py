@@ -2125,6 +2125,28 @@ class RetrievalService:
             )
         index = OpenSearchIndex(self.config)
 
+        # contains_all_terms is a document-level AND over exact phrases: each
+        # phrase is enumerated separately and the version sets are intersected
+        # here, so the phrases may sit in different parts of one document. The
+        # intersection rides to the backend as document_version_ids, and the
+        # paging, collapse and ordering below stay exactly the standard path's.
+        if filters.contains_all_terms:
+            version_ids: set[str] | None = None
+            for phrase in filters.contains_all_terms[:8]:
+                if not phrase or not phrase.strip():
+                    continue
+                matched = index.document_versions_containing(
+                    phrase.strip(), scope=scope, filters=filters
+                )
+                version_ids = matched if version_ids is None else version_ids & matched
+                if not version_ids:
+                    break
+            filters = replace(
+                filters,
+                contains_all_terms=None,
+                document_version_ids=sorted(version_ids or set()),
+            )
+
         # Everything below ranks and authorizes the whole window (the page the
         # caller asked for plus everything ahead of it) and slices at the end.
         # An offset cannot be pushed into the index: the rows the index skips are

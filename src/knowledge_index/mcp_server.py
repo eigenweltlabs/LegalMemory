@@ -158,7 +158,18 @@ def create_mcp_server(
             "List documents using exact legal metadata filters. This is the ENUMERATION "
             "tool: one row per document version, ordered by date, complete. Use it — not "
             "semantic search — for 'what is in this matter', 'which documents of this "
-            "type', 'how many', and any question whose answer is a set. Each "
+            "type', 'how many', and any question whose answer is a set. "
+            "contains_all_terms=[...] adds an exact-phrase CONTENT filter with the "
+            "same complete-set semantics: only documents whose text contains EVERY "
+            "listed phrase come back, and the phrases may sit in different parts of "
+            "the document. This is the tool for 'every document (or matter) that "
+            "mentions both X and Y' — semantic search RANKS a top-k and can lose a "
+            "rare exact match under commoner ones; this FILTERS the full set and "
+            "pages it, so an absence claim can stand on it. Phrases match through "
+            "the lexical analyzer (inflected forms match; a phrase must be real "
+            "words, not a substring), and it ANDs with every other filter here — "
+            "scope it to a matter, a doc_type or a practice, and group the rows by "
+            "matter_ref for per-matter answers. Each "
             "hit carries the document's metadata (title, doc_type_label, doc_date, "
             "matter_ref, parties with roles, identifiers, version_status, source_paths) "
             "and ids; ask search_in_document for the passage that answers your question, or "
@@ -211,6 +222,7 @@ def create_mcp_server(
         practice_group: str | None = None,
         firm_person: str | None = None,
         lifecycle: str | None = None,
+        contains_all_terms: list[str] | None = None,
         limit: int = 20,
         offset: int = 0,
         headers: dict[str, str] = CurrentHeaders(),
@@ -239,6 +251,7 @@ def create_mcp_server(
                     practice_group=practice_group,
                     firm_person=firm_person,
                     lifecycle=lifecycle,
+                    contains_all_terms=contains_all_terms,
                 )
                 found = retrieval.search_filter_page(
                     principals=principals, filters=filters, limit=limit, offset=offset

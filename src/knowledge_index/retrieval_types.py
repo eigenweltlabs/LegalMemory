@@ -119,6 +119,17 @@ class SearchFilters:
     #   these fields. practice_group matches any group staffed on the matter and
     #   firm_person any of its lawyers, exactly as list_matters does, so a filtered
     #   search and a filtered listing always describe the same set of matters.
+    # contains_all_terms: exact-phrase enumeration filter. A document version
+    #   qualifies only if its text contains EVERY phrase in the list — the phrases
+    #   may sit in different parts of the document (a per-chunk AND would demand
+    #   them in the same chunk, which is not what "the document mentions both"
+    #   means). RetrievalService resolves this into ``document_version_ids``
+    #   before the query reaches the backend; the backend never reads this field.
+    contains_all_terms: list[str] | None = None
+    # document_version_ids: restrict to this set of versions (terms semantics).
+    #   Carries the resolved contains_all_terms intersection; an empty list is a
+    #   real answer — no document contains every phrase — and yields no hits.
+    document_version_ids: list[str] | None = None
     practice_area: str | None = None
     # matter_kind: a Service node id, SUBTREE semantics, resolved to matter_ids the
     #   same way practice_area is. What the firm is DOING, as against what body of
