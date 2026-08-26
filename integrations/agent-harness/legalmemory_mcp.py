@@ -292,10 +292,18 @@ description — read them. The ones that carry most questions:
   established them.
 - list_matter_documents — EVERY document in one matter, complete, not paged.
   The folder view. Call it before deciding a matter lacks something.
-- list_matters — the matter inventory. Each row states what the matter IS
-  (instrument, principal_document, summary), whether it happened
+- list_matters — the matter inventory. Each row states how the firm FILED
+  the matter (instrument, matter_kind and the practice fields are the firm's
+  own classification of the engagement, recorded at intake; summary and
+  principal_document describe it), whether it happened
   (lifecycle: executed | closed | terminated | dormant | in_progress), and
-  who ran it (firm_team, practice_group, practice_groups). Filters:
+  who ran it (firm_team, practice_group, practice_groups). A filing label is
+  one honest description, not an identity: a matter can be filed under one
+  heading while its operative documents constitute something a given
+  question would count differently. What a matter IS is established by its
+  principal documents; a stray mention in some document establishes even
+  less. When membership in an answer turns on what a matter is, documents
+  outrank the filing label, and the label outranks a mention. Filters:
   practice_area, lifecycle, practice_group, firm_person.
 - list_firm_people — this firm's own lawyers: title, practice group, roles,
   matter count. The directory behind the practice_group and firm_person
