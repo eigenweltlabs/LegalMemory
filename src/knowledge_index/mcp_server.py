@@ -847,15 +847,20 @@ def create_mcp_server(
             "but the instrument that would constitute the matter does not exist yet in "
             "any form, not even a draft — a mandate rather than a deal. `in_progress` "
             "means it exists and is being negotiated or closed. `executed` records that "
-            "signed papers exist — the deal happened. It says NOTHING about whether the "
-            "engagement's work continues: most executed matters are finished files, some "
-            "are still live (a closing pending, post-closing work running), and the value "
-            "is the same for both. `closed` marks finished work only where no instrument "
-            "was ever signed. So no lifecycle value separates 'file finished' from 'file "
-            "still active' on a deal matter: when a question turns on whether or WHEN "
-            "work ended, the file's own closing papers — a closing letter, a final "
-            "invoice, a disengagement letter — decide it, and finding those is how "
-            "completed matters are identified. USE THESE TO BUILD THE "
+            "signed papers exist; it says nothing about whether the engagement's work "
+            "continues. THAT is what `engagement` on each row answers — the WORK axis, "
+            "per the SALI LMSS Engagement Service Status vocabulary: status 'open' "
+            "(work product still being produced), 'waiting' (on hold pending an "
+            "external party), 'closed' (the work has ended), 'canceled' (abandoned "
+            "before completion) — with close_date, the deciding filename in evidence, "
+            "and a confidence: 'high' means a closure paper states it in words; lower "
+            "means it was judged from concluding mechanics or silence, and reading the "
+            "evidence file settles it. engagement_status=... filters on it, and "
+            "closed_from/closed_to (ISO dates) window the close_date, so 'which files "
+            "did we finish in a period' is one filtered call plus a read of the "
+            "borderline rows. Rows also carry first_document_date/last_document_date — "
+            "the folder's own dated bounds, no judgment involved — the cheap look at "
+            "whether a matter is recent or long silent. USE THESE TO BUILD THE "
             "CANDIDATE SET AND CHOOSE WHAT TO READ FIRST — NOT TO SETTLE MEMBERSHIP. "
             "`instrument`, `matter_kind`, `practice_area` and the rest are the firm's "
             "FILING LABELS: someone recorded them once, they can be stale, coarse or "
@@ -925,6 +930,9 @@ def create_mcp_server(
         practice_area: str | None = None,
         matter_kind: str | None = None,
         lifecycle: str | None = None,
+        engagement_status: str | None = None,
+        closed_from: str | None = None,
+        closed_to: str | None = None,
         practice_group: str | None = None,
         firm_person: str | None = None,
         include_documents: bool = False,
@@ -943,6 +951,9 @@ def create_mcp_server(
                     practice_area=practice_area,
                     matter_kind=matter_kind,
                     lifecycle=lifecycle,
+                    engagement_status=engagement_status,
+                    closed_from=closed_from,
+                    closed_to=closed_to,
                     practice_group=practice_group,
                     firm_person=firm_person,
                     include_documents=include_documents,

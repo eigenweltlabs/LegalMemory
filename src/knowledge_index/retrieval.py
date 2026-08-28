@@ -13,6 +13,8 @@ from pydantic import Field as PydanticField
 from sqlalchemy import and_, false, func, or_, select
 from sqlalchemy.orm import Session, attributes
 
+from datetime import UTC, datetime
+
 from knowledge_index.config import AppConfig
 from knowledge_index.entity_names import (
     name_similarity,
@@ -968,6 +970,22 @@ class RetrievalService:
         """
         return bool(matter_id) and bool(self.citations_for_matter(matter_id, principals))
 
+    @staticmethod
+    def _parse_close_date(value: str | None) -> datetime | None:
+        """An ISO date string for the closed_from/closed_to window, or None.
+
+        Malformed input is treated as no bound rather than an error: a filter
+        that silently vanishes is visible in the echoed filters, an exception
+        here fails the whole listing.
+        """
+        if not value:
+            return None
+        try:
+            parsed = datetime.fromisoformat(value.strip()[:19])
+        except ValueError:
+            return None
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
     def list_matters(
         self,
         *,
@@ -977,6 +995,9 @@ class RetrievalService:
         practice_area: str | None = None,
         matter_kind: str | None = None,
         lifecycle: str | None = None,
+        engagement_status: str | None = None,
+        closed_from: str | None = None,
+        closed_to: str | None = None,
         practice_group: str | None = None,
         firm_person: str | None = None,
         include_documents: bool = False,
@@ -1006,6 +1027,16 @@ class RetrievalService:
         statement = select(Matter).order_by(Matter.title, Matter.id)
         if lifecycle is not None:
             statement = statement.where(Matter.lifecycle == lifecycle)
+        if engagement_status is not None:
+            statement = statement.where(Matter.engagement_status == engagement_status)
+        # The closed_from/closed_to window filters on when the engagement's work
+        # ended. Matters profiled before this field existed carry NULL and are
+        # excluded by the comparison itself, which is correct: an unknown close
+        # date cannot satisfy a date window.
+        if closed_from is not None and (parsed := self._parse_close_date(closed_from)):
+            statement = statement.where(Matter.engagement_close_date >= parsed)
+        if closed_to is not None and (parsed := self._parse_close_date(closed_to)):
+            statement = statement.where(Matter.engagement_close_date <= parsed)
         if practice_group is not None:
             # Matches ANY group working the matter, not only the owning partner's.
             # A financing staffed by Banking & Finance with Tax and Real Estate
@@ -1204,6 +1235,32 @@ class RetrievalService:
                     # MENTION rather than what the matter is, so a term loan that
                     # merely repays a revolver counts as a revolver.
                     "lifecycle": matter.lifecycle,
+                    # The WORK axis, which lifecycle cannot express: whether the
+                    # firm's own service on this file is running or ended, per
+                    # the SALI LMSS Engagement Service Status vocabulary. Judged
+                    # from the file's closure papers by the matter-level pass;
+                    # the evidence filename and a confidence ride along so the
+                    # claim is checkable from the row.
+                    "engagement": {
+                        "status": matter.engagement_status,
+                        "close_date": matter.engagement_close_date.date().isoformat()
+                        if matter.engagement_close_date
+                        else None,
+                        "confidence": (matter.profile or {}).get(
+                            "engagement_confidence"
+                        ),
+                        "evidence": (matter.profile or {}).get("engagement_evidence"),
+                    },
+                    # Deterministic bounds of the folder's dated documents —
+                    # MIN/MAX of per-document dates, no judgment involved. The
+                    # cheap first look at whether a matter is recent or long
+                    # silent.
+                    "first_document_date": matter.first_document_date.date().isoformat()
+                    if matter.first_document_date
+                    else None,
+                    "last_document_date": matter.last_document_date.date().isoformat()
+                    if matter.last_document_date
+                    else None,
                     # The group that OWNS the matter — the book it is filed in,
                     # which is the group of the partner responsible for it.
                     "practice_group": matter.practice_group,
@@ -1295,6 +1352,9 @@ class RetrievalService:
         practice_area: str | None = None,
         matter_kind: str | None = None,
         lifecycle: str | None = None,
+        engagement_status: str | None = None,
+        closed_from: str | None = None,
+        closed_to: str | None = None,
         practice_group: str | None = None,
         firm_person: str | None = None,
         include_documents: bool = False,
@@ -1314,6 +1374,9 @@ class RetrievalService:
                 practice_area=practice_area,
                 matter_kind=matter_kind,
                 lifecycle=lifecycle,
+                engagement_status=engagement_status,
+                closed_from=closed_from,
+                closed_to=closed_to,
                 practice_group=practice_group,
                 firm_person=firm_person,
                 include_documents=include_documents,

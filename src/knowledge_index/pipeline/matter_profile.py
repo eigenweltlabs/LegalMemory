@@ -39,7 +39,7 @@ import json
 from datetime import UTC, datetime
 
 from pydantic import BaseModel, Field
-from sqlalchemy import delete, select, text
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.orm import Session
 
 from knowledge_index.config import AppConfig
@@ -67,6 +67,21 @@ from knowledge_index.db.models import (
 # sweep at the end of a run profiles everything regardless, so a badly chosen
 # window wastes calls or delays them but cannot leave a matter wrong.
 DEFAULT_DEBOUNCE_SECONDS = 600
+
+
+def _parse_iso_date(value: str | None) -> datetime | None:
+    """A model-provided ISO date, or None when absent or malformed.
+
+    Malformed is treated as absent rather than an error: a bad date must not
+    fail the whole profile, and the evidence filenames still let a human check.
+    """
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip()[:10])
+    except ValueError:
+        return None
+    return parsed.replace(tzinfo=UTC)
 
 
 class VersionFamily(BaseModel):
@@ -131,6 +146,38 @@ class MatterProfile(BaseModel):
         "notice terminating an OLD facility is routine housekeeping inside a "
         "SUCCESSFUL deal, not a dead matter. A matter that was dormant and then "
         "reactivated is in_progress."
+    )
+    engagement_status: str = Field(
+        description="The ENGAGEMENT's own status — is the firm's work on this file "
+        "running or ended — valued as SALI LMSS Engagement Service Status words it: "
+        "'open' (work product is still being produced), 'waiting' (on hold pending "
+        "an external party), 'closed' (the work has ended), 'canceled' (abandoned, "
+        "withdrawn or disengaged before the work completed). This is a DIFFERENT "
+        "question from lifecycle: a matter whose deal signed can be closed here "
+        "(its work ended) or open (post-closing work continues). Judge it from the "
+        "file's own closing papers — a matter-closing letter, a final invoice, a "
+        "disengagement letter decides 'closed' outright: READ that document and "
+        "take its date. Where no such paper exists but the file's concluding "
+        "mechanics are complete and nothing follows them, the work ended with the "
+        "last work product. The ABSENCE of a dedicated closing letter is never "
+        "evidence that work continues.",
+    )
+    engagement_close_date: str | None = Field(
+        default=None,
+        description="ISO date (YYYY-MM-DD) the work ended, for closed/canceled: "
+        "the closure paper's own date, or failing that the date of the final work "
+        "product. null while open/waiting.",
+    )
+    engagement_evidence: str | None = Field(
+        default=None,
+        description="The filename(s) that decided engagement_status, so the claim "
+        "can be checked.",
+    )
+    engagement_confidence: str = Field(
+        default="low",
+        description="'high' when a closure paper says it in words; 'medium' when "
+        "judged from completed concluding mechanics plus nothing after; 'low' when "
+        "judged from silence alone or the folder is ambiguous.",
     )
     instrument: str | None = Field(
         default=None,
@@ -205,6 +252,12 @@ PROFILE_SYSTEM = (
     "from the document that would record the outcome, and remember that a "
     "termination notice or UCC-3 release is usually the ordinary closing mechanics "
     "of a deal that DID happen.\n\n"
+    "Lifecycle and engagement_status answer DIFFERENT questions and are judged "
+    "separately: lifecycle is where the matter's papers stand; engagement_status "
+    "is whether the firm's own work on the file is running or ended. Firms write "
+    "the end of work down — a matter-closing letter, a final invoice, a "
+    "disengagement letter — and where the listing shows such a paper, read it: it "
+    "decides engagement_status and its date whatever the lifecycle is.\n\n"
     "Say WHO THE FIRM ACTS FOR, and say it once. The client is not whoever the "
     "documents are about — on an acquisition the papers are full of the target, on a "
     "co-investment they are full of the fund, on an investor-side review they are the "
@@ -604,6 +657,22 @@ def profile_matter(session: Session, config: AppConfig, matter_id: str) -> Matte
         if resolved := service_scope.resolve(profile.matter_kind_node):
             matter.matter_kind = resolved
     matter.lifecycle = profile.lifecycle
+    matter.engagement_status = (
+        profile.engagement_status
+        if profile.engagement_status in ("open", "waiting", "closed", "canceled")
+        else None
+    )
+    matter.engagement_close_date = _parse_iso_date(profile.engagement_close_date)
+    # Deterministic bounds over the folder's dated documents: pure MIN/MAX of the
+    # per-document doc_date the extraction stages already produced. Recomputed
+    # here so they stay current with the folder without any model involvement.
+    first_doc, last_doc = session.execute(
+        select(func.min(Document.doc_date), func.max(Document.doc_date)).where(
+            Document.matter_id == matter.id
+        )
+    ).one()
+    matter.first_document_date = first_doc
+    matter.last_document_date = last_doc
     apply_client(session, matter, profile)
     apply_team(session, config, matter, profile, groups)
     matter.profile = {
@@ -612,6 +681,10 @@ def profile_matter(session: Session, config: AppConfig, matter_id: str) -> Matte
         "principal_document": profile.principal_document,
         "summary": profile.summary,
         "evidence": profile.evidence,
+        "engagement_evidence": profile.engagement_evidence,
+        "engagement_confidence": profile.engagement_confidence
+        if profile.engagement_confidence in ("high", "medium", "low")
+        else "low",
         "version_families": [f.model_dump() for f in profile.version_families],
         "model": stage.model,
         "prompt_version": stage.producer_version,

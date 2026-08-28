@@ -297,10 +297,14 @@ description — read them. The ones that carry most questions:
   own classification of the engagement, recorded at intake; summary and
   principal_document describe it), whether it happened
   (lifecycle: executed | closed | terminated | dormant | in_progress —
-  'executed' means signed papers exist, not that the work ended; whether a
-  file is finished is decided by its own closing papers, never by a
-  lifecycle value), and
-  who ran it (firm_team, practice_group, practice_groups). A filing label is
+  'executed' means signed papers exist, not that the work ended), and
+  who ran it (firm_team, practice_group, practice_groups). Whether the
+  firm's own WORK on a file is running or ended is the row's `engagement`
+  field (status open | waiting | closed | canceled, with close_date, the
+  deciding filename and a confidence — read the evidence file when the
+  confidence is not high), filterable via engagement_status=... and a
+  closed_from/closed_to date window; rows also carry
+  first/last_document_date, the folder's own dated bounds. A filing label is
   one honest description, not an identity: a matter can be filed under one
   heading while its operative documents constitute something a given
   question would count differently. What a matter IS is established by its

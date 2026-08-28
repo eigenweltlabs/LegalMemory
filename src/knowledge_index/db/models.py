@@ -438,6 +438,22 @@ class Matter(TimestampMixin, Base):
     # without it must read every document of every candidate — which agents did
     # inconsistently, including terminated matters in answers about live deals.
     lifecycle: Mapped[str | None] = mapped_column(String(20))
+    # The ENGAGEMENT's own status, valued per the SALI LMSS "Engagement Service
+    # Status" branch: open | waiting | closed | canceled. This is the WORK axis —
+    # whether the firm's service on this file is running or has ended — which
+    # `lifecycle` cannot express: a matter whose deal signed stays 'executed'
+    # there whether its file wrapped up years ago or closes next month. Judged by
+    # the matter-profile pass from the file's own closure papers; the deciding
+    # filenames and a confidence live in `profile` (engagement_evidence /
+    # engagement_confidence).
+    engagement_status: Mapped[str | None] = mapped_column(String(12), index=True)
+    engagement_close_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Deterministic bounds of the folder's dated documents: MIN/MAX over the
+    # per-document doc_date the extraction stages already produce. Pure
+    # aggregation, no model involvement, recomputed whenever the matter
+    # re-profiles.
+    first_document_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_document_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # The firm's OWN practice book for this matter ("Banking & Finance", "Funds &
     # Asset Management"), distinct from practice_area, which is the area of LAW: a
     # matter whose subject is corporate entity formation can be filed in the funds
