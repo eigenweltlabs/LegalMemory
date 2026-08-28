@@ -296,7 +296,10 @@ description — read them. The ones that carry most questions:
   the matter (instrument, matter_kind and the practice fields are the firm's
   own classification of the engagement, recorded at intake; summary and
   principal_document describe it), whether it happened
-  (lifecycle: executed | closed | terminated | dormant | in_progress), and
+  (lifecycle: executed | closed | terminated | dormant | in_progress —
+  'executed' means signed papers exist, not that the work ended; whether a
+  file is finished is decided by its own closing papers, never by a
+  lifecycle value), and
   who ran it (firm_team, practice_group, practice_groups). A filing label is
   one honest description, not an identity: a matter can be filed under one
   heading while its operative documents constitute something a given
