@@ -565,8 +565,6 @@ def main() -> None:
         result = PipelineRunner(factory, config).run_until_idle(limit=args.limit)
         print(json.dumps(result.__dict__, indent=2))
     elif args.command == "profile-matters":
-        from sqlalchemy import select
-
         from knowledge_index.db.models import Matter
         from knowledge_index.pipeline.matter_profile import due_matters, profile_matter
 
