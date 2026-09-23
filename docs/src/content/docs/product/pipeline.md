@@ -44,18 +44,24 @@ content-addressed; re-running re-reads the bytes but converges on the same hash.
 Reads the fetched blob from the artifact store. Plain-text formats are decoded directly;
 `.eml` / RFC 822 mail is parsed with the standard library (headers, participants,
 Message-ID chain, attachment names); everything else goes to Docling Serve
-(`components.docling_url`) with OCR pinned to `easyocr` for German and English,
-accurate table mode, and a 270-second per-document timeout. `.docx` files additionally
+(`components.docling_url`) with OCR pinned to `easyocr` over the languages in
+`pipeline.ocr_languages` (German and English by default), accurate table mode, and a
+270-second per-document timeout. A deployment whose scans are in another language must
+set that list before its first run: OCR against the wrong model set does not fail, it
+returns confident nonsense, and the stages after it classify, type and embed the
+nonsense without anything looking wrong. `.docx` files additionally
 get a raw-OOXML pass that extracts tracked changes (`w:ins`/`w:del`/moves, with author
 and date) and comments, because the converted text is the accepted view and deleted text
-exists nowhere else. Output is one `Artifact(kind="structured_json")` keyed by content
-hash, containing `text`, `metadata`, and `revisions`.
+exists nowhere else. Output is one `Artifact(kind="structured_json")` per content
+hash and conversion producer version, containing `text`, `metadata`, and `revisions`.
 
 Failure contract: a Docling 4xx, a `partial_success` with errors, or an invalid DOCX
 raises `UnsupportedDocument` and quarantines immediately; a document is never indexed
 half-converted. 5xx and network errors stay retryable. Idempotency: if a
-`structured_json` artifact already exists for the content hash, the stage returns done
-without calling Docling.
+`structured_json` artifact from `docling-serve` already exists for the content hash and
+current conversion producer version, the stage returns done without calling Docling.
+An explicit Parse rerun bumps that version and creates fresh output while preserving
+the earlier artifact in history.
 
 ### Classify (`classify_matter`)
 
@@ -300,6 +306,7 @@ a 409 rather than silently losing them).
 | `pipeline.inline_conversion_budget_seconds` | `KI_PIPELINE__INLINE_CONVERSION_BUDGET_SECONDS` | 90 | Time budget for one relate `open_file` call pulling a neighbour's fetch/convert forward. |
 | `pipeline.inline_conversion_slots` | `KI_PIPELINE__INLINE_CONVERSION_SLOTS` | 4 | Process-wide cap on concurrent inline conversions, so the stage-level Docling concurrency plan keeps meaning. |
 | `pipeline.auto_insert_after_sync` | `KI_PIPELINE__AUTO_INSERT_AFTER_SYNC` | `true` | A sync that brought something new hands off to an insertion run automatically. Off: the sync completes with a null `insertion_run_id` and an operator starts insertion explicitly (e.g. to review a scanned estate before paying for conversion and embedding). |
+| `pipeline.ocr_languages` | `KI_PIPELINE__OCR_LANGUAGES` | `["de", "en"]` | The easyocr model set the convert stage scans with. Entries are stripped, lower-cased and de-duplicated; an empty list is refused, because a silent fallback here would OCR the estate in the wrong language and report success. Keep it short: easyocr loads one model per language and scans with all of them, and it only combines languages sharing a recognition model — a set mixing scripts is rejected by easyocr, arrives as a Docling 4xx and quarantines the document, so verify a new set on one scanned file first. Changing it does not automatically re-convert existing documents. Use "Re-run all files" on the Parse stage to bump its version, regenerate OCR output and requeue downstream stages. Retries and duplicate files reuse the conversion for the current version; earlier output is retained in artifact history. |
 | `pipeline.deletion_confirmations` | `KI_PIPELINE__DELETION_CONFIRMATIONS` | 3 (1–20) | A mass deletion is applied only after this many consecutive scans report the identical missing set; documents stay searchable meanwhile. `1` tombstones on the first scan. |
 | `pipeline.stages.<stage>.enabled` | n/a (per-stage map) | `true` (`gen_evals`: `false`) | A disabled stage parks its rows as `disabled_by_configuration`; later stages run without its output. |
 | `pipeline.stages.<stage>.model` | n/a | `$KI_LLM_MODEL` | The gateway model the stage calls; read by the model-calling stages, assigned on [Models & services](/product/models-and-services/). |

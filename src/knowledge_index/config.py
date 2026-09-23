@@ -143,6 +143,33 @@ class PipelineConfig(BaseModel):
     # tombstones on the first scan that reports it — only for deployments that would
     # rather lose documents from the index than keep deleted ones in it.
     deletion_confirmations: int = Field(default=3, ge=1, le=20)
+    # The OCR model set Docling scans with. This is the deployment's answer to "what
+    # language are the scans in", and it has to be an answer: OCR against the wrong model
+    # set does not fail, it returns confident nonsense, and the pipeline then classifies,
+    # types and embeds that nonsense without anything looking wrong. A jurisdiction whose
+    # scanned filings are neither German nor English must set this before its first run.
+    #
+    # Keep the list short. easyocr loads one model per language and scans with all of
+    # them, so every extra entry costs conversion time on every scanned page — and it
+    # only combines languages that share a recognition model, so a set mixing scripts is
+    # rejected by easyocr, surfaces as a Docling 4xx and quarantines the document. Verify
+    # a new set on one scanned file before starting a full run.
+    #
+    # Changing this does not automatically re-convert existing documents. Use "Re-run
+    # all files" on the Parse stage to bump its version and regenerate OCR output;
+    # retries and duplicate files still reuse the conversion for the current version.
+    ocr_languages: list[str] = Field(default_factory=lambda: ["de", "en"], min_length=1)
+
+    @field_validator("ocr_languages")
+    @classmethod
+    def normalize_ocr_languages(cls, value: list[str]) -> list[str]:
+        languages = [entry.strip().casefold() for entry in value]
+        if any(not entry for entry in languages):
+            raise ValueError("ocr_languages must not contain empty entries")
+        deduplicated = list(dict.fromkeys(languages))
+        if not deduplicated:
+            raise ValueError("ocr_languages must name at least one language")
+        return deduplicated
 
     @model_validator(mode="after")
     def include_every_stage(self) -> "PipelineConfig":

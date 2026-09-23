@@ -714,7 +714,17 @@ class PipelineRunner:
 
     def _convert(self, session: Session, state: ProcessingState) -> StageResult:
         source_object = _source_object_with_hash(session, state)
-        existing = _artifact(session, source_object.content_hash, "structured_json")
+        producer_version = self.config.pipeline.stage("convert").producer_version
+        # Explicit reruns bump this version. Reusing an artifact from an older version
+        # would mark the rerun done without applying the operator's new OCR settings.
+        existing = session.scalar(
+            select(Artifact).where(
+                Artifact.content_hash == source_object.content_hash,
+                Artifact.producer == "docling-serve",
+                Artifact.producer_version == producer_version,
+                Artifact.kind == "structured_json",
+            )
+        )
         if existing is not None:
             return StageResult()
         blob = session.get(Blob, source_object.content_hash)
@@ -730,7 +740,7 @@ class PipelineRunner:
             Artifact(
                 content_hash=source_object.content_hash,
                 producer="docling-serve",
-                producer_version=self.config.pipeline.stage("convert").producer_version,
+                producer_version=producer_version,
                 kind="structured_json",
                 payload=converted.as_payload(),
             )

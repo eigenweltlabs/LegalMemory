@@ -63,10 +63,10 @@ def _convert_docling(
         "do_ocr": "true",
         "force_ocr": "false",
         # ocr_engine must be pinned: the "auto" default routes to RapidOCR whose
-        # constructor ignores ocr_lang entirely — German scans would be OCR'd with
-        # the wrong model set while reporting success.
+        # constructor ignores ocr_lang entirely — scans would be OCR'd with the wrong
+        # model set while reporting success.
         "ocr_engine": "easyocr",
-        "ocr_lang": ["de", "en"],
+        "ocr_lang": list(config.pipeline.ocr_languages),
         "table_mode": "accurate",
         "abort_on_error": "false",
         "document_timeout": "270",
