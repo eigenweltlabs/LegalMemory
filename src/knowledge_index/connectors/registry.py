@@ -136,6 +136,28 @@ CATALOG: tuple[ConnectorSpec, ...] = (
         ),
     ),
     ConnectorSpec(
+        short_name="imanage",
+        label="iManage Work",
+        category="Legal DMS",
+        module=f"{SOURCES}.imanage",
+        class_name="IManageSource",
+        mirrors_acls=True,
+        incremental=True,
+        supports_scoping=True,
+        oauth_provider="imanage",
+        notes=(
+            "Indexes the workspaces the authorizing account can open — a matter walled "
+            "away from that account is never fetched. Mirrors workspace, folder and "
+            "document security, honouring iManage's own statement of whether an object "
+            "inherits: an inheriting document takes its container's audience, an "
+            "overriding one is read on its own, and an override that cannot be read "
+            "stays fail-closed rather than inheriting. no_access is treated as the "
+            "wall it is. Groups are expanded to their members. Incremental via a "
+            "per-library edited-since search plus a workspace-security diff, because "
+            "re-securing a matter moves no document timestamp."
+        ),
+    ),
+    ConnectorSpec(
         short_name="teams",
         label="Microsoft Teams",
         category="Messaging",
@@ -370,15 +392,6 @@ class PlannedConnector:
 
 
 PLANNED: tuple[PlannedConnector, ...] = (
-    PlannedConnector(
-        short_name="imanage",
-        label="iManage Work",
-        category="Legal DMS",
-        notes=(
-            "The dominant large-firm legal DMS. Planned: workspace and matter-file "
-            "sync with mirrored folder and document security."
-        ),
-    ),
     PlannedConnector(
         short_name="netdocuments",
         label="NetDocuments",

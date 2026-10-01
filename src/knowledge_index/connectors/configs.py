@@ -73,6 +73,64 @@ class ClioConfig(SourceConfig):
     )
 
 
+class IManageConfig(SourceConfig):
+    """iManage Work configuration schema."""
+
+    api_base_url: str = Field(
+        default="https://cloudimanage.com",
+        title="iManage host",
+        description=(
+            "The firm's iManage Work host. iManage Cloud tenants use "
+            "https://cloudimanage.com; a firm on its own infrastructure or in a "
+            "regional cloud has its own hostname. No trailing path — the connector "
+            "appends /work/api/v2 itself."
+        ),
+    )
+
+    @field_validator("api_base_url")
+    @classmethod
+    def validate_api_base_url_ssrf(cls, v: str) -> str:
+        """Validate the host for SSRF safety."""
+        validate_url(v.strip())
+        return v.strip().rstrip("/")
+
+    customer_id: str = Field(
+        default="",
+        title="Customer ID",
+        description=(
+            "The firm's iManage customer id, which every API path is scoped by. Leave "
+            "blank to read it from the authorizing account at connect time; set it "
+            "only where that lookup is not available."
+        ),
+    )
+
+    mirror_permissions: bool = Field(
+        default=True,
+        title="Mirror iManage Security",
+        description=(
+            "Mirror workspace, folder and document security so content is retrievable "
+            "only by the users and groups that hold read access in iManage, with "
+            "groups expanded to their members. When false, access is left unknown and "
+            "nothing is retrievable until an administrator grants it at the project "
+            "level."
+        ),
+    )
+
+    read_document_security: bool = Field(
+        default=True,
+        title="Read per-document security where it differs",
+        description=(
+            "iManage states on each document whether it inherits its container's "
+            "security or overrides it. When a document overrides, this reads that "
+            "document's own access list — one extra API call for that document only, "
+            "not for the whole estate. Turning this off makes an overriding document "
+            "fail-closed instead, which is safe but hides it; it never falls back to "
+            "the container, because an override usually exists in order to be "
+            "narrower."
+        ),
+    )
+
+
 class ConfluenceConfig(SourceConfig):
     """Confluence configuration schema."""
 

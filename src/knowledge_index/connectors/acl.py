@@ -268,6 +268,93 @@ def box_collaborations_to_access(entries: list[dict[str, Any]] | None) -> Access
     return AccessControl(viewers=sorted(set(viewers)), is_public=False)
 
 
+# ----------------------------------------------------------------------- iManage Work
+
+# iManage access levels that confer read. ``no_access`` is the explicit denial an
+# ethical wall is built from and must never be read as a grant; anything unrecognised
+# is treated the same way, because guessing permissively is what publishes a walled
+# matter.
+IMANAGE_READ_LEVELS = frozenset({"read", "read_write", "full_access", "change_security"})
+
+# iManage's ``default_security`` on a document, folder or workspace. ``inherit`` means
+# the object genuinely takes its container's access, which is the one case where
+# inheritance is the source's own answer rather than this connector's guess.
+IMANAGE_INHERIT = "inherit"
+IMANAGE_PUBLIC = "public"
+
+
+def imanage_trustee_principal(entry: dict[str, Any]) -> str | None:
+    """Resolve one iManage ACL entry to a principal.
+
+    A user entry carries an iManage login id rather than an address, and nobody
+    authenticates to this appliance as ``JSCHMIDT``. An email-shaped value is preferred
+    where the payload has one; otherwise the id is emitted in the ``user:id:`` namespace
+    that :mod:`knowledge_index.connectors.principals` reconciles, the same fallback
+    Graph uses for a directory GUID.
+    """
+    kind = _clean(entry.get("type"))
+    identifier = _clean(entry.get("id"))
+    if kind == "group":
+        return f"group:imanage:{identifier}" if identifier else None
+    if kind != "user":
+        return None
+    for key in ("email", "name", "id"):
+        value = _clean(entry.get(key))
+        if value and "@" in value:
+            return f"user:{value}"
+    return f"user:id:{identifier}" if identifier else None
+
+
+def imanage_security_to_access(
+    security: dict[str, Any] | None,
+    *,
+    container_access: AccessControl | None = None,
+) -> AccessControl | None:
+    """Translate an iManage ``default_security`` plus ``acl`` payload.
+
+    Three cases, and the distinction between them is the source's own, not a heuristic:
+
+    ``inherit``  the object takes its container's access. This is the one inheritance
+                 iManage actually asserts, so it is honoured — passing the container's
+                 mirrored access straight through. ``None`` container access stays
+                 ``None``: unknown does not become inherited.
+    ``public``   readable by everyone in the library, which on this single-firm
+                 appliance is every authenticated user.
+    otherwise    the ACL is the answer, filtered to the levels that confer read.
+
+    Returns ``None`` when no payload could be read at all, keeping the object
+    fail-closed rather than asserting that nobody may see it.
+    """
+    if security is None:
+        return None
+    default_security = _clean(security.get("default_security"))
+    entries = security.get("acl")
+
+    if default_security == IMANAGE_INHERIT and not entries:
+        return container_access
+
+    viewers: list[str] = []
+    for entry in entries or []:
+        if _clean(entry.get("access_level")) not in IMANAGE_READ_LEVELS:
+            continue
+        principal = imanage_trustee_principal(entry)
+        if principal:
+            viewers.append(principal)
+
+    if default_security == IMANAGE_PUBLIC:
+        # Library-wide inside the firm's own tenant: everyone who can authenticate
+        # here. Named trustees are kept alongside so a later narrowing of the default
+        # does not silently drop them.
+        return AccessControl(viewers=sorted(set(viewers)), is_public=True)
+
+    if not viewers and default_security == IMANAGE_INHERIT:
+        return container_access
+    if not viewers and not default_security:
+        # Neither a default nor a usable ACL: nothing was actually read.
+        return None
+    return AccessControl(viewers=sorted(set(viewers)), is_public=False)
+
+
 # ------------------------------------------------------------------------- Confluence
 
 
