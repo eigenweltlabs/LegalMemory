@@ -20,6 +20,9 @@
 	}
 }
 
+# Additional hosted demos keep their site blocks outside the deploy bundle.
+import /etc/caddy/sites/*.caddy
+
 {$DEMO_DOMAIN} {
 	encode zstd gzip
 

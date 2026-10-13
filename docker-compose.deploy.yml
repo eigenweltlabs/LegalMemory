@@ -38,9 +38,13 @@ services:
       ACME_EMAIL: ${ACME_EMAIL:?set ACME_EMAIL for certificate notices}
     volumes:
       - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./deploy/shared-sites:/etc/caddy/sites:ro
       - docs_dist:/srv/docs:ro
       - caddy_data:/data
       - caddy_config:/config
+    networks:
+      - default
+      - demo-edge
     depends_on:
       demo:
         condition: service_healthy
@@ -121,3 +125,8 @@ volumes:
   caddy_data:
   caddy_config:
   opensearch_snapshots:
+
+networks:
+  demo-edge:
+    name: demo-edge
+    external: true

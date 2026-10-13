@@ -159,6 +159,8 @@ jobs:
             # it here, but Compose creates a root-owned directory if it is
             # missing and that is a surprise waiting for the next person.
             mkdir -p testdata
+            mkdir -p deploy/shared-sites
+            sudo docker network inspect demo-edge >/dev/null 2>&1 || sudo docker network create demo-edge
 
             TOKEN=\$(curl -sf -H 'Metadata-Flavor: Google' \
               'http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token' \
