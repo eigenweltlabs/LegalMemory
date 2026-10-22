@@ -38,6 +38,8 @@ jobs:
       # Pinned rather than taken from pyproject's `ruff>=0.4`. An unpinned linter turns
       # unrelated pull requests red the day it ships a new rule, and a red build nobody
       # caused is a red build everybody learns to ignore. Raise this deliberately.
+      - name: Bootstrap pinned pip and installer CA trust
+        run: python -I deploy/python/bootstrap.py
       - run: pip install ruff==0.16.1
       # Whole repository, no per-path carve-outs. See .github/workflows/README.md for the
       # findings that exist on main today — they are real and they have to be fixed, not
@@ -79,6 +81,8 @@ jobs:
           cache-dependency-path: pyproject.toml
       # pg_dump 17 and restic. The backup suite shells out to both.
       - run: scripts/ci-postgres-client.sh
+      - name: Bootstrap pinned pip and installer CA trust
+        run: python -I deploy/python/bootstrap.py
       - run: pip install -e ".[dev]"
       # pyproject's addopts already excludes the integration marker, so this is the fast
       # suite by construction. -ra rather than -rs: a bare -rs *replaces* pytest's default
@@ -184,6 +188,8 @@ jobs:
       # pg_dump 17 to reach Hatchet's Postgres 17, and pg_restore because the round-trip
       # lists and restores the staged archives here on the runner.
       - run: scripts/ci-postgres-client.sh
+      - name: Bootstrap pinned pip and installer CA trust
+        run: python -I deploy/python/bootstrap.py
       - run: pip install -e ".[dev]"
 
       # docker-compose.yml aborts on twelve `${VAR:?}` variables before it starts anything.

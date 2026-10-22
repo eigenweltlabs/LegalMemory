@@ -86,14 +86,16 @@ jobs:
       - name: Build and push patched LiteLLM runtime
         uses: docker/build-push-action@v6
         with:
-          context: ./deploy/litellm
+          context: .
+          file: deploy/litellm/Dockerfile
           push: true
           tags: ${{ env.REGISTRY }}/litellm:${{ github.sha }}
 
       - name: Build and push patched Docling trust bundle
         uses: docker/build-push-action@v6
         with:
-          context: ./deploy/docling
+          context: .
+          file: deploy/docling/Dockerfile
           push: true
           tags: ${{ env.REGISTRY }}/docling:${{ github.sha }}
 

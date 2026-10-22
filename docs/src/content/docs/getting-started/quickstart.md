@@ -51,7 +51,9 @@ Optional but worth knowing on day one:
 ## 2. Bring the stack up
 
 ```bash
-python3 -m venv .venv && .venv/bin/pip install -e '.[dev]'   # the `ki` CLI
+python3 -m venv --without-pip .venv
+.venv/bin/python -I deploy/python/bootstrap.py
+.venv/bin/pip install -e '.[dev]'   # the `ki` CLI
 docker compose up -d --build
 bash scripts/bootstrap-hatchet.sh   # one-time: mints the orchestrator worker
                                     # token, writes it to .env, restarts app+worker

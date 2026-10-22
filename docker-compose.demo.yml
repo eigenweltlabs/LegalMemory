@@ -108,7 +108,10 @@ services:
     restart: unless-stopped
 
   litellm:
-    image: ghcr.io/berriai/litellm:v1.85.1
+    image: legalmemory-litellm:pip-ca-20261022
+    build:
+      context: .
+      dockerfile: deploy/litellm/Dockerfile
     command: ["--config", "/app/config.yaml", "--port", "4000"]
     environment:
       LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-sk-lm-demo-only}
@@ -212,7 +215,10 @@ services:
   # already has them never starts it.
   docling:
     profiles: ["ingest"]
-    image: quay.io/docling-project/docling-serve:v1.18.0
+    image: legalmemory-docling:pip-ca-20261022
+    build:
+      context: .
+      dockerfile: deploy/docling/Dockerfile
     environment:
       DOCLING_SERVE_ENABLE_UI: "false"
       # Must exceed the client timeout: sync convert gives up server-side after

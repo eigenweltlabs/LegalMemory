@@ -376,7 +376,10 @@ services:
     restart: unless-stopped
 
   litellm:
-    image: ghcr.io/berriai/litellm:v1.85.1
+    image: legalmemory-litellm:pip-ca-20261022
+    build:
+      context: .
+      dockerfile: deploy/litellm/Dockerfile
     # A single proxy process saturates one core (~106% CPU) at fleet-run rates
     # and paces the whole extract/index tail — scale workers with the host.
     command: ["--config", "/app/config.yaml", "--port", "4000", "--num_workers", "${KI_LITELLM_WORKERS:-1}"]
@@ -464,7 +467,10 @@ services:
     restart: unless-stopped
 
   docling:
-    image: quay.io/docling-project/docling-serve:v1.18.0
+    image: legalmemory-docling:pip-ca-20261022
+    build:
+      context: .
+      dockerfile: deploy/docling/Dockerfile
     environment:
       DOCLING_SERVE_ENABLE_UI: "true"
       # sync convert gives up server-side after MAX_SYNC_WAIT while the task keeps
