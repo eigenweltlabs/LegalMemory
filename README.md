@@ -130,7 +130,9 @@ the retrieval step directly).
 
 ```bash
 cp .env.example .env    # fill in the required values — see the docs Quick start
-python3 -m venv .venv && .venv/bin/pip install -e '.[dev]'
+python3 -m venv --without-pip .venv
+.venv/bin/python -I deploy/python/bootstrap.py
+.venv/bin/pip install -e '.[dev]'
 docker compose up -d --build
 bash scripts/bootstrap-hatchet.sh
 docker compose exec app ki add-source /path/to/documents --name "First estate"

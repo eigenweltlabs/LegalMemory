@@ -27,14 +27,16 @@
 
 services:
   docling:
-    image: ${DOCLING_IMAGE:-legalmemory-docling:1.18.0-security-20261022}
+    image: ${DOCLING_IMAGE:-legalmemory-docling:pip-ca-20261022}
     build:
-      context: deploy/docling
+      context: .
+      dockerfile: deploy/docling/Dockerfile
 
   litellm:
-    image: ${LITELLM_IMAGE:-legalmemory-litellm:security-20261022}
+    image: ${LITELLM_IMAGE:-legalmemory-litellm:pip-ca-20261022}
     build:
-      context: deploy/litellm
+      context: .
+      dockerfile: deploy/litellm/Dockerfile
 
   # --------------------------------------------------------------------- edge
   caddy:
