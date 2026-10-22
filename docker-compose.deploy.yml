@@ -26,9 +26,21 @@
 #   → a 32 GB host with 200 GB of SSD, comfortably.
 
 services:
+  docling:
+    image: ${DOCLING_IMAGE:-legalmemory-docling:1.18.0-security-20261022}
+    build:
+      context: deploy/docling
+
+  litellm:
+    image: ${LITELLM_IMAGE:-legalmemory-litellm:security-20261022}
+    build:
+      context: deploy/litellm
+
   # --------------------------------------------------------------------- edge
   caddy:
-    image: caddy:2.10-alpine
+    image: ${CADDY_IMAGE:-legalmemory-caddy:2.11.7-go1.27.3}
+    build:
+      context: deploy/caddy
     restart: unless-stopped
     ports:
       - "80:80"

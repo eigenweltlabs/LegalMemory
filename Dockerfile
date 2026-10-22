@@ -1,4 +1,4 @@
-FROM node:24-alpine AS ui
+FROM node:24.22.1-alpine AS ui
 
 WORKDIR /build
 COPY ui ./ui
@@ -12,6 +12,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1
 
 WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+    && sed -i 's|^mozilla/emSign_ECC_Root_CA_-_G3.crt$|!mozilla/emSign_ECC_Root_CA_-_G3.crt|' /etc/ca-certificates.conf \
+    && update-ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 
 # pg_dump / pg_restore for the backup feature. Pinned to 17 from the PostgreSQL project's
 # own repository rather than taken from Debian: pg_dump refuses to dump a server newer
