@@ -5,6 +5,7 @@ description = "On-prem shadow index for law firm knowledge: sync, insertion pipe
 requires-python = ">=3.11"
 license = { text = "AGPL-3.0-only" }
 dependencies = [
+    "certifi>=2026.10.19",
     "fastapi>=0.115",
     # 3.x, not 2.x: the server imports fastmcp.dependencies.CurrentHeaders, which does
     # not exist before 3.0, so a resolver honouring an older floor installs a version

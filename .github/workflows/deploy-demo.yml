@@ -76,6 +76,27 @@ jobs:
           cache-from: type=gha,scope=demo
           cache-to: type=gha,mode=max,scope=demo
 
+      - name: Build and push patched Caddy
+        uses: docker/build-push-action@v6
+        with:
+          context: ./deploy/caddy
+          push: true
+          tags: ${{ env.REGISTRY }}/caddy:${{ github.sha }}
+
+      - name: Build and push patched LiteLLM runtime
+        uses: docker/build-push-action@v6
+        with:
+          context: ./deploy/litellm
+          push: true
+          tags: ${{ env.REGISTRY }}/litellm:${{ github.sha }}
+
+      - name: Build and push patched Docling trust bundle
+        uses: docker/build-push-action@v6
+        with:
+          context: ./deploy/docling
+          push: true
+          tags: ${{ env.REGISTRY }}/docling:${{ github.sha }}
+
       # The docs are static. Built here so a broken docs build fails the
       # workflow rather than the deployment, and shipped as a tarball because
       # the edge serves files, not a container.
@@ -116,7 +137,7 @@ jobs:
         run: |
           tar czf bundle.tgz \
             docker-compose.demo.yml docker-compose.deploy.yml \
-            deploy/Caddyfile deploy/postgres deploy/litellm
+            deploy/Caddyfile deploy/caddy deploy/docling deploy/postgres deploy/litellm
           gcloud compute scp bundle.tgz docs-dist.tgz \
             "${GCE_INSTANCE}:~/" --zone "${GCE_ZONE}" --tunnel-through-iap --quiet
 
@@ -176,16 +197,19 @@ jobs:
             # No backticks anywhere in this block either: it is a double-quoted
             # string, so they would be command substitution on the runner,
             # comment or not.
-            grep -v '^APP_IMAGE=\|^DEMO_IMAGE=' ~/.env.demo > .env.run
+            grep -v '^APP_IMAGE=\|^DEMO_IMAGE=\|^CADDY_IMAGE=\|^LITELLM_IMAGE=\|^DOCLING_IMAGE=' ~/.env.demo > .env.run
             echo 'APP_IMAGE=${REGISTRY}/app:${{ github.sha }}'   >> .env.run
             echo 'DEMO_IMAGE=${REGISTRY}/demo:${{ github.sha }}' >> .env.run
+            echo 'CADDY_IMAGE=${REGISTRY}/caddy:${{ github.sha }}' >> .env.run
+            echo 'LITELLM_IMAGE=${REGISTRY}/litellm:${{ github.sha }}' >> .env.run
+            echo 'DOCLING_IMAGE=${REGISTRY}/docling:${{ github.sha }}' >> .env.run
             chmod 600 .env.run
 
             # sudo, not group membership: adding the login user to 'docker'
             # only takes effect on the next session, which a one-shot CI ssh
             # never gets. Every GCE login has passwordless sudo.
             COMPOSE='sudo docker compose -f docker-compose.demo.yml -f docker-compose.deploy.yml --env-file .env.run'
-            \$COMPOSE pull --quiet app demo
+            \$COMPOSE pull --quiet app demo caddy litellm
             \$COMPOSE up -d --no-build postgres opensearch litellm
             \$COMPOSE up -d --no-build app demo
 

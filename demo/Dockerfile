@@ -9,7 +9,7 @@
 # which drags in optional packages a lockfile generated on any other platform
 # does not carry — and `npm ci` refuses a lockfile that does not match. glibc
 # has native prebuilds for every architecture this is likely to run on.
-FROM node:24-slim AS deps
+FROM node:24.22.1-slim AS deps
 WORKDIR /app
 COPY package.json package-lock.json ./
 # `npm ci` first, because a demo that resolved a different dependency tree than
@@ -20,14 +20,14 @@ COPY package.json package-lock.json ./
 # rather than skipping a package it will not use. `npm install` resolves them.
 RUN npm ci --no-audit --no-fund || npm install --no-audit --no-fund
 
-FROM node:24-slim AS build
+FROM node:24.22.1-slim AS build
 WORKDIR /app
 ENV NEXT_TELEMETRY_DISABLED=1
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 RUN npm run build
 
-FROM node:24-slim AS runtime
+FROM node:24.22.1-slim AS runtime
 WORKDIR /app
 ENV NODE_ENV=production \
     NEXT_TELEMETRY_DISABLED=1 \

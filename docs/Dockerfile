@@ -5,7 +5,7 @@
 # rather than on the server means the deploy step moves a finished artifact and
 # a broken docs build fails in CI instead of halfway through a release.
 
-FROM node:24-slim AS build
+FROM node:24.22.1-slim AS build
 WORKDIR /docs
 
 # Baked at build time, not runtime: Astro writes the prefix into every generated

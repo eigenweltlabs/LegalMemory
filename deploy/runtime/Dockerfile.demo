@@ -1,0 +1,6 @@
+ARG DEMO_BASE_IMAGE
+FROM node:24.22.1-slim AS node
+FROM ${DEMO_BASE_IMAGE}
+COPY --from=node /usr/local/bin/node /usr/local/bin/node
+ENV NODE_VERSION=24.22.1
+RUN node --version
